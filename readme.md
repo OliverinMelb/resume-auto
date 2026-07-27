@@ -42,6 +42,99 @@
 - 连续多轮没有新岗位时自动切换关键词继续挂机
 - 遇到超时、详情异常、打招呼异常时自动恢复
 
+## Resume Agent P0：调研 Prompt 与投递统计
+
+P0 以独立子路由 `/resume-agent/v1` 挂载在现有 FastAPI 中，不改变原来的：
+
+- `/get-job-score`
+- `/log-action`
+- 规则评分
+- 固定 `resumeIndex`
+- `web_script.js`
+
+P0 明确不生成、不修改简历，也不会调用任何大模型。它只完成：
+
+- 保存候选人和原始简历文本；
+- 同一候选人可保存多份历史简历；
+- 从现有 `job_decisions.jsonl` 自动导入并去重合格 JD；
+- 对 JD 做确定性关键词统计；
+- 保存人工核验的调研结论；
+- 生成多简历候选人画像 Prompt；
+- 生成可复制给其他模型的简历修改 Prompt；
+- 统计合格 JD 的月薪、年薪和 P25/P50/P75 区间；
+- Prompt 强制要求外部模型不得编造经历，并要求逐条标注事实和 JD 来源；
+- 读取现有 `job_actions.jsonl` 统计岗位评估、打招呼、回复信号和简历发送；
+- 手工补录投递、招聘方回复、面试、拒绝、Offer 和主动撤回事件。
+
+面试内容、面试反馈记忆、自动简历改写、简历版本审批和模型 Token 统计不在本 P0 范围内。
+
+### P0 数据文件
+
+默认使用仓库根目录下的：
+
+```text
+resume_agent.db
+```
+
+该文件及 SQLite WAL 文件已被 Git 忽略。可以通过环境变量改到其他位置：
+
+```env
+RESUME_AGENT_DB_PATH=
+RESUME_AGENT_ACTION_LOG_PATH=
+RESUME_AGENT_DECISION_LOG_PATH=
+RESUME_AGENT_ALLOW_REMOTE=false
+```
+
+配置示例见 `resume_agent.env.example`。P0 没有 API Key 配置，也不会发起模型网络请求。虽然原服务仍保持现有监听方式，但新的 Resume Agent 子路由默认只接受本机请求；只有明确设置 `RESUME_AGENT_ALLOW_REMOTE=true` 才允许远程访问。
+
+### P0 最小使用流程
+
+1. `POST /resume-agent/v1/candidates` 创建候选人；
+2. 多次调用 `POST /resume-agent/v1/candidates/{candidate_id}/source-resumes` 保存历史简历；
+3. `POST /resume-agent/v1/prompts/candidate-profile` 生成多简历候选人画像 Prompt；
+4. 正常运行 Boss 脚本，让 `/get-job-score` 继续记录岗位判断；
+5. `POST /resume-agent/v1/imports/job-decisions` 从现有日志导入合格 JD；
+6. `GET /resume-agent/v1/market-report` 查看岗位要求和薪资分布；
+7. 使用导入结果的 `job_id` 调用 `POST /resume-agent/v1/research-reports`；
+8. `POST /resume-agent/v1/prompts/resume-rewrite` 获取可复制的改简历 Prompt；
+9. `GET /resume-agent/v1/delivery-stats` 查看投递漏斗；
+10. `POST /resume-agent/v1/delivery-events` 补录面试、拒绝或 Offer 等结果。
+
+`candidate-profile` 和 `resume-rewrite` 都只返回 Prompt，不调用模型，也不生成或保存修改后的简历。`resume-rewrite` 支持通过 `source_resume_ids` 同时选择多份历史简历。
+
+### JD逆向调研与薪资口径
+
+新版浏览器请求只额外携带当前 `searchKeyword`，不改变原有评分请求体、分数、阈值和投递动作。后端的 `job_decisions.jsonl` 额外记录：
+
+- `jobFingerprint`
+- `searchKeyword`
+- `threshold`
+- `qualified`
+
+导入接口会：
+
+- 兼容没有以上新字段的历史日志；
+- 使用历史分数和指定阈值判断旧记录是否合格；
+- 解析 `rawJob` 中的标题、薪资和 JD；
+- 使用完整 JD 内容哈希去重；
+- 默认只导入合格岗位。
+
+市场报告对 `20-30K`、`20-30K·13薪`、`30-50万/年` 等可识别格式做确定性统计，并输出样本数、P25、P50、P75和按搜索关键词分组的数据。该结果是当前搜索条件下的可见样本估计，不是模型承诺或最终 Offer 预测。
+
+服务启动后可通过 FastAPI 的 `/docs` 查看完整请求结构。
+
+### 投递统计口径
+
+现有浏览器日志可以自动提供：
+
+- 已评估岗位事件数；
+- 规则拒绝和跳过事件数；
+- 打招呼排队、成功和失败事件数；
+- 发送简历事件数；
+- 根据“收到新消息后发送简历”推断的招聘方回复信号。
+
+历史日志没有候选人 ID 和稳定的 Boss 岗位 ID，因此这些数字是事件数，不保证等于去重后的岗位数。面试、拒绝和 Offer 需要通过新接口手工补录。
+
 ## 演示视频
 
 - B 站演示视频：https://www.bilibili.com/video/BV1MyX6BFEp3

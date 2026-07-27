@@ -1,5 +1,6 @@
 from datetime import datetime
 import asyncio
+import hashlib
 import random
 import json
 from pathlib import Path
@@ -10,18 +11,31 @@ from config import Config
 
 
 app = FastAPI()
+if hasattr(app, 'include_router'):
+    from resume_agent import router as resume_agent_router
+    app.include_router(resume_agent_router)
 LOG_PATH = Path(__file__).resolve().parent / 'job_decisions.jsonl'
 ACTION_LOG_PATH = Path(__file__).resolve().parent / 'job_actions.jsonl'
 
 
-def append_job_decision_log(result: dict, raw_job: str, delay_ms: int):
+def append_job_decision_log(
+    result: dict,
+    raw_job: str,
+    delay_ms: int,
+    search_keyword: str | None = None,
+):
+    threshold = Config.frontend.get('thread', 50)
     log_record = {
         'loggedAt': datetime.now().isoformat(timespec='seconds'),
+        'jobFingerprint': hashlib.sha256(raw_job.strip().encode('utf-8')).hexdigest(),
+        'searchKeyword': search_keyword,
         'title': result.get('title'),
         'detail': result.get('detail'),
         'matchedField': result.get('matched_field'),
         'keyword': result.get('keyword'),
         'score': result.get('score'),
+        'threshold': threshold,
+        'qualified': result.get('score', 0) >= threshold,
         'introduce': result.get('introduce'),
         'resumeIndex': result.get('resumeIndex'),
         'titleScore': result.get('title_score'),
@@ -66,7 +80,10 @@ async def get_client_config():
 
 
 @app.post("/get-job-score", summary="获取职位匹配度")
-async def get_job_score(job: str = Body(..., description="职位信息")):
+async def get_job_score(
+    job: str = Body(..., description="职位信息"),
+    searchKeyword: str | None = None,
+):
     result = evaluateSingleRouteDelivery(job)
     delay_ms = max(0, Config.job_score_delay_base_ms + random.randint(
         -Config.job_score_delay_jitter_ms,
@@ -96,7 +113,7 @@ async def get_job_score(job: str = Body(..., description="职位信息")):
         f"reason={result['reason']}",
         flush=True
     )
-    append_job_decision_log(result, job, delay_ms)
+    append_job_decision_log(result, job, delay_ms, search_keyword=searchKeyword)
     await asyncio.sleep(delay_ms / 1000)
     return {
         'score': result['score'],

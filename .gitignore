@@ -9,3 +9,9 @@ server.out.log
 server.err.log
 goodjobs.zip
 PROJECT_MEMORY.md
+job_decisions.jsonl
+job_actions.jsonl
+resume_agent.db
+resume_agent.db-shm
+resume_agent.db-wal
+resume-agent-exports/

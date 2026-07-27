@@ -471,10 +471,13 @@
          * @param {string} salary 薪资范围
          * @param {string} detail 职位描述
          */
-        getJobScore(title, salary, detail) {
+        getJobScore(title, salary, detail, searchKeyword = '') {
             const data = `# 职位名称\n${title}\n\n# 薪资范围\n${salary}\n\n# 职位描述\n${detail}`;
+            const query = searchKeyword
+                ? `?searchKeyword=${encodeURIComponent(searchKeyword)}`
+                : '';
             return new Promise((resolve, reject) => {
-                this.__http('/get-job-score', 'POST', JSON.stringify(data)).then(resolve).catch(reject);
+                this.__http(`/get-job-score${query}`, 'POST', JSON.stringify(data)).then(resolve).catch(reject);
             });
         }
 
@@ -1058,7 +1061,12 @@
                     }
                     // 否则发送消息计算匹配度
                     logger.add(`开始计算职位 [${jobInfo.title}] 的匹配度`);
-                    const decision = await api.getJobScore(jobInfo.title, jobInfo.salary, jobInfo.detail);
+                    const decision = await api.getJobScore(
+                        jobInfo.title,
+                        jobInfo.salary,
+                        jobInfo.detail,
+                        currentKeyword
+                    );
                     logger.add(`匹配度: ${decision.score} | 简历索引: ${decision.resumeIndex}`);
                     await logAction({
                         action: 'job_decision_consumed',
