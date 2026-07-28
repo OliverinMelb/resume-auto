@@ -232,6 +232,79 @@ class ResumeAgentP0Tests(unittest.TestCase):
             report["observed_annual_midpoint_cny"]["median"], 325000
         )
 
+    def test_research_collection_deduplicates_within_project(self):
+        candidate = self._candidate()
+        payload = {
+            "candidate_id": candidate["id"],
+            "external_job_id": "https://www.zhipin.com/job_detail/example.html?track=1",
+            "title": "AI应用工程师",
+            "salary": "20-30K·13薪",
+            "detail": "负责 Python、智能体和工作流开发。",
+            "company": "示例公司",
+            "search_keyword": "AI应用工程师",
+        }
+
+        first = self.service.collect_research_job(payload)
+        second = self.service.collect_research_job(
+            {
+                **payload,
+                "external_job_id": (
+                    "https://www.zhipin.com/job_detail/example.html?track=2"
+                ),
+            }
+        )
+        jobs = self.repository.list_jobs(candidate["id"])
+
+        self.assertTrue(first["created"])
+        self.assertEqual(first["status"], "created")
+        self.assertFalse(second["created"])
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(first["job"]["id"], second["job"]["id"])
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["source"], "boss_research")
+        self.assertEqual(jobs[0]["qualified"], 1)
+        self.assertIsNone(jobs[0]["score"])
+
+        report = self.service.market_report(
+            candidate_id=candidate["id"],
+            qualified_only=True,
+            search_keyword="AI应用工程师",
+        )
+        self.assertEqual(report["sample"]["job_count"], 1)
+        self.assertEqual(
+            report["observed_monthly_midpoint_cny"]["median"], 25000
+        )
+
+    def test_research_collection_keeps_same_job_in_separate_projects(self):
+        first_candidate = self._candidate()
+        second_candidate = self.repository.create_candidate(
+            display_name="第二个关键词项目",
+            target_roles=["智能体"],
+            notes="",
+        )
+        base_payload = {
+            "external_job_id": "https://www.zhipin.com/job_detail/shared.html",
+            "title": "智能体开发工程师",
+            "salary": "25-35K",
+            "detail": "负责智能体工作流开发。",
+            "company": "示例公司",
+            "search_keyword": "智能体",
+        }
+
+        first = self.service.collect_research_job(
+            {**base_payload, "candidate_id": first_candidate["id"]}
+        )
+        second = self.service.collect_research_job(
+            {**base_payload, "candidate_id": second_candidate["id"]}
+        )
+
+        self.assertTrue(first["created"])
+        self.assertTrue(second["created"])
+        self.assertNotEqual(first["job"]["id"], second["job"]["id"])
+        self.assertEqual(len(self.repository.list_candidates()), 2)
+        self.assertEqual(len(self.repository.list_jobs(first_candidate["id"])), 1)
+        self.assertEqual(len(self.repository.list_jobs(second_candidate["id"])), 1)
+
     def test_delivery_stats_merge_legacy_and_manual_events_without_double_counting(self):
         candidate = self._candidate()
         self.repository.create_delivery_event(
@@ -307,6 +380,9 @@ class ResumeAgentP0Tests(unittest.TestCase):
         self.assertIn("/resume-agent/v1/imports/job-decisions", paths)
         self.assertIn("/resume-agent/v1/market-report", paths)
         self.assertIn("/resume-agent/v1/delivery-stats", paths)
+        self.assertIn("/resume-agent/v1/research-jobs", paths)
+        self.assertIn("/resume-agent/v1/candidates", paths)
+        self.assertIn("/resume-agent/v1/candidates/{candidate_id}/jobs", paths)
         self.assertIn("/get-job-score", paths)
         self.assertIn("/log-action", paths)
 
@@ -333,6 +409,31 @@ class ResumeAgentP0Tests(unittest.TestCase):
             )
             self.assertEqual(created.status_code, 201)
             self.assertEqual(created.json()["target_roles"], ["供应链"])
+
+            collected = client.post(
+                "/resume-agent/v1/research-jobs",
+                json={
+                    "candidate_id": created.json()["id"],
+                    "external_job_id": "https://www.zhipin.com/job_detail/api.html",
+                    "title": "供应链AI应用工程师",
+                    "salary": "20-30K",
+                    "detail": "负责供应链智能体应用。",
+                    "company": "API示例公司",
+                    "search_keyword": "AI应用工程师",
+                },
+            )
+            self.assertEqual(collected.status_code, 200)
+            self.assertTrue(collected.json()["created"])
+
+            candidates = client.get("/resume-agent/v1/candidates")
+            self.assertEqual(candidates.status_code, 200)
+            self.assertEqual(len(candidates.json()["candidates"]), 1)
+
+            jobs = client.get(
+                f"/resume-agent/v1/candidates/{created.json()['id']}/jobs"
+            )
+            self.assertEqual(jobs.status_code, 200)
+            self.assertEqual(len(jobs.json()["jobs"]), 1)
         finally:
             router_module._repository = original_repository
             router_module._service = original_service

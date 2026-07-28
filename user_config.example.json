@@ -19,7 +19,7 @@
     "job_score_delay_jitter_ms": 500
   },
   "frontend": {
-    "serverHost": "http://127.0.0.1:8000",
+    "serverHost": "http://127.0.0.1:8010",
     "resumeIndex": 0,
     "thread": 50,
     "timestampTimeout": 3000,
@@ -31,8 +31,8 @@
     "greetTimeout": 12000,
     "preloadScrollPixels": 180,
     "preloadScrollWaitMs": 450,
-    "preloadStableRoundsLimit": 24,
-    "preloadMaxRounds": 300,
+    "preloadStableRoundsLimit": 8,
+    "preloadMaxRounds": 50,
     "preloadActivateCardEvery": 0,
     "preloadActivateCardWaitMs": 250
   },

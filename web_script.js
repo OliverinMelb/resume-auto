@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         goodJobs
 // @namespace    http://tampermonkey.net/
-// @version      2025-02-15
+// @version      2026.07.28.3
 // @description  goodJobs篡改猴插件
 // @match        https://www.zhipin.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=zhipin.com
@@ -14,7 +14,7 @@
     // 配置项
     const OPTIONS = {
         resumeIndex: 0, // 第几份简历，从 0 开始递增
-        serverHost: 'http://127.0.0.1:8000', // 本地服务的主机地址
+        serverHost: 'http://127.0.0.1:8010', // 本地服务的主机地址
         thread: 50, // 分数阈值，低于这个就不发消息了
         timestampTimeout: 3000, // 时间戳过期时间，单位毫秒，根据当前网络设定，建议不要太大。
         onlyGreet: false, // 是否只打招呼，默认为false，即打招呼和代聊天
@@ -25,11 +25,49 @@
         greetTimeout: 12000, // 打招呼页回执超时时间
         preloadScrollPixels: 180, // 岗位预加载：每轮下滑像素
         preloadScrollWaitMs: 450, // 岗位预加载：每轮等待毫秒数
-        preloadStableRoundsLimit: 24, // 岗位预加载：连续多少轮无增长后结束
-        preloadMaxRounds: 300, // 岗位预加载：最多滑动多少轮
+        preloadStableRoundsLimit: 8, // 岗位预加载：连续多少轮无增长后结束
+        preloadMaxRounds: 50, // 岗位预加载：每个关键词最多滑动多少轮
         preloadActivateCardEvery: 0, // 预加载时每隔多少轮尝试轻点一次左侧岗位卡片，0 表示关闭
         preloadActivateCardWaitMs: 250, // 轻点岗位卡片后的额外等待时间
     };
+
+    const SCRIPT_VERSION = '2026.07.28.3';
+    const SEARCH_KEYWORDS_STORAGE_KEY = 'goodjobs.searchKeywords';
+    const PRELOAD_MAX_ROUNDS_STORAGE_KEY = 'goodjobs.preloadMaxRounds';
+    const DEFAULT_PRELOAD_MAX_ROUNDS = 50;
+    const MIN_PRELOAD_MAX_ROUNDS = 1;
+    const MAX_PRELOAD_MAX_ROUNDS = 300;
+    const PRELOAD_STABLE_ROUNDS_LIMIT = 8;
+    const FALLBACK_SEARCH_KEYWORDS = [
+        'AI产品工程师',
+        'AI应用工程师',
+        'AI产品经理',
+        'AI Agent',
+        '智能体',
+        '工作流工程师',
+        '大模型应用',
+        '提示词工程师',
+    ];
+
+    function parseSearchKeywords(value) {
+        const values = Array.isArray(value) ? value : String(value || '').split(/[\n,，;；]+/);
+        return Array.from(new Set(values.map(item => String(item).trim()).filter(Boolean)));
+    }
+
+    function normalizePreloadMaxRounds(value, fallback = DEFAULT_PRELOAD_MAX_ROUNDS) {
+        const fallbackNumber = Number(fallback);
+        const normalizedFallback = Number.isFinite(fallbackNumber)
+            ? Math.min(MAX_PRELOAD_MAX_ROUNDS, Math.max(MIN_PRELOAD_MAX_ROUNDS, Math.round(fallbackNumber)))
+            : DEFAULT_PRELOAD_MAX_ROUNDS;
+        if (value === null || value === undefined || String(value).trim() === '') {
+            return normalizedFallback;
+        }
+        const numericValue = Number(value);
+        if (!Number.isFinite(numericValue)) {
+            return normalizedFallback;
+        }
+        return Math.min(MAX_PRELOAD_MAX_ROUNDS, Math.max(MIN_PRELOAD_MAX_ROUNDS, Math.round(numericValue)));
+    }
 
     // 元素选择器
     const SELECTORS = {
@@ -41,6 +79,7 @@
                 JOBLIST: '.rec-job-list', // 职位列表
                 JOBCARD: '.job-card-box', // 左侧岗位卡片
                 JOBHREFS: '.job-card-box .job-name', // 职位链接
+                COMPANY: '.company-name', // 搜索卡片公司名称
             },
             DETAIL: {
                 STARTCHAT: '.btn-startchat', // 开始聊天按钮
@@ -48,6 +87,7 @@
                 JOBNAME: 'h1', // 职位名称
                 SALARY: '.salary', // 职位薪资
                 DETAIL: '.job-sec-text', // 职位详情
+                COMPANY: '.job-detail-company .company-name, .sider-company .company-name, .company-info .company-name, .company-info a', // 公司名称
                 CHATURL: 'redirect-url', // 聊天链接
             },
             CHAT: {
@@ -413,7 +453,7 @@
          * @param {any} data 请求数据
          * @returns {Promise<any>} 请求结果
          */
-        __http(path, method = 'GET', data = null) {
+        __http(path, method = 'GET', data = null, timeoutMs = 1000 * 60 * 10) {
             const start = performance.now();
             return new Promise(async (resolve, reject) => {
                 GM.xmlHttpRequest({
@@ -423,10 +463,10 @@
                         'Content-Type': 'application/json',
                     },
                     data: data,
-                    timeout: 1000 * 60 * 10,
+                    timeout: timeoutMs,
                 })
                     .then(resp => {
-                        if (resp.status != 200) {
+                        if (resp.status < 200 || resp.status >= 300) {
                             banner(`请求失败: ${resp.status}`);
                             reject(resp.status);
                             return;
@@ -462,7 +502,7 @@
          * 获取前端运行配置
          */
         getClientConfig() {
-            return new Promise((resolve, reject) => this.__http('/client-config').then(resolve).catch(reject));
+            return new Promise((resolve, reject) => this.__http('/client-config', 'GET', null, 5000).then(resolve).catch(reject));
         }
 
         /**
@@ -526,11 +566,25 @@
                 this.__http('/log-action', 'POST', JSON.stringify(payload)).then(resolve).catch(reject);
             });
         }
+
+        createResearchProject(keyword, sourceUrl) {
+            const capturedAt = new Date();
+            const timestamp = capturedAt.toLocaleString('zh-CN', { hour12: false }).replaceAll('/', '-');
+            return this.__http('/resume-agent/v1/candidates', 'POST', JSON.stringify({
+                display_name: `JD调研-${keyword}-${timestamp}`.slice(0, 100),
+                target_roles: [keyword],
+                notes: `由Boss浏览器调研模式自动创建；关键词：${keyword}；来源：${sourceUrl}`,
+            }));
+        }
+
+        collectResearchJob(payload) {
+            return this.__http('/resume-agent/v1/research-jobs', 'POST', JSON.stringify(payload));
+        }
     }
 
     // 日志记录
     class Logger {
-        constructor(startFn, pauseFn) {
+        constructor(startFn, pauseFn, enableModeSelector = false) {
             // 校验函数
             if (startFn && !Function.prototype.isPrototypeOf(startFn)) {
                 throw new Error('参数错误，startFn应为函数');
@@ -544,6 +598,19 @@
             const clearBtn = document.createElement('div');
             const runBtn = document.createElement('div');
             const foldBtn = document.createElement('div');
+            const settingsHeader = document.createElement('div');
+            const versionLabel = document.createElement('span');
+            const modeBox = document.createElement('div');
+            const modeLabel = document.createElement('span');
+            const modeControl = document.createElement('div');
+            const deliveryModeBtn = document.createElement('button');
+            const researchModeBtn = document.createElement('button');
+            const keywordBox = document.createElement('label');
+            const keywordLabel = document.createElement('span');
+            const keywordInput = document.createElement('textarea');
+            const preloadBox = document.createElement('label');
+            const preloadLabel = document.createElement('span');
+            const preloadInput = document.createElement('input');
             const msgList = document.createElement('div');
             ctn.style.cssText = `
                 position: fixed;
@@ -554,7 +621,8 @@
                 color: #fff;
                 z-index: 9999;
                 font-size: 14px;
-                border-radius: 10px;
+                border-radius: 8px;
+                overflow: hidden;
             `;
             btnBox.style.cssText = `
                 width: 380px;
@@ -582,7 +650,149 @@
             clearBtn.innerText = "清空";
             runBtn.innerText = "开始";
             foldBtn.innerText = "收起";
+            settingsHeader.style.cssText = `
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                min-height: 32px;
+                padding: 0 12px;
+                background: rgba(0, 0, 0, 0.22);
+                border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+                box-sizing: border-box;
+            `;
+            versionLabel.innerText = `goodJobs ${SCRIPT_VERSION}`;
+            versionLabel.style.cssText = `
+                color: rgba(255, 255, 255, 0.86);
+                font-size: 12px;
+            `;
+            modeBox.style.cssText = `
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                width: 100%;
+                min-height: 44px;
+                padding: 6px 12px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+                box-sizing: border-box;
+            `;
+            modeLabel.innerText = '运行模式';
+            modeLabel.style.cssText = `
+                width: 64px;
+                flex: 0 0 64px;
+                color: rgba(255, 255, 255, 0.92);
+            `;
+            modeControl.style.cssText = `
+                display: flex;
+                flex: 1;
+                height: 32px;
+                border: 1px solid rgba(255, 255, 255, 0.28);
+                border-radius: 6px;
+                overflow: hidden;
+            `;
+            deliveryModeBtn.type = 'button';
+            researchModeBtn.type = 'button';
+            deliveryModeBtn.innerText = '投递';
+            researchModeBtn.innerText = '调研';
+            [deliveryModeBtn, researchModeBtn].forEach(button => {
+                button.style.cssText = `
+                    flex: 1;
+                    border: 0;
+                    border-radius: 0;
+                    color: white;
+                    background: transparent;
+                    cursor: pointer;
+                    font-size: 13px;
+                    letter-spacing: 0;
+                `;
+            });
+            keywordBox.style.cssText = `
+                display: flex;
+                align-items: flex-start;
+                gap: 12px;
+                width: 100%;
+                padding: 8px 12px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+                box-sizing: border-box;
+            `;
+            keywordLabel.innerText = '搜索岗位';
+            keywordLabel.style.cssText = `
+                width: 64px;
+                flex: 0 0 64px;
+                padding-top: 7px;
+                color: rgba(255, 255, 255, 0.92);
+            `;
+            keywordInput.rows = 3;
+            keywordInput.placeholder = 'AI应用工程师\n智能体工程师';
+            keywordInput.style.cssText = `
+                display: block;
+                flex: 1;
+                min-width: 0;
+                min-height: 68px;
+                max-height: 160px;
+                padding: 7px 9px;
+                border: 1px solid rgba(255, 255, 255, 0.32);
+                border-radius: 6px;
+                outline: none;
+                resize: vertical;
+                box-sizing: border-box;
+                color: #fff;
+                background: rgba(0, 0, 0, 0.28);
+                font: inherit;
+                line-height: 1.45;
+                letter-spacing: 0;
+            `;
+            preloadBox.style.cssText = `
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                width: 100%;
+                min-height: 44px;
+                padding: 6px 12px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+                box-sizing: border-box;
+            `;
+            preloadLabel.innerText = '预加载上限（轮/关键词）';
+            preloadLabel.style.cssText = `
+                width: 148px;
+                flex: 0 0 148px;
+                color: rgba(255, 255, 255, 0.92);
+            `;
+            preloadInput.type = 'number';
+            preloadInput.min = String(MIN_PRELOAD_MAX_ROUNDS);
+            preloadInput.max = String(MAX_PRELOAD_MAX_ROUNDS);
+            preloadInput.step = '1';
+            preloadInput.value = String(DEFAULT_PRELOAD_MAX_ROUNDS);
+            preloadInput.style.cssText = `
+                display: block;
+                flex: 1;
+                min-width: 0;
+                height: 32px;
+                padding: 5px 9px;
+                border: 1px solid rgba(255, 255, 255, 0.32);
+                border-radius: 6px;
+                outline: none;
+                box-sizing: border-box;
+                color: #fff;
+                background: rgba(0, 0, 0, 0.28);
+                font: inherit;
+                letter-spacing: 0;
+            `;
             document.body.appendChild(ctn);
+            if (enableModeSelector) {
+                ctn.appendChild(settingsHeader);
+                settingsHeader.appendChild(versionLabel);
+                ctn.appendChild(modeBox);
+                modeBox.appendChild(modeLabel);
+                modeBox.appendChild(modeControl);
+                modeControl.appendChild(deliveryModeBtn);
+                modeControl.appendChild(researchModeBtn);
+                ctn.appendChild(keywordBox);
+                keywordBox.appendChild(keywordLabel);
+                keywordBox.appendChild(keywordInput);
+                ctn.appendChild(preloadBox);
+                preloadBox.appendChild(preloadLabel);
+                preloadBox.appendChild(preloadInput);
+            }
             ctn.appendChild(btnBox);
             btnBox.appendChild(clearBtn);
             btnBox.appendChild(runBtn);
@@ -592,11 +802,42 @@
             this.list = msgList;
             this.runBtn = runBtn;
             this.clearBtn = clearBtn;
+            this.enableModeSelector = enableModeSelector;
+            this.mode = 'research';
+            this.modeLocked = false;
+            this.modeBox = modeBox;
+            this.deliveryModeBtn = deliveryModeBtn;
+            this.researchModeBtn = researchModeBtn;
+            this.keywordInput = keywordInput;
+            this.keywordEdited = false;
+            this.preloadInput = preloadInput;
+            this.preloadEdited = false;
             this.__startFn = startFn || (() => void 0);
             this.__pauseFn = pauseFn || (() => void 0);
             this.__pause = true;
             clearBtn.addEventListener('click', () => this.clear());
+            deliveryModeBtn.addEventListener('click', () => this.setMode('delivery'));
+            researchModeBtn.addEventListener('click', () => this.setMode('research'));
+            keywordInput.addEventListener('input', () => {
+                this.keywordEdited = true;
+                keywordInput.style.borderColor = 'rgba(255, 255, 255, 0.32)';
+                localStorage.setItem(SEARCH_KEYWORDS_STORAGE_KEY, keywordInput.value);
+            });
+            preloadInput.addEventListener('input', () => {
+                this.preloadEdited = true;
+                preloadInput.style.borderColor = 'rgba(255, 255, 255, 0.32)';
+            });
+            preloadInput.addEventListener('change', () => {
+                this.setPreloadMaxRounds(preloadInput.value, true);
+            });
+            this.setMode('research');
             runBtn.addEventListener('click', () => {
+                if (this.__pause && this.enableModeSelector && !this.getKeywords().length) {
+                    keywordInput.style.borderColor = '#ff6b6b';
+                    keywordInput.focus();
+                    this.add('请至少填写一个搜索岗位');
+                    return;
+                }
                 this.__pause = !this.__pause;
                 if (this.__pause) {
                     runBtn.innerText = "继续";
@@ -616,6 +857,81 @@
                     foldBtn.innerText = "展开";
                 }
             });
+        }
+
+        setMode(mode) {
+            if (this.modeLocked || !['delivery', 'research'].includes(mode)) return;
+            this.mode = mode;
+            const selectedStyle = 'rgba(0, 174, 120, 0.95)';
+            const idleStyle = 'transparent';
+            this.deliveryModeBtn.style.background = mode === 'delivery' ? selectedStyle : idleStyle;
+            this.researchModeBtn.style.background = mode === 'research' ? selectedStyle : idleStyle;
+        }
+
+        getMode() {
+            return this.mode;
+        }
+
+        setKeywords(keywords, persist = false) {
+            const normalized = parseSearchKeywords(keywords);
+            this.keywordInput.value = normalized.join('\n');
+            if (persist) {
+                localStorage.setItem(SEARCH_KEYWORDS_STORAGE_KEY, this.keywordInput.value);
+            }
+        }
+
+        getKeywords() {
+            return parseSearchKeywords(this.keywordInput.value);
+        }
+
+        hasKeywordEdits() {
+            return this.keywordEdited;
+        }
+
+        setPreloadMaxRounds(value, persist = false) {
+            const normalized = normalizePreloadMaxRounds(value);
+            this.preloadInput.value = String(normalized);
+            if (persist) {
+                localStorage.setItem(PRELOAD_MAX_ROUNDS_STORAGE_KEY, String(normalized));
+            }
+            return normalized;
+        }
+
+        getPreloadMaxRounds() {
+            return normalizePreloadMaxRounds(this.preloadInput.value);
+        }
+
+        hasPreloadEdits() {
+            return this.preloadEdited;
+        }
+
+        lockMode() {
+            this.modeLocked = true;
+            this.modeBox.style.opacity = '0.75';
+            this.deliveryModeBtn.style.cursor = 'default';
+            this.researchModeBtn.style.cursor = 'default';
+        }
+
+        lockSettings() {
+            this.lockMode();
+            this.keywordInput.disabled = true;
+            this.keywordInput.style.cursor = 'default';
+            this.keywordInput.style.opacity = '0.78';
+            this.preloadInput.disabled = true;
+            this.preloadInput.style.cursor = 'default';
+            this.preloadInput.style.opacity = '0.78';
+        }
+
+        resetStart() {
+            this.__pause = true;
+            this.runBtn.innerText = '开始';
+        }
+
+        complete(text = '已完成') {
+            this.__pause = true;
+            this.runBtn.innerText = text;
+            this.runBtn.style.pointerEvents = 'none';
+            this.runBtn.style.opacity = '0.75';
         }
 
         add(message) {
@@ -701,6 +1017,11 @@
             let roundQueuedCount = 0;
             let currentKeyword = '';
             let currentTagIdx = -1;
+            let activeMode = 'research';
+            let activePreloadMaxRounds = DEFAULT_PRELOAD_MAX_ROUNDS;
+            let currentResearchProject = null;
+            let currentResearchStats = null;
+            const researchSummaries = [];
             const processedJobHrefs = new Set();
 
             // 日志启动暂停事件
@@ -714,6 +1035,38 @@
                 loop();
             }, () => {
                 this.pause = true;
+            }, true);
+            const storedKeywordText = localStorage.getItem(SEARCH_KEYWORDS_STORAGE_KEY) || '';
+            const storedKeywords = parseSearchKeywords(storedKeywordText);
+            logger.setKeywords(storedKeywords.length ? storedKeywords : FALLBACK_SEARCH_KEYWORDS);
+            const storedPreloadMaxRounds = localStorage.getItem(PRELOAD_MAX_ROUNDS_STORAGE_KEY);
+            const hasStoredPreloadMaxRounds = storedPreloadMaxRounds !== null;
+            logger.setPreloadMaxRounds(
+                hasStoredPreloadMaxRounds ? storedPreloadMaxRounds : OPTIONS.preloadMaxRounds,
+                hasStoredPreloadMaxRounds,
+            );
+            const bootstrapServerHost = OPTIONS.serverHost;
+            const clientConfigPromise = api.getClientConfig().then(clientConfig => {
+                if (clientConfig && clientConfig.frontend) {
+                    const frontendConfig = { ...clientConfig.frontend };
+                    delete frontendConfig.serverHost;
+                    Object.assign(OPTIONS, frontendConfig);
+                    OPTIONS.serverHost = bootstrapServerHost;
+                    OPTIONS.preloadStableRoundsLimit = PRELOAD_STABLE_ROUNDS_LIMIT;
+                }
+                if (hasStoredPreloadMaxRounds) {
+                    OPTIONS.preloadMaxRounds = logger.getPreloadMaxRounds();
+                } else if (!logger.hasPreloadEdits()) {
+                    OPTIONS.preloadMaxRounds = logger.setPreloadMaxRounds(OPTIONS.preloadMaxRounds);
+                }
+                if (!storedKeywords.length && !logger.hasKeywordEdits() && Array.isArray(clientConfig?.tags) && clientConfig.tags.length) {
+                    logger.setKeywords(clientConfig.tags);
+                }
+                return clientConfig;
+            }).catch((e) => {
+                logger.add(`获取后端配置失败，将使用当前面板设置：${e}`);
+                OPTIONS.serverHost = bootstrapServerHost;
+                return null;
             });
 
             // 开始广播
@@ -739,12 +1092,12 @@
                 this.broadcast.on(this.bcTypes.DIVIDER, () => {
                     logger.divider();
                 });
-                // 监听打招呼
-                greetListener();
-                // 监听聊天页
-                chatListener();
-                // 心跳监听
-                heartBeatListener();
+                if (activeMode === 'delivery') {
+                    // 调研模式不注册任何打招呼或聊天协作逻辑。
+                    greetListener();
+                    chatListener();
+                    heartBeatListener();
+                }
             };
 
             // 执行搜索
@@ -766,9 +1119,14 @@
                     const jobUl = await tools.endlessFind(SELECTORS.ZHIPIN.SEARCH.JOBLIST);
                     const aList = jobUl.querySelectorAll(SELECTORS.ZHIPIN.SEARCH.JOBHREFS);
                     const hrefs = Array.from(aList)
-                        .map(a => a.href)
+                        .map(a => ({
+                            href: a.href,
+                            company: a.closest(SELECTORS.ZHIPIN.SEARCH.JOBCARD)
+                                ?.querySelector(SELECTORS.ZHIPIN.SEARCH.COMPANY)
+                                ?.innerText?.trim() || '',
+                        }))
                         .slice(elsLen)
-                        .filter(href => !processedJobHrefs.has(href));
+                        .filter(job => !processedJobHrefs.has(job.href));
                     return [hrefs, aList];
                 } catch (e) {
                     logger.add('获取职位链接出错');
@@ -781,6 +1139,11 @@
                 elsLen = 0;
                 page = 0;
                 roundQueuedCount = 0;
+                currentResearchProject = null;
+                currentResearchStats = null;
+                if (activeMode === 'research') {
+                    processedJobHrefs.clear();
+                }
                 clearPendingGreet();
             };
 
@@ -859,10 +1222,53 @@
                 }, OPTIONS.greetTimeout);
             };
 
+            const summarizeResearchKeyword = () => {
+                if (!currentResearchStats) return;
+                researchSummaries.push({ ...currentResearchStats });
+                logger.add(
+                    `关键词 [${currentResearchStats.keyword}] 完成 | ` +
+                    `项目: ${currentResearchStats.candidateId} | ` +
+                    `扫描: ${currentResearchStats.scanned} | ` +
+                    `入库: ${currentResearchStats.created} | ` +
+                    `重复: ${currentResearchStats.duplicate} | ` +
+                    `字段缺失: ${currentResearchStats.incomplete} | ` +
+                    `失败: ${currentResearchStats.failed}`
+                );
+            };
+
+            const finishResearch = () => {
+                this.pause = true;
+                logger.divider();
+                logger.add('调研采集完成，所有关键词均已执行一次');
+                researchSummaries.forEach(summary => {
+                    logger.add(
+                        `[${summary.keyword}] 项目 ${summary.candidateId} | ` +
+                        `入库 ${summary.created} | 重复 ${summary.duplicate} | ` +
+                        `字段缺失 ${summary.incomplete} | 失败 ${summary.failed}`
+                    );
+                });
+                logger.complete('已完成');
+            };
+
             const handleRoundExhausted = async () => {
                 if (roundTransitioning) return;
                 roundTransitioning = true;
                 try {
+                    if (activeMode === 'research') {
+                        summarizeResearchKeyword();
+                        if (currentRound >= this.tags.length) {
+                            finishResearch();
+                            return;
+                        }
+                        await tools.asyncSleep(OPTIONS.roundRestartDelayMs);
+                        if (this.pause) {
+                            pendingRoundRestart = true;
+                            logger.add('当前已暂停，下一关键词等待继续');
+                            return;
+                        }
+                        await startRound();
+                        return;
+                    }
                     if (roundQueuedCount === 0) {
                         emptyRounds += 1;
                         logger.add(`第 ${currentRound} 轮没有拿到新岗位（连续空轮 ${emptyRounds}/${OPTIONS.maxEmptyRounds}）`);
@@ -1018,6 +1424,11 @@
                     logger.divider();
                     // 判断职位链接是否为空
                     if (jobHrefs.length === 0) {
+                        if (activeMode === 'research') {
+                            const hasNext = await nextPage();
+                            if (!hasNext) return handleRoundExhausted();
+                            return loop();
+                        }
                         // 判断是否需要代聊天
                         if (OPTIONS.onlyGreet) {
                             const hasNext = await nextPage();
@@ -1029,12 +1440,48 @@
                         return;
                     }
                     // 抽取第一个
-                    const href = jobHrefs.shift();
+                    const jobEntry = jobHrefs.shift();
+                    const href = typeof jobEntry === 'string' ? jobEntry : jobEntry.href;
+                    const cardCompany = typeof jobEntry === 'string' ? '' : jobEntry.company;
                     const diff = (new Date().getTime() - start) / 1000;
                     // 获取详情
                     logger.add(`| 浏览: ${++count} | 剩余: ${jobHrefs.length} | 平均: ${(diff / count).toFixed(0)}s | 耗时: ${convertTime(diff)} |`);
                     logger.add(`正在获取职位详情`);
                     const jobInfo = await getJobInfo(href);
+                    processedJobHrefs.add(href);
+                    if (activeMode === 'research') {
+                        currentResearchStats.scanned += 1;
+                        const researchJob = {
+                            candidate_id: currentResearchProject.id,
+                            external_job_id: href,
+                            title: (jobInfo.title || '').trim(),
+                            company: (jobInfo.company || cardCompany || '').trim(),
+                            salary: (jobInfo.salary || '').trim(),
+                            detail: (jobInfo.detail || '').trim(),
+                            search_keyword: currentKeyword,
+                        };
+                        const missingFields = ['title', 'company', 'salary', 'detail']
+                            .filter(field => !researchJob[field]);
+                        if (missingFields.length) {
+                            currentResearchStats.incomplete += 1;
+                            logger.add(`调研岗位未入库，缺少字段：${missingFields.join('、')}`);
+                            return loop();
+                        }
+                        try {
+                            const collected = await api.collectResearchJob(researchJob);
+                            if (collected.created) {
+                                currentResearchStats.created += 1;
+                                logger.add(`已采集 [${researchJob.company}] ${researchJob.title}`);
+                            } else {
+                                currentResearchStats.duplicate += 1;
+                                logger.add(`重复岗位已跳过 [${researchJob.company}] ${researchJob.title}`);
+                            }
+                        } catch (e) {
+                            currentResearchStats.failed += 1;
+                            logger.add(`岗位入库失败 [${researchJob.title}]：${e}`);
+                        }
+                        return loop();
+                    }
                     if (jobInfo.skip) {
                         logger.add(`职位跳过: ${jobInfo.skipReason}`);
                         await logAction({
@@ -1047,7 +1494,6 @@
                         });
                         return loop();
                     }
-                    processedJobHrefs.add(href);
                     // 如果聊过，下一个
                     if (jobInfo.talked) {
                         logger.add(`职位 [${jobInfo.title}] 已经聊过，下一个`);
@@ -1135,33 +1581,34 @@
             const preloadJobs = async () => {
                 logger.add('开始慢速预加载岗位列表');
                 let stableRounds = 0;
-                let lastCount = 0;
-                let lastScrollY = -1;
-                for (let round = 1; round <= OPTIONS.preloadMaxRounds; round++) {
+                let highestCount = null;
+                for (let round = 1; round <= activePreloadMaxRounds; round++) {
                     const jobUl = await tools.endlessFind(SELECTORS.ZHIPIN.SEARCH.JOBLIST).catch(() => null);
                     const currentCount = jobUl ? jobUl.querySelectorAll(SELECTORS.ZHIPIN.SEARCH.JOBHREFS).length : 0;
+                    highestCount = highestCount === null ? currentCount : Math.max(highestCount, currentCount);
                     window.scrollBy({ top: OPTIONS.preloadScrollPixels, left: 0, behavior: 'smooth' });
                     await tools.asyncSleep(OPTIONS.preloadScrollWaitMs);
                     await activatePreloadCard(round);
                     const afterJobUl = document.querySelector(SELECTORS.ZHIPIN.SEARCH.JOBLIST);
                     const afterCount = afterJobUl ? afterJobUl.querySelectorAll(SELECTORS.ZHIPIN.SEARCH.JOBHREFS).length : currentCount;
-                    const afterY = window.scrollY;
                     logger.add(`预加载第 ${round} 轮：岗位 ${currentCount} -> ${afterCount}`);
-                    if (afterCount > lastCount || afterY > lastScrollY) {
+                    if (afterCount > highestCount) {
                         stableRounds = 0;
                     } else {
                         stableRounds += 1;
                     }
-                    lastCount = Math.max(lastCount, afterCount);
-                    lastScrollY = Math.max(lastScrollY, afterY);
+                    highestCount = Math.max(highestCount, afterCount);
                     if (stableRounds >= OPTIONS.preloadStableRoundsLimit) {
                         logger.add(`预加载结束：连续 ${stableRounds} 轮无新增岗位`);
                         break;
                     }
+                    if (round === activePreloadMaxRounds) {
+                        logger.add(`预加载结束：已达到用户设置的 ${activePreloadMaxRounds} 轮上限`);
+                    }
                 }
                 const finalJobUl = document.querySelector(SELECTORS.ZHIPIN.SEARCH.JOBLIST);
                 const finalCount = finalJobUl ? finalJobUl.querySelectorAll(SELECTORS.ZHIPIN.SEARCH.JOBHREFS).length : 0;
-                logger.add(`预加载完成，当前已加载岗位数：${finalCount}`);
+                logger.add(`预加载完成，共加载 ${finalCount} 个岗位，开始提取职位详情`);
             };
 
             const pickNextKeyword = () => {
@@ -1185,6 +1632,26 @@
                 await search(keyword);
                 logger.add(`第 ${currentRound} 轮已完成搜索（关键词：${keyword}），请在 ${(OPTIONS.manualFilterWaitMs / 1000).toFixed(0)} 秒内手动选择地区、薪资等筛选条件`);
                 await tools.asyncSleep(OPTIONS.manualFilterWaitMs);
+                if (activeMode === 'research') {
+                    try {
+                        currentResearchProject = await api.createResearchProject(keyword, location.href);
+                        currentResearchStats = {
+                            keyword,
+                            candidateId: currentResearchProject.id,
+                            scanned: 0,
+                            created: 0,
+                            duplicate: 0,
+                            incomplete: 0,
+                            failed: 0,
+                        };
+                        logger.add(`已创建调研项目：${currentResearchProject.id}`);
+                    } catch (e) {
+                        this.pause = true;
+                        logger.add(`创建调研项目失败，采集已停止：${e}`);
+                        logger.complete('创建失败');
+                        return;
+                    }
+                }
                 await preloadJobs();
                 logger.add(`第 ${currentRound} 轮开始按当前筛选条件扫描岗位（关键词：${keyword}）`);
                 loop();
@@ -1192,44 +1659,45 @@
 
             // 主函数
             const main = async () => {
+                logger.lockSettings();
+                const clientConfig = await clientConfigPromise;
+                const selectedKeywords = logger.getKeywords();
+                if (!selectedKeywords.length) {
+                    this.pause = true;
+                    logger.resetStart();
+                    return;
+                }
                 started = true;
-                logger.add('--程序启动--');
+                this.tags = selectedKeywords;
+                localStorage.setItem(SEARCH_KEYWORDS_STORAGE_KEY, this.tags.join('\n'));
+                activeMode = logger.getMode();
+                activePreloadMaxRounds = logger.getPreloadMaxRounds();
+                localStorage.setItem(PRELOAD_MAX_ROUNDS_STORAGE_KEY, String(activePreloadMaxRounds));
+                OPTIONS.preloadMaxRounds = activePreloadMaxRounds;
+                logger.add(`--程序启动：${activeMode === 'research' ? '调研模式' : '投递模式'}--`);
+                logger.add('本轮搜索岗位：' + this.tags.join('、'));
+                logger.add(`每个关键词最多预加载 ${activePreloadMaxRounds} 轮`);
                 // 开始广播
                 startBroadcast();
-                // 获取统一配置
-                const clientConfig = await api.getClientConfig().catch((e) => {
-                    logger.add('获取统一配置失败，将回退旧接口');
-                    return null;
-                });
-                if (clientConfig && clientConfig.frontend) {
-                    Object.assign(OPTIONS, clientConfig.frontend);
-                    logger.add('获取前端配置成功');
-                }
-                if (clientConfig && Array.isArray(clientConfig.tags) && clientConfig.tags.length) {
-                    this.tags = clientConfig.tags;
-                    logger.add('获取标签成功: ' + this.tags.join('、'));
-                } else {
-                    this.tags = await api.getTags();
-                    logger.add('获取标签成功(旧接口): ' + this.tags.join('、'));
-                }
                 if (typeof tagIdx === 'number' && this.tags.length) {
                     currentTagIdx = ((tagIdx % this.tags.length) + this.tags.length) % this.tags.length - 1;
                 }
-                if (clientConfig && typeof clientConfig.introduce === 'string' && clientConfig.introduce) {
-                    this.introduce = clientConfig.introduce;
-                    logger.add('获取自我介绍成功');
-                } else {
-                    this.introduce = await api.getIntroduce();
-                    logger.add('获取自我介绍成功(旧接口)');
+                if (activeMode === 'delivery') {
+                    if (clientConfig && typeof clientConfig.introduce === 'string' && clientConfig.introduce) {
+                        this.introduce = clientConfig.introduce;
+                        logger.add('获取自我介绍成功');
+                    } else {
+                        this.introduce = await api.getIntroduce();
+                        logger.add('获取自我介绍成功(旧接口)');
+                    }
                 }
                 await startRound();
             };
 
             // 初始化
             const init = () => {
-                // 如果时间戳小于阈值，直接运行
                 if (start - tools.getTimestamp(this.targets.search) < OPTIONS.timestampTimeout) {
-                    logger.runBtn.click();
+                    logger.add('搜索页已打开，等待启动');
                 }
             };
 
@@ -1248,9 +1716,10 @@
             const getJobInfo = () => {
                 const chatBtn = document.querySelector(SELECTORS.ZHIPIN.DETAIL.STARTCHAT);
                 const nameBox = document.querySelector(SELECTORS.ZHIPIN.DETAIL.NAMEBOX);
-                const title = nameBox.querySelector(SELECTORS.ZHIPIN.DETAIL.JOBNAME).innerText;
-                const salary = nameBox.querySelector(SELECTORS.ZHIPIN.DETAIL.SALARY).innerText;
-                const detail = document.querySelector(SELECTORS.ZHIPIN.DETAIL.DETAIL).innerText;
+                const title = nameBox?.querySelector(SELECTORS.ZHIPIN.DETAIL.JOBNAME)?.innerText?.trim() || '';
+                const salary = nameBox?.querySelector(SELECTORS.ZHIPIN.DETAIL.SALARY)?.innerText?.trim() || '';
+                const detail = document.querySelector(SELECTORS.ZHIPIN.DETAIL.DETAIL)?.innerText?.trim() || '';
+                const company = document.querySelector(SELECTORS.ZHIPIN.DETAIL.COMPANY)?.innerText?.trim() || '';
                 const actionText = chatBtn ? chatBtn.innerText.trim() : '';
                 const chatUrl = chatBtn && chatBtn.getAttribute(SELECTORS.ZHIPIN.DETAIL.CHATURL);
                 const addUrl = chatBtn && chatBtn.dataset.url;
@@ -1270,6 +1739,7 @@
 
                 return {
                     title,
+                    company,
                     salary,
                     detail,
                     actionText,
@@ -1752,9 +2222,10 @@
             }
             // 否则跳转搜索页
             else {
-                new Logger(() => {
+                const navigationLogger = new Logger(() => {
                     tools.openTabNSetTimestamp(SEARCHPATH.zhipin, this.targets.search, true);
                 });
+                navigationLogger.runBtn.innerText = '打开搜索页';
             }
         }
     }

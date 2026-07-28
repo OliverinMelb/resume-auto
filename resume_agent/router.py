@@ -10,6 +10,7 @@ from .schemas import (
     JobDecisionImportRequest,
     JobCreate,
     PromptBuildRequest,
+    ResearchJobCollectRequest,
     ResearchCreate,
     SourceResumeCreate,
 )
@@ -76,6 +77,11 @@ def create_candidate(payload: CandidateCreate):
     )
 
 
+@router.get("/candidates")
+def list_candidates():
+    return {"candidates": _repository.list_candidates()}
+
+
 @router.get("/candidates/{candidate_id}")
 def get_candidate(candidate_id: str):
     try:
@@ -112,10 +118,36 @@ def list_source_resumes(candidate_id: str):
         _raise_api_error(error)
 
 
+@router.get("/candidates/{candidate_id}/jobs")
+def list_candidate_jobs(
+    candidate_id: str,
+    qualified_only: bool = False,
+    search_keyword: str | None = None,
+):
+    try:
+        return {
+            "jobs": _repository.list_jobs(
+                candidate_id=candidate_id,
+                qualified_only=qualified_only,
+                search_keyword=search_keyword,
+            )
+        }
+    except Exception as error:
+        _raise_api_error(error)
+
+
 @router.post("/jobs", status_code=201)
 def create_job(payload: JobCreate):
     try:
         return _repository.create_job(payload.model_dump())
+    except Exception as error:
+        _raise_api_error(error)
+
+
+@router.post("/research-jobs")
+def collect_research_job(payload: ResearchJobCollectRequest):
+    try:
+        return _service.collect_research_job(payload.model_dump())
     except Exception as error:
         _raise_api_error(error)
 

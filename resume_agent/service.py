@@ -1,9 +1,12 @@
+import hashlib
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from .importer import import_job_decisions
 from .market import build_market_report
-from .repository import Repository
+from .repository import Repository, utc_now
 from .research import (
     analyze_jobs,
     build_candidate_profile_prompt,
@@ -29,6 +32,48 @@ class ResumeAgentService:
         self.repository = repository
         self.legacy_action_log_path = legacy_action_log_path
         self.legacy_decision_log_path = legacy_decision_log_path
+
+    @staticmethod
+    def _research_job_fingerprint(payload: dict[str, Any]) -> str:
+        external_job_id = str(payload.get("external_job_id") or "").strip()
+        if external_job_id:
+            parsed = urlsplit(external_job_id)
+            normalized_url = urlunsplit(
+                (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, "", "")
+            )
+            identity = f"url:{normalized_url or external_job_id}"
+        else:
+            fields = [
+                payload.get("title"),
+                payload.get("company"),
+                payload.get("salary"),
+                payload.get("detail"),
+            ]
+            normalized_fields = [
+                re.sub(r"\s+", " ", str(value or "")).strip().lower()
+                for value in fields
+            ]
+            identity = "content:" + "\n".join(normalized_fields)
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    def collect_research_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        fingerprint = self._research_job_fingerprint(payload)
+        job, created = self.repository.create_job_if_absent(
+            {
+                **payload,
+                "source": "boss_research",
+                "score": None,
+                "qualified": True,
+                "job_fingerprint": fingerprint,
+                "source_logged_at": utc_now(),
+            },
+            fingerprint,
+        )
+        return {
+            "status": "created" if created else "duplicate",
+            "created": created,
+            "job": job,
+        }
 
     def _resolve_resumes(
         self,

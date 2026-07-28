@@ -41,6 +41,7 @@
 - 收到 Boss 新消息后直接发送指定简历
 - 连续多轮没有新岗位时自动切换关键词继续挂机
 - 遇到超时、详情异常、打招呼异常时自动恢复
+- 可切换到独立调研模式，只采集岗位名称、公司、薪资和完整 JD
 
 ## Resume Agent P0：调研 Prompt 与投递统计
 
@@ -102,6 +103,33 @@ RESUME_AGENT_ALLOW_REMOTE=false
 
 `candidate-profile` 和 `resume-rewrite` 都只返回 Prompt，不调用模型，也不生成或保存修改后的简历。`resume-rewrite` 支持通过 `source_resume_ids` 同时选择多份历史简历。
 
+### Boss JD 调研采集模式
+
+浏览器脚本右下角提供“投递 / 调研”模式切换，默认选择调研模式。调研模式用于只采集岗位数据，不执行评分、打招呼、发送简历或处理聊天消息。
+
+使用流程：
+
+1. 启动后端并安装最新的 `web_script.js`；
+2. 打开 Boss 岗位搜索页，或在其他 Boss 页面点击“打开搜索页”；
+3. 在右下角的“搜索岗位”输入框中填写一个或多个关键词，支持逗号、中文逗号、分号和换行分隔；
+4. 确认“调研”模式，并设置每个关键词的“预加载上限”（默认 50，范围 1-300），然后点击“开始”；
+5. 每个关键词搜索后可在 `manualFilterWaitMs` 时间内调整地区、薪资、经验等筛选条件；
+6. 脚本自动滚动加载当前结果，达到预加载上限或连续 8 轮岗位数量无增长后，逐个采集岗位名称、公司、薪资和完整 JD；
+7. 每个关键词自动创建独立项目，全部关键词各执行一次后停止。
+
+搜索关键词和预加载上限保存在浏览器的 `localStorage` 中，刷新后会自动恢复；浏览器保存的预加载上限优先于后端配置。首次使用时才读取后端 `tags` 和 `preloadMaxRounds` 作为初始值。脚本不会从其他页面跳转到搜索页后自动运行，必须在搜索页确认模式、关键词和预加载上限并手工点击“开始”。
+
+采集结果直接写入 `resume_agent.db`，固定标记为合格调研样本，不写入投递动作日志。同一项目内按岗位 URL 去重；同一岗位出现在不同关键词项目中会分别保留。四个目标字段任一缺失时，该岗位不会入库，页面日志会显示缺失字段。
+
+采集完成后可通过以下接口查看数据：
+
+- `GET /resume-agent/v1/candidates`：列出自动创建的调研项目；
+- `GET /resume-agent/v1/candidates/{candidate_id}/jobs`：列出某个项目的岗位；
+- `GET /resume-agent/v1/market-report?candidate_id=...`：查看该项目的关键词和薪资统计；
+- `POST /resume-agent/v1/research-reports`：选择岗位并保存结构化调研报告。
+
+模式、搜索关键词和预加载上限在点击“开始”后锁定。要重新设置，请刷新 Boss 搜索页。
+
 ### JD逆向调研与薪资口径
 
 新版浏览器请求只额外携带当前 `searchKeyword`，不改变原有评分请求体、分数、阈值和投递动作。后端的 `job_decisions.jsonl` 额外记录：
@@ -155,8 +183,10 @@ RESUME_AGENT_ALLOW_REMOTE=false
 ### 1. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
+
+项目使用 `.python-version` 固定 Python 3.11。`uv sync` 会自动准备对应的 Python 环境，并在仓库下创建 `.venv`。
 
 ### 2. 准备用户配置
 
@@ -166,7 +196,7 @@ cp user_config.example.json user_config.json
 
 首次最少只需要改这些字段：
 - `introduce`：固定打招呼语
-- `tags`：搜索关键词列表
+- `tags`：浏览器尚未保存自定义关键词时使用的初始搜索关键词列表
 - `frontend.resumeIndex`：发第几份简历，从 0 开始
 - `frontend.thread`：投递阈值
 
@@ -183,13 +213,7 @@ cp resume-example.md resume.md
 ### 4. 启动后端
 
 ```bash
-python main.py
-```
-
-Windows 下也可以直接双击：
-
-```text
-start_backend.bat
+uv run python main.py
 ```
 
 ### 5. 部署浏览器脚本
@@ -204,9 +228,10 @@ start_backend.bat
    - `tags`
    - `frontend.resumeIndex`
    - `frontend.thread`
-3. 启动后端 `python main.py`
-4. 浏览器装入 `web_script.js`
-5. 打开 Boss 直聘页面测试
+3. 执行 `uv sync` 安装锁定依赖
+4. 启动后端 `uv run python main.py`
+5. 浏览器装入 `web_script.js`
+6. 打开 Boss 直聘页面测试
 
 ## 配置说明
 
@@ -239,6 +264,7 @@ start_backend.bat
 - `greetTimeout`
 - `preloadScrollPixels`
 - `preloadScrollWaitMs`
+- `preloadMaxRounds`
 
 ### `backend`
 后端运行参数，例如：

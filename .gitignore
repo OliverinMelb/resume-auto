@@ -1,5 +1,6 @@
 test.*
 __pycache__
+.venv/
 .codex
 cache.json
 user_config.json

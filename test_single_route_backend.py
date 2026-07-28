@@ -1,5 +1,7 @@
 import asyncio
 import json
+import shutil
+import subprocess
 import sys
 import types
 import unittest
@@ -33,8 +35,8 @@ TEST_USER_CONFIG = {
         'greetTimeout': 12000,
         'preloadScrollPixels': 180,
         'preloadScrollWaitMs': 450,
-        'preloadStableRoundsLimit': 24,
-        'preloadMaxRounds': 300,
+        'preloadStableRoundsLimit': 8,
+        'preloadMaxRounds': 50,
         'preloadActivateCardEvery': 0,
         'preloadActivateCardWaitMs': 250,
     },
@@ -163,6 +165,135 @@ class SingleRouteBackendTests(unittest.TestCase):
         self.assertNotIn('profile', result)
         self.assertNotIn('routeReason', result)
         self.assertNotIn('routeScores', result)
+
+    def test_research_mode_collects_before_delivery_actions(self):
+        script = (ROOT / 'web_script.js').read_text(encoding='utf-8')
+        collection_start = script.index(
+            "if (activeMode === 'research') {",
+            script.index('const jobInfo = await getJobInfo(href);'),
+        )
+        collection_end = script.index('if (jobInfo.skip)', collection_start)
+        collection_branch = script[collection_start:collection_end]
+
+        self.assertIn('api.collectResearchJob', collection_branch)
+        self.assertIn("return loop();", collection_branch)
+        self.assertNotIn('api.getJobScore', collection_branch)
+        self.assertNotIn('logAction(', collection_branch)
+        self.assertNotIn('addToChatList(', collection_branch)
+        self.assertIn("logger.getMode()", script)
+        self.assertIn("logger.complete('已完成')", script)
+
+    def test_search_settings_are_available_before_manual_start(self):
+        script = (ROOT / 'web_script.js').read_text(encoding='utf-8')
+        logger_start = script.index('class Logger')
+        search_start = script.index('async __search(tagIdx)')
+        init_start = script.index('const init = () =>', search_start)
+        init_end = script.index('init();', init_start)
+        init_block = script[init_start:init_end]
+
+        self.assertIn('keywordInput', script[logger_start:search_start])
+        self.assertIn('goodjobs.searchKeywords', script)
+        self.assertIn('parseSearchKeywords', script)
+        self.assertIn('logger.getKeywords()', script[search_start:])
+        self.assertNotIn('logger.runBtn.click()', init_block)
+        self.assertLess(
+            script.index('ctn.appendChild(modeBox)', logger_start),
+            script.index("runBtn.addEventListener('click'", logger_start),
+        )
+
+    def test_preload_round_setting_normalizes_and_persists(self):
+        script = (ROOT / 'web_script.js').read_text(encoding='utf-8')
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is required to execute the userscript normalization helper')
+
+        helper_start = script.index('const DEFAULT_PRELOAD_MAX_ROUNDS')
+        helper_end = script.index('// 元素选择器', helper_start)
+        helper_source = script[helper_start:helper_end]
+        probe = helper_source + """
+console.log(JSON.stringify([
+    normalizePreloadMaxRounds(''),
+    normalizePreloadMaxRounds('not-a-number'),
+    normalizePreloadMaxRounds('50.6'),
+    normalizePreloadMaxRounds('-2'),
+    normalizePreloadMaxRounds('301'),
+]));
+"""
+        result = subprocess.run(
+            [node, '-e', probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+        )
+
+        self.assertEqual(json.loads(result.stdout), [50, 50, 51, 1, 300])
+        self.assertIn("goodjobs.preloadMaxRounds", script)
+        self.assertIn("preloadInput.type = 'number'", script)
+        self.assertIn('preloadInput.min = String(MIN_PRELOAD_MAX_ROUNDS)', script)
+        self.assertIn('preloadInput.max = String(MAX_PRELOAD_MAX_ROUNDS)', script)
+        self.assertIn('this.preloadInput.disabled = true', script)
+        self.assertIn("this.setMode('research')", script)
+
+    def test_preload_flow_uses_locked_round_limit_and_job_count_only(self):
+        script = (ROOT / 'web_script.js').read_text(encoding='utf-8')
+        preload_start = script.index('const preloadJobs = async () =>')
+        preload_end = script.index('const pickNextKeyword', preload_start)
+        preload_block = script[preload_start:preload_end]
+        main_start = script.index('const main = async () =>', preload_end)
+        main_end = script.index('// 初始化', main_start)
+        main_block = script[main_start:main_end]
+
+        self.assertIn(
+            'for (let round = 1; round <= activePreloadMaxRounds; round++)',
+            preload_block,
+        )
+        self.assertIn('afterCount > highestCount', preload_block)
+        self.assertNotIn('scrollY', preload_block)
+        self.assertIn('PRELOAD_STABLE_ROUNDS_LIMIT = 8', script)
+        self.assertIn('stableRounds >= OPTIONS.preloadStableRoundsLimit', preload_block)
+        self.assertIn('已达到用户设置的 ${activePreloadMaxRounds} 轮上限', preload_block)
+        self.assertIn('连续 ${stableRounds} 轮无新增岗位', preload_block)
+        self.assertIn('开始提取职位详情', preload_block)
+        self.assertLess(
+            main_block.index('logger.lockSettings()'),
+            main_block.index('await clientConfigPromise'),
+        )
+        self.assertLess(
+            main_block.index('activePreloadMaxRounds = logger.getPreloadMaxRounds()'),
+            main_block.index('await startRound()'),
+        )
+
+    def test_research_project_is_created_before_preloading(self):
+        script = (ROOT / 'web_script.js').read_text(encoding='utf-8')
+        round_start = script.index('const startRound = async () =>')
+        round_end = script.index('// 主函数', round_start)
+        round_block = script[round_start:round_end]
+
+        self.assertLess(
+            round_block.index('await tools.asyncSleep(OPTIONS.manualFilterWaitMs)'),
+            round_block.index('await api.createResearchProject(keyword, location.href)'),
+        )
+        self.assertLess(
+            round_block.index('await api.createResearchProject(keyword, location.href)'),
+            round_block.index('await preloadJobs()'),
+        )
+        self.assertLess(
+            round_block.index('await preloadJobs()'),
+            round_block.index('loop();'),
+        )
+
+    def test_preload_defaults_are_exposed_by_backend_config(self):
+        from config import Config
+
+        self.assertEqual(Config.frontend['preloadMaxRounds'], 50)
+        self.assertEqual(Config.frontend['preloadStableRoundsLimit'], 8)
+
+    def test_client_config_does_not_override_bootstrap_server_host(self):
+        script = (ROOT / 'web_script.js').read_text(encoding='utf-8')
+
+        self.assertIn('const bootstrapServerHost = OPTIONS.serverHost', script)
+        self.assertIn('OPTIONS.serverHost = bootstrapServerHost', script)
 
 
 if __name__ == '__main__':

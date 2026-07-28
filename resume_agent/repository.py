@@ -116,6 +116,20 @@ class Repository:
         data["target_roles"] = json.loads(data.pop("target_roles_json"))
         return data
 
+    def list_candidates(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM candidates ORDER BY created_at DESC"
+            ).fetchall()
+        candidates = []
+        for row in rows:
+            candidate = dict(row)
+            candidate["target_roles"] = json.loads(
+                candidate.pop("target_roles_json")
+            )
+            candidates.append(candidate)
+        return candidates
+
     def create_source_resume(
         self, candidate_id: str, label: str, content: str
     ) -> dict[str, Any]:
@@ -194,6 +208,56 @@ class Repository:
                 ),
             )
         return self.get_job(job_id)
+
+    def create_job_if_absent(
+        self, payload: dict[str, Any], job_fingerprint: str
+    ) -> tuple[dict[str, Any], bool]:
+        candidate_id = payload.get("candidate_id")
+        if not candidate_id:
+            raise ValueError("调研采集岗位必须指定候选人")
+        self.get_candidate(candidate_id)
+        job_id = new_id("job")
+        created_at = utc_now()
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE candidate_id = ? AND job_fingerprint = ?
+                LIMIT 1
+                """,
+                (candidate_id, job_fingerprint),
+            ).fetchone()
+            if existing is not None:
+                return dict(existing), False
+            connection.execute(
+                """
+                INSERT INTO jobs(
+                    id, candidate_id, external_job_id, source, title,
+                    salary, detail, company, score, qualified, search_keyword,
+                    job_fingerprint, source_logged_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    candidate_id,
+                    payload.get("external_job_id"),
+                    payload["source"],
+                    payload["title"],
+                    payload.get("salary", ""),
+                    payload["detail"],
+                    payload.get("company", ""),
+                    payload.get("score"),
+                    payload.get("qualified"),
+                    payload.get("search_keyword"),
+                    job_fingerprint,
+                    payload.get("source_logged_at"),
+                    created_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            return dict(row), True
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         with self._connect() as connection:

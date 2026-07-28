@@ -30,6 +30,16 @@ class JobCreate(BaseModel):
     source_logged_at: str | None = Field(default=None, max_length=100)
 
 
+class ResearchJobCollectRequest(BaseModel):
+    candidate_id: str
+    external_job_id: str | None = Field(default=None, max_length=2000)
+    title: str = Field(min_length=1, max_length=500)
+    salary: str = Field(min_length=1, max_length=200)
+    detail: str = Field(min_length=1, max_length=100_000)
+    company: str = Field(min_length=1, max_length=500)
+    search_keyword: str = Field(min_length=1, max_length=500)
+
+
 class ResearchFinding(BaseModel):
     category: str = Field(min_length=1, max_length=100)
     text: str = Field(min_length=1, max_length=5000)
