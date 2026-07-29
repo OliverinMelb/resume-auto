@@ -16,3 +16,7 @@ resume_agent.db
 resume_agent.db-shm
 resume_agent.db-wal
 resume-agent-exports/
+data/
+output/
+csv_export/
+tmp/
