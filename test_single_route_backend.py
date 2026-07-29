@@ -183,6 +183,112 @@ class SingleRouteBackendTests(unittest.TestCase):
         self.assertIn("logger.getMode()", script)
         self.assertIn("logger.complete('已完成')", script)
 
+    def test_safe_dom_helpers_tolerate_changed_or_broken_markup(self):
+        script = (ROOT / 'web_script.js').read_text(encoding='utf-8')
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is required to execute the DOM helper probe')
+
+        helper_start = script.index('function safeQuery(')
+        helper_end = script.index('// 元素选择器', helper_start)
+        helper_source = script[helper_start:helper_end]
+        probe = helper_source + """
+const textElement = {
+    innerText: '  AI 应用工程师  ',
+    getAttribute(name) {
+        if (name === 'href') return '/job/123';
+        throw new Error('changed attribute');
+    },
+};
+const root = {
+    querySelector(selector) {
+        if (selector === '[broken') throw new Error('invalid selector');
+        return selector === '.fallback' ? textElement : null;
+    },
+    querySelectorAll() {
+        throw new Error('changed list structure');
+    },
+};
+console.log(JSON.stringify({
+    fallbackFound: safeQuery(root, ['[broken', '.fallback']) === textElement,
+    missingFound: safeQuery(root, '.missing') === null,
+    listCount: safeQueryAll(root, '.job').length,
+    text: safeText(root, ['[broken', '.fallback']),
+    href: safeAttribute(textElement, 'href'),
+    brokenAttribute: safeAttribute(textElement, 'data-url'),
+}));
+"""
+        result = subprocess.run(
+            [node, '-e', probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+        )
+
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                'fallbackFound': True,
+                'missingFound': True,
+                'listCount': 0,
+                'text': 'AI 应用工程师',
+                'href': '/job/123',
+                'brokenAttribute': '',
+            },
+        )
+
+    def test_changed_boss_dom_is_skipped_without_stopping_the_run(self):
+        script = (ROOT / 'web_script.js').read_text(encoding='utf-8')
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('node is required to execute the detail extraction probe')
+
+        search_start = script.index('const getJobHrefs = async () =>')
+        next_page_start = script.index('const nextPage = async () =>', search_start)
+        search_block = script[search_start:next_page_start]
+        next_page_end = script.index('document.nextPage = nextPage', next_page_start)
+        next_page_block = script[next_page_start:next_page_end]
+        detail_start = script.index('__detail()')
+        detail_end = script.index('// 聊天页', detail_start)
+        detail_block = script[detail_start:detail_end]
+
+        self.assertIn("return { available: false, hrefs: [], elements: [] };", search_block)
+        self.assertIn('if (!pageJobs.available) return false;', next_page_block)
+        self.assertIn('buildUnavailableJobInfo', detail_block)
+        self.assertIn("return buildUnavailableJobInfo('页面结构变化，未能读取职位信息');", detail_block)
+        self.assertIn('页面结构变化或内容未加载，缺少：', detail_block)
+        self.assertIn("['公司', company]", detail_block)
+        self.assertIn('safeQuery(document, SELECTORS.ZHIPIN.DETAIL.STARTCHAT_CANDIDATES)', detail_block)
+        self.assertNotIn('document.querySelector(', detail_block)
+
+        helper_start = script.index('function safeQuery(')
+        helper_end = script.index('// 元素选择器', helper_start)
+        selectors_start = script.index('const SELECTORS =')
+        selectors_end = script.index('// 搜索路径', selectors_start)
+        unavailable_start = detail_block.index('const buildUnavailableJobInfo')
+        unavailable_end = detail_block.index('// 来自搜索页', unavailable_start)
+        detail_probe_source = detail_block[unavailable_start:unavailable_end]
+        probe = (
+            script[helper_start:helper_end]
+            + script[selectors_start:selectors_end]
+            + "const document = { querySelector() { throw new Error('Boss changed DOM'); } };\n"
+            + detail_probe_source
+            + "\nconsole.log(JSON.stringify(jobInfo));\n"
+        )
+        result = subprocess.run(
+            [node, '-e', probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+        )
+        job_info = json.loads(result.stdout)
+        self.assertTrue(job_info['skip'])
+        self.assertEqual(job_info['title'], '')
+        self.assertEqual(job_info['detail'], '')
+        self.assertIn('页面结构变化', job_info['skipReason'])
+
     def test_search_settings_are_available_before_manual_start(self):
         script = (ROOT / 'web_script.js').read_text(encoding='utf-8')
         logger_start = script.index('class Logger')

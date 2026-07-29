@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         goodJobs
 // @namespace    http://tampermonkey.net/
-// @version      2026.07.28.3
+// @version      2026.07.28.4
 // @description  goodJobs篡改猴插件
 // @match        https://www.zhipin.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=zhipin.com
@@ -31,7 +31,7 @@
         preloadActivateCardWaitMs: 250, // 轻点岗位卡片后的额外等待时间
     };
 
-    const SCRIPT_VERSION = '2026.07.28.3';
+    const SCRIPT_VERSION = '2026.07.28.4';
     const SEARCH_KEYWORDS_STORAGE_KEY = 'goodjobs.searchKeywords';
     const PRELOAD_MAX_ROUNDS_STORAGE_KEY = 'goodjobs.preloadMaxRounds';
     const DEFAULT_PRELOAD_MAX_ROUNDS = 50;
@@ -69,6 +69,52 @@
         return Math.min(MAX_PRELOAD_MAX_ROUNDS, Math.max(MIN_PRELOAD_MAX_ROUNDS, Math.round(numericValue)));
     }
 
+    function safeQuery(root, selectors) {
+        if (!root || typeof root.querySelector !== 'function') return null;
+        const selectorList = Array.isArray(selectors) ? selectors : [selectors];
+        for (const selector of selectorList) {
+            if (typeof selector !== 'string' || !selector.trim()) continue;
+            try {
+                const element = root.querySelector(selector);
+                if (element) return element;
+            } catch (e) {
+                // Boss 页面结构可能临时变化；当前选择器不可用时尝试下一个。
+            }
+        }
+        return null;
+    }
+
+    function safeQueryAll(root, selector) {
+        if (!root || typeof root.querySelectorAll !== 'function') return [];
+        try {
+            return Array.from(root.querySelectorAll(selector));
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function safeElementText(element) {
+        if (!element) return '';
+        try {
+            return String(element.innerText || element.textContent || '').trim();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function safeText(root, selectors) {
+        return safeElementText(safeQuery(root, selectors));
+    }
+
+    function safeAttribute(element, name) {
+        if (!element || typeof element.getAttribute !== 'function') return '';
+        try {
+            return String(element.getAttribute(name) || '').trim();
+        } catch (e) {
+            return '';
+        }
+    }
+
     // 元素选择器
     const SELECTORS = {
         ZHIPIN: {
@@ -89,6 +135,31 @@
                 DETAIL: '.job-sec-text', // 职位详情
                 COMPANY: '.job-detail-company .company-name, .sider-company .company-name, .company-info .company-name, .company-info a', // 公司名称
                 CHATURL: 'redirect-url', // 聊天链接
+                STARTCHAT_CANDIDATES: [
+                    '.btn-startchat',
+                    '[redirect-url][data-url]',
+                ],
+                JOBNAME_CANDIDATES: [
+                    '.name h1',
+                    '.job-primary .name h1',
+                    '[class*="job-title"]',
+                ],
+                SALARY_CANDIDATES: [
+                    '.name .salary',
+                    '.job-primary .salary',
+                    '[class*="salary"]',
+                ],
+                DESCRIPTION_CANDIDATES: [
+                    '.job-sec-text',
+                    '.job-detail-section .text',
+                    '.job-detail .text',
+                ],
+                COMPANY_CANDIDATES: [
+                    '.job-detail-company .company-name',
+                    '.sider-company .company-name',
+                    '.company-info .company-name',
+                    '.company-info a',
+                ],
             },
             CHAT: {
                 // 聊天
@@ -1117,20 +1188,31 @@
             const getJobHrefs = async () => {
                 try {
                     const jobUl = await tools.endlessFind(SELECTORS.ZHIPIN.SEARCH.JOBLIST);
-                    const aList = jobUl.querySelectorAll(SELECTORS.ZHIPIN.SEARCH.JOBHREFS);
-                    const hrefs = Array.from(aList)
-                        .map(a => ({
-                            href: a.href,
-                            company: a.closest(SELECTORS.ZHIPIN.SEARCH.JOBCARD)
-                                ?.querySelector(SELECTORS.ZHIPIN.SEARCH.COMPANY)
-                                ?.innerText?.trim() || '',
-                        }))
+                    const aList = safeQueryAll(jobUl, SELECTORS.ZHIPIN.SEARCH.JOBHREFS);
+                    const hrefs = aList
                         .slice(elsLen)
+                        .map(a => {
+                            const href = (typeof a?.href === 'string' ? a.href : '') || safeAttribute(a, 'href');
+                            if (!href) return null;
+                            let card = null;
+                            try {
+                                card = typeof a.closest === 'function'
+                                    ? a.closest(SELECTORS.ZHIPIN.SEARCH.JOBCARD)
+                                    : null;
+                            } catch (e) {
+                                card = null;
+                            }
+                            return {
+                                href,
+                                company: safeText(card, SELECTORS.ZHIPIN.SEARCH.COMPANY),
+                            };
+                        })
+                        .filter(Boolean)
                         .filter(job => !processedJobHrefs.has(job.href));
-                    return [hrefs, aList];
+                    return { available: true, hrefs, elements: aList };
                 } catch (e) {
-                    logger.add('获取职位链接出错');
-                    throw new Error('获取职位链接出错');
+                    logger.add('当前页面未找到可读取的岗位列表，已跳过本轮');
+                    return { available: false, hrefs: [], elements: [] };
                 }
             };
 
@@ -1175,8 +1257,9 @@
             // 下一页
             const nextPage = async () => {
                 while (true) {
-                    let hrefs, els;
-                    [hrefs, els] = await getJobHrefs();
+                    const pageJobs = await getJobHrefs();
+                    if (!pageJobs.available) return false;
+                    const { hrefs, elements: els } = pageJobs;
                     if (els.length === elsLen) {
                         logger.add('没有更多职位了');
                         return false;
@@ -1311,9 +1394,23 @@
                     this.bcTypes.GET_JOB_INFO,
                     OPTIONS.detailTimeout
                 ).catch(() => ({
+                    title: '',
+                    company: '',
+                    salary: '',
+                    detail: '',
                     skip: true,
                     skipReason: `获取职位详情超时（>${(OPTIONS.detailTimeout / 1000).toFixed(0)}s）`,
                 }));
+                if (!info || typeof info !== 'object') {
+                    return {
+                        title: '',
+                        company: '',
+                        salary: '',
+                        detail: '',
+                        skip: true,
+                        skipReason: '详情页未返回可读取的职位信息',
+                    };
+                }
                 return info;
             };
 
@@ -1464,7 +1561,10 @@
                             .filter(field => !researchJob[field]);
                         if (missingFields.length) {
                             currentResearchStats.incomplete += 1;
-                            logger.add(`调研岗位未入库，缺少字段：${missingFields.join('、')}`);
+                            const reason = jobInfo.skipReason
+                                ? `；${jobInfo.skipReason}`
+                                : '';
+                            logger.add(`调研岗位未入库，缺少字段：${missingFields.join('、')}${reason}`);
                             return loop();
                         }
                         try {
@@ -1712,43 +1812,68 @@
             };
             startBroadcast();
 
+            const buildUnavailableJobInfo = (reason) => ({
+                title: '',
+                company: '',
+                salary: '',
+                detail: '',
+                actionText: '',
+                chatUrl: '',
+                addUrl: '',
+                skip: true,
+                skipReason: reason,
+                talked: false,
+            });
+
             // 获取职位信息
             const getJobInfo = () => {
-                const chatBtn = document.querySelector(SELECTORS.ZHIPIN.DETAIL.STARTCHAT);
-                const nameBox = document.querySelector(SELECTORS.ZHIPIN.DETAIL.NAMEBOX);
-                const title = nameBox?.querySelector(SELECTORS.ZHIPIN.DETAIL.JOBNAME)?.innerText?.trim() || '';
-                const salary = nameBox?.querySelector(SELECTORS.ZHIPIN.DETAIL.SALARY)?.innerText?.trim() || '';
-                const detail = document.querySelector(SELECTORS.ZHIPIN.DETAIL.DETAIL)?.innerText?.trim() || '';
-                const company = document.querySelector(SELECTORS.ZHIPIN.DETAIL.COMPANY)?.innerText?.trim() || '';
-                const actionText = chatBtn ? chatBtn.innerText.trim() : '';
-                const chatUrl = chatBtn && chatBtn.getAttribute(SELECTORS.ZHIPIN.DETAIL.CHATURL);
-                const addUrl = chatBtn && chatBtn.dataset.url;
-                let skip = false;
-                let skipReason = '';
+                try {
+                    const chatBtn = safeQuery(document, SELECTORS.ZHIPIN.DETAIL.STARTCHAT_CANDIDATES);
+                    const title = safeText(document, SELECTORS.ZHIPIN.DETAIL.JOBNAME_CANDIDATES);
+                    const salary = safeText(document, SELECTORS.ZHIPIN.DETAIL.SALARY_CANDIDATES);
+                    const detail = safeText(document, SELECTORS.ZHIPIN.DETAIL.DESCRIPTION_CANDIDATES);
+                    const company = safeText(document, SELECTORS.ZHIPIN.DETAIL.COMPANY_CANDIDATES);
+                    const actionText = safeElementText(chatBtn);
+                    const chatUrl = safeAttribute(chatBtn, SELECTORS.ZHIPIN.DETAIL.CHATURL);
+                    const addUrl = safeAttribute(chatBtn, 'data-url');
+                    const missingFields = [
+                        ['职位名称', title],
+                        ['公司', company],
+                        ['薪资', salary],
+                        ['职位描述', detail],
+                    ].filter(([, value]) => !value).map(([label]) => label);
+                    let skip = false;
+                    let skipReason = '';
 
-                if (!chatBtn) {
-                    skip = true;
-                    skipReason = '未找到立即沟通按钮';
-                } else if (actionText.indexOf('立即沟通') === -1) {
-                    skip = true;
-                    skipReason = `按钮为 [${actionText || '未知'}]，疑似网申岗位`;
-                } else if (!chatUrl || !addUrl) {
-                    skip = true;
-                    skipReason = '缺少聊天链接，疑似异常岗位';
+                    if (missingFields.length) {
+                        skip = true;
+                        skipReason = `页面结构变化或内容未加载，缺少：${missingFields.join('、')}`;
+                    } else if (!chatBtn) {
+                        skip = true;
+                        skipReason = '未找到立即沟通按钮';
+                    } else if (actionText.indexOf('立即沟通') === -1) {
+                        skip = true;
+                        skipReason = `按钮为 [${actionText || '未知'}]，疑似网申岗位`;
+                    } else if (!chatUrl || !addUrl) {
+                        skip = true;
+                        skipReason = '缺少聊天链接，疑似异常岗位';
+                    }
+
+                    return {
+                        title,
+                        company,
+                        salary,
+                        detail,
+                        actionText,
+                        chatUrl,
+                        addUrl,
+                        skip,
+                        skipReason,
+                        talked: safeAttribute(chatBtn, 'data-isfriend') === 'true',
+                    };
+                } catch (e) {
+                    return buildUnavailableJobInfo('页面结构变化，未能读取职位信息');
                 }
-
-                return {
-                    title,
-                    company,
-                    salary,
-                    detail,
-                    actionText,
-                    chatUrl,
-                    addUrl,
-                    skip,
-                    skipReason,
-                    talked: chatBtn && chatBtn.dataset.isfriend === 'true',
-                };
             };
             const jobInfo = getJobInfo();
 
