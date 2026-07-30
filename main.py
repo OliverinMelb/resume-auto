@@ -13,7 +13,10 @@ from config import Config
 app = FastAPI()
 if hasattr(app, 'include_router'):
     from resume_agent import router as resume_agent_router
+    from job_sources.router import router as job_sources_router
+
     app.include_router(resume_agent_router)
+    app.include_router(job_sources_router)
 LOG_PATH = Path(__file__).resolve().parent / 'job_decisions.jsonl'
 ACTION_LOG_PATH = Path(__file__).resolve().parent / 'job_actions.jsonl'
 

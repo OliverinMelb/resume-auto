@@ -16,3 +16,4 @@ resume_agent.db
 resume_agent.db-shm
 resume_agent.db-wal
 resume-agent-exports/
+.runtime/

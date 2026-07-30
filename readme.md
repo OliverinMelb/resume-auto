@@ -332,3 +332,57 @@ uv run python main.py
 - 继续优先保证 Boss 自动化链路稳定
 - 不把主线重新做回复杂双路由或重度模型依赖版本
 - 继续让评分更贴近 JD 正文真实技术要求，而不是岗位名字字面词
+
+## 牛客 JD 调研
+
+牛客作为独立数据源接入，不修改现有 Boss 脚本。它使用可见 Playwright Chrome
+操作牛客自己的职位搜索框和筛选页面，再以限速公开 HTTP 读取详情；HTTP 详情失败时
+才使用同一个可见页面回退。不会绕过登录、验证码或访问限制，也不会自动投递。
+
+完整的修改说明、操作步骤、状态解释、验证方法和回滚方式见
+[`docs/nowcoder.md`](docs/nowcoder.md)。
+
+启动后访问 FastAPI 文档：
+
+```text
+http://127.0.0.1:8010/docs
+```
+
+也可以直接使用本地搜索页面：
+
+```text
+http://127.0.0.1:8010/job-sources/nowcoder/ui
+```
+
+首次运行会打开仓库专用的 Chrome 用户目录：
+
+```text
+.runtime/nowcoder/browser-profile/
+```
+
+如牛客要求登录，请在这个可见窗口中正常登录一次。该目录、任务检查点和 Cookie
+都被 Git 忽略，服务不会读取、打印或导出 Cookie。
+
+页面支持两种模式：
+
+- 快速预览：最多 30 条、最多 3 页，只显示和评分，不写数据库；
+- 完整调研：读取当前筛选下可见结果，保存安全检查点，可停止和显式恢复，并写入
+  新建或指定的 Resume Agent 候选项目。
+
+完整调研按 `nowcoder + sourceJobId` 去重。实习薪资原文会在页面和 JD 证据中保留，
+但不会写入通用市场薪资统计字段。
+
+任务接口：
+
+```text
+GET /job-sources/nowcoder/health
+POST /job-sources/nowcoder/tasks
+GET  /job-sources/nowcoder/tasks/{task_id}
+GET  /job-sources/nowcoder/tasks/{task_id}/jobs
+POST /job-sources/nowcoder/tasks/{task_id}/stop
+POST /job-sources/nowcoder/tasks/{task_id}/resume
+```
+
+旧的只读 `/search`、`/jobs` 和单条详情接口暂时保留用于兼容，但新页面不再使用
+“三个入口首屏本地匹配”的旧搜索方式。Moka、北森等外部 ATS 聚合岗位只读取牛客
+公开摘要和官网申请链接，不继续访问外部 ATS。

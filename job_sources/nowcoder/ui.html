@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>牛客 JD 调研</title>
+  <style>
+    :root {
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #192230;
+      background: #f4f6f9;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { width: min(1120px, calc(100% - 32px)); margin: 36px auto 64px; }
+    h1 { margin: 0 0 8px; font-size: 30px; }
+    h2 { margin: 0; font-size: 18px; }
+    .muted { color: #687386; }
+    .panel, .job {
+      background: #fff;
+      border: 1px solid #dfe4ea;
+      border-radius: 14px;
+      box-shadow: 0 8px 24px rgba(22, 34, 51, .05);
+    }
+    .panel { margin-top: 22px; padding: 20px; }
+    form {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+    label { display: grid; gap: 7px; font-size: 13px; color: #475467; }
+    input, select, button {
+      width: 100%;
+      min-height: 42px;
+      padding: 0 12px;
+      border: 1px solid #cfd6df;
+      border-radius: 9px;
+      background: #fff;
+      font: inherit;
+    }
+    button {
+      width: auto;
+      border-color: #1f66d1;
+      background: #1f66d1;
+      color: #fff;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button.secondary { border-color: #cfd6df; background: #fff; color: #344054; }
+    button:disabled { cursor: wait; opacity: .55; }
+    .actions { display: flex; gap: 10px; align-items: end; }
+    .wide { grid-column: span 2; }
+    .research-only { display: none; }
+    .research-on .research-only { display: grid; }
+    .notice {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: #eff6ff;
+      color: #174c88;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    #status-panel { display: none; }
+    .status-head, .job-head, .links {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .metric { padding: 12px; border-radius: 10px; background: #f6f8fa; }
+    .metric strong { display: block; margin-top: 4px; font-size: 20px; }
+    #results { display: grid; gap: 12px; margin-top: 18px; }
+    .job { padding: 18px; }
+    .job h3 { margin: 0; font-size: 18px; }
+    .score {
+      min-width: 58px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: #eef4ff;
+      color: #2949a6;
+      text-align: center;
+      font-weight: 700;
+    }
+    .tags { display: flex; flex-wrap: wrap; gap: 7px; margin: 11px 0; }
+    .tag { padding: 4px 8px; border-radius: 999px; background: #f1f3f5; font-size: 12px; }
+    .links { justify-content: flex-start; margin-top: 12px; }
+    a { color: #175fc1; text-decoration: none; }
+    .error { color: #b42318; }
+    @media (max-width: 780px) {
+      form { grid-template-columns: 1fr; }
+      .wide { grid-column: span 1; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>牛客 JD 调研</h1>
+      <div class="muted">使用牛客真实筛选页；Playwright 会打开独立可见 Chrome，登录或验证由你正常完成。</div>
+    </header>
+
+    <section id="form-panel" class="panel">
+      <form id="task-form">
+        <label class="wide">
+          公司名或职位关键词
+          <input id="keyword" value="后端开发" maxlength="100" required>
+        </label>
+        <label>
+          招聘频道
+          <select id="channel">
+            <option value="internship" selected>实习</option>
+            <option value="campus">校招</option>
+            <option value="social">社招</option>
+          </select>
+        </label>
+        <label>
+          城市
+          <input id="city" value="上海" maxlength="100">
+        </label>
+        <label>
+          毕业年份（可选）
+          <input id="graduation-year" placeholder="例如：2027届" maxlength="50">
+        </label>
+        <label>
+          排序
+          <select id="sort">
+            <option value="recommended" selected>推荐排序</option>
+            <option value="latest">最新发布</option>
+          </select>
+        </label>
+        <label>
+          运行模式
+          <select id="mode">
+            <option value="quick" selected>快速预览（最多 30 条，不写数据库）</option>
+            <option value="research">完整调研（保存并可恢复）</option>
+          </select>
+        </label>
+        <label class="research-only">
+          调研项目
+          <select id="project-choice">
+            <option value="new" selected>新建项目</option>
+          </select>
+        </label>
+        <label class="research-only wide">
+          新项目名称
+          <input id="project-name" placeholder="留空则按关键词和城市自动命名" maxlength="200">
+        </label>
+        <div class="actions">
+          <button id="start" type="submit">开始调研</button>
+          <button id="stop" class="secondary" type="button" disabled>停止</button>
+          <button id="resume" class="secondary" type="button" disabled>继续</button>
+        </div>
+      </form>
+      <div class="notice">
+        不绕过验证码、不自动投递、不联系招聘者。外部 Moka/北森等岗位只保存牛客公开摘要和官网链接，不继续爬取 ATS。
+      </div>
+      <div class="actions" style="margin-top: 14px">
+        <select id="task-history" aria-label="历史任务">
+          <option value="">载入历史或重启后恢复的任务</option>
+        </select>
+        <button id="load-task" class="secondary" type="button">载入任务</button>
+      </div>
+    </section>
+
+    <section id="status-panel" class="panel">
+      <div class="status-head">
+        <div>
+          <h2 id="status-title">等待开始</h2>
+          <div id="status-detail" class="muted"></div>
+        </div>
+        <div id="task-id" class="muted"></div>
+      </div>
+      <div class="metrics">
+        <div class="metric">页数<strong id="pages">0</strong></div>
+        <div class="metric">发现<strong id="discovered">0</strong></div>
+        <div class="metric">详情成功<strong id="success">0</strong></div>
+        <div class="metric">部分详情<strong id="partial">0</strong></div>
+        <div class="metric">详情失败<strong id="failed">0</strong></div>
+      </div>
+    </section>
+    <section id="results" aria-live="polite"></section>
+  </main>
+
+  <script>
+    const formPanel = document.querySelector("#form-panel");
+    const form = document.querySelector("#task-form");
+    const mode = document.querySelector("#mode");
+    const start = document.querySelector("#start");
+    const stop = document.querySelector("#stop");
+    const resume = document.querySelector("#resume");
+    const projectChoice = document.querySelector("#project-choice");
+    const projectName = document.querySelector("#project-name");
+    const taskHistory = document.querySelector("#task-history");
+    const loadTask = document.querySelector("#load-task");
+    const statusPanel = document.querySelector("#status-panel");
+    const results = document.querySelector("#results");
+    let activeTaskId = null;
+    let pollTimer = null;
+    let projectsLoaded = false;
+
+    const statusLabels = {
+      pending: "等待运行",
+      running: "正在采集",
+      waiting_for_login: "等待你在独立 Chrome 中登录",
+      verification_required: "需要你在独立 Chrome 中完成验证",
+      paused: "已暂停，可继续",
+      completed: "调研完成",
+      failed: "任务失败",
+      stopped: "已停止"
+    };
+
+    function setResearchFields() {
+      formPanel.classList.toggle("research-on", mode.value === "research");
+      projectName.disabled = projectChoice.value !== "new";
+    }
+
+    async function loadProjects() {
+      if (projectsLoaded) return;
+      projectsLoaded = true;
+      try {
+        const response = await fetch("/resume-agent/v1/candidates");
+        if (!response.ok) return;
+        const payload = await response.json();
+        for (const candidate of payload.candidates || []) {
+          const option = document.createElement("option");
+          option.value = candidate.id;
+          option.textContent = `使用已有：${candidate.display_name || candidate.id}`;
+          projectChoice.appendChild(option);
+        }
+      } catch (_) {
+        // 新建项目仍可用；此处不影响牛客检索。
+      }
+    }
+
+    async function loadTaskHistory() {
+      try {
+        const response = await fetch("/job-sources/nowcoder/tasks");
+        if (!response.ok) return;
+        const payload = await response.json();
+        taskHistory.replaceChildren();
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "载入历史或重启后恢复的任务";
+        taskHistory.appendChild(placeholder);
+        for (const task of payload.tasks || []) {
+          const option = document.createElement("option");
+          option.value = task.task_id;
+          option.textContent = `${statusLabels[task.status] || task.status} · ${task.query.keyword} · ${task.query.city || "不限城市"}`;
+          taskHistory.appendChild(option);
+        }
+      } catch (_) {
+        // 历史任务不影响创建新任务。
+      }
+    }
+
+    function renderTask(task) {
+      statusPanel.style.display = "block";
+      document.querySelector("#status-title").textContent =
+        statusLabels[task.status] || task.status;
+      document.querySelector("#status-detail").textContent = [
+        task.stop_reason ? `停止原因：${task.stop_reason}` : "",
+        task.error_type ? `错误类型：${task.error_type}` : "",
+        task.project_id ? `项目：${task.project_id}` : "",
+        task.persisted_count ? `已保存：${task.persisted_count}` : ""
+      ].filter(Boolean).join(" · ");
+      document.querySelector("#task-id").textContent = task.task_id;
+      document.querySelector("#pages").textContent = task.pages_read;
+      document.querySelector("#discovered").textContent = task.discovered_count;
+      document.querySelector("#success").textContent = task.detail_success_count;
+      document.querySelector("#partial").textContent = task.partial_detail_count;
+      document.querySelector("#failed").textContent = task.detail_failure_count;
+      const resumable = ["paused", "failed", "waiting_for_login", "verification_required"].includes(task.status);
+      stop.disabled = !["pending", "running"].includes(task.status);
+      resume.disabled = !resumable;
+      start.disabled = ["pending", "running"].includes(task.status);
+    }
+
+    function addLink(container, label, url) {
+      if (!url) return;
+      const link = document.createElement("a");
+      link.textContent = label;
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      container.appendChild(link);
+    }
+
+    function renderJobs(jobs) {
+      results.replaceChildren();
+      for (const job of jobs) {
+        const card = document.createElement("article");
+        card.className = "job";
+        const head = document.createElement("div");
+        head.className = "job-head";
+        const title = document.createElement("h3");
+        title.textContent = job.title;
+        const score = document.createElement("span");
+        score.className = "score";
+        score.textContent = job.score === null ? "未评分" : `${job.score} 分`;
+        head.append(title, score);
+        card.appendChild(head);
+        const meta = document.createElement("div");
+        meta.className = "muted";
+        meta.textContent = [job.company, ...(job.locations || [])].filter(Boolean).join(" · ") || "公司/地点未提供";
+        card.appendChild(meta);
+        const tags = document.createElement("div");
+        tags.className = "tags";
+        [
+          job.employment_type,
+          job.salary_text,
+          job.detail_status === "partial" ? "部分详情" : null,
+          job.upstream_platform ? `上游 ${job.upstream_platform}` : null,
+          job.qualified === true ? "达到当前阈值" : "仅供调研"
+        ].filter(Boolean).forEach(value => {
+          const tag = document.createElement("span");
+          tag.className = "tag";
+          tag.textContent = value;
+          tags.appendChild(tag);
+        });
+        card.appendChild(tags);
+        const links = document.createElement("div");
+        links.className = "links";
+        addLink(links, "牛客原文", job.source_url);
+        addLink(links, "企业官网", job.official_apply_url);
+        card.appendChild(links);
+        results.appendChild(card);
+      }
+    }
+
+    async function pollTask() {
+      if (!activeTaskId) return;
+      try {
+        const taskResponse = await fetch(`/job-sources/nowcoder/tasks/${activeTaskId}`);
+        const task = await taskResponse.json();
+        if (!taskResponse.ok) throw new Error(task.detail || `HTTP ${taskResponse.status}`);
+        renderTask(task);
+        const jobsResponse = await fetch(`/job-sources/nowcoder/tasks/${activeTaskId}/jobs`);
+        if (jobsResponse.ok) {
+          const payload = await jobsResponse.json();
+          renderJobs(payload.jobs || []);
+        }
+        if (["pending", "running"].includes(task.status)) {
+          pollTimer = window.setTimeout(pollTask, 1000);
+        }
+      } catch (error) {
+        document.querySelector("#status-title").textContent = "读取任务失败";
+        document.querySelector("#status-detail").textContent = error.message;
+        document.querySelector("#status-detail").className = "error";
+        start.disabled = false;
+      }
+    }
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      window.clearTimeout(pollTimer);
+      results.replaceChildren();
+      start.disabled = true;
+      const research = mode.value === "research";
+      const body = {
+        keyword: document.querySelector("#keyword").value,
+        recruitment_channel: document.querySelector("#channel").value,
+        city: document.querySelector("#city").value || null,
+        graduation_year: document.querySelector("#graduation-year").value || null,
+        sort: document.querySelector("#sort").value,
+        mode: mode.value,
+        candidate_id: research && projectChoice.value !== "new" ? projectChoice.value : null,
+        project_name: research && projectChoice.value === "new" ? projectName.value || null : null
+      };
+      try {
+        const response = await fetch("/job-sources/nowcoder/tasks", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body)
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+        activeTaskId = payload.task_id;
+        renderTask(payload);
+        loadTaskHistory();
+        pollTask();
+      } catch (error) {
+        statusPanel.style.display = "block";
+        document.querySelector("#status-title").textContent = "创建任务失败";
+        document.querySelector("#status-detail").textContent = error.message;
+        start.disabled = false;
+      }
+    });
+
+    stop.addEventListener("click", async () => {
+      if (!activeTaskId) return;
+      await fetch(`/job-sources/nowcoder/tasks/${activeTaskId}/stop`, {method: "POST"});
+      pollTask();
+    });
+
+    resume.addEventListener("click", async () => {
+      if (!activeTaskId) return;
+      const response = await fetch(`/job-sources/nowcoder/tasks/${activeTaskId}/resume`, {method: "POST"});
+      const payload = await response.json();
+      if (response.ok) {
+        renderTask(payload);
+        pollTask();
+      }
+    });
+
+    loadTask.addEventListener("click", () => {
+      if (!taskHistory.value) return;
+      activeTaskId = taskHistory.value;
+      pollTask();
+    });
+
+    mode.addEventListener("change", () => {
+      setResearchFields();
+      if (mode.value === "research") loadProjects();
+    });
+    projectChoice.addEventListener("change", setResearchFields);
+    setResearchFields();
+    loadTaskHistory();
+  </script>
+</body>
+</html>
