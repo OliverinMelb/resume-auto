@@ -52,6 +52,8 @@
     .wide { grid-column: span 2; }
     .research-only { display: none; }
     .research-on .research-only { display: grid; }
+    .public-only { display: grid; }
+    .browser-acquisition .public-only { display: none; }
     .notice {
       margin-top: 14px;
       padding: 12px 14px;
@@ -70,7 +72,7 @@
     }
     .metrics {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 10px;
       margin-top: 16px;
     }
@@ -104,7 +106,7 @@
   <main>
     <header>
       <h1>牛客 JD 调研</h1>
-      <div class="muted">使用牛客真实筛选页；Playwright 会打开独立可见 Chrome，登录或验证由你正常完成。</div>
+      <div class="muted">免登录模式直接搜索关键词，并可叠加职位分类和城市后自动翻页；遇到限制时可显式切换浏览器模式。</div>
     </header>
 
     <section id="form-panel" class="panel">
@@ -116,14 +118,16 @@
         <label>
           招聘频道
           <select id="channel">
-            <option value="internship" selected>实习</option>
-            <option value="campus">校招</option>
+            <option value="internship">实习</option>
+            <option value="campus" selected>校招</option>
             <option value="social">社招</option>
           </select>
         </label>
         <label>
           城市
-          <input id="city" value="上海" maxlength="100">
+          <select id="city">
+            <option value="">正在加载城市…</option>
+          </select>
         </label>
         <label>
           毕业年份（可选）
@@ -135,6 +139,20 @@
             <option value="recommended" selected>推荐排序</option>
             <option value="latest">最新发布</option>
           </select>
+        </label>
+        <label>
+          数据获取方式
+          <select id="acquisition-mode">
+            <option value="public" selected>免登录自动筛选（推荐）</option>
+            <option value="browser">浏览器精确筛选（可能需要登录）</option>
+          </select>
+        </label>
+        <label class="public-only wide">
+          职位分类（可选）
+          <select id="career-job">
+            <option value="">不限职位分类</option>
+          </select>
+          <span class="muted">关键词会直接搜索职位名称、标签和 JD；手动选择职位分类只会进一步缩小范围。</span>
         </label>
         <label>
           运行模式
@@ -160,7 +178,7 @@
         </div>
       </form>
       <div class="notice">
-        不绕过验证码、不自动投递、不联系招聘者。外部 Moka/北森等岗位只保存牛客公开摘要和官网链接，不继续爬取 ATS。
+        免登录模式会把关键词直接传给牛客匿名职位搜索，并加载可选分类和城市、自动生成筛选快照后继续翻页，全程不启动 Chrome。快速预览最多 30 条；完整调研按牛客返回页数推进并保留本地检查点。若接口限流、验证或结构变化，任务会停止并提示改用浏览器模式。岗位分数是现有候选人画像匹配分，不是关键词相关度。
       </div>
       <div class="actions" style="margin-top: 14px">
         <select id="task-history" aria-label="历史任务">
@@ -181,6 +199,7 @@
       <div class="metrics">
         <div class="metric">页数<strong id="pages">0</strong></div>
         <div class="metric">发现<strong id="discovered">0</strong></div>
+        <div class="metric">结果<strong id="matched">0</strong></div>
         <div class="metric">详情成功<strong id="success">0</strong></div>
         <div class="metric">部分详情<strong id="partial">0</strong></div>
         <div class="metric">详情失败<strong id="failed">0</strong></div>
@@ -193,6 +212,9 @@
     const formPanel = document.querySelector("#form-panel");
     const form = document.querySelector("#task-form");
     const mode = document.querySelector("#mode");
+    const acquisitionMode = document.querySelector("#acquisition-mode");
+    const city = document.querySelector("#city");
+    const careerJob = document.querySelector("#career-job");
     const start = document.querySelector("#start");
     const stop = document.querySelector("#stop");
     const resume = document.querySelector("#resume");
@@ -205,6 +227,7 @@
     let activeTaskId = null;
     let pollTimer = null;
     let projectsLoaded = false;
+    let anonymousFiltersLoaded = false;
 
     const statusLabels = {
       pending: "等待运行",
@@ -220,6 +243,65 @@
     function setResearchFields() {
       formPanel.classList.toggle("research-on", mode.value === "research");
       projectName.disabled = projectChoice.value !== "new";
+    }
+
+    function setAcquisitionFields() {
+      const isPublic = acquisitionMode.value === "public";
+      formPanel.classList.toggle("browser-acquisition", !isPublic);
+      careerJob.disabled = !isPublic;
+      careerJob.required = false;
+    }
+
+    async function loadAnonymousFilters() {
+      if (anonymousFiltersLoaded) return;
+      anonymousFiltersLoaded = true;
+      const selectedCity = city.value || "上海";
+      const selectedCareerJob = careerJob.value;
+      try {
+        const response = await fetch("/job-sources/nowcoder/filters");
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || `HTTP ${response.status}`);
+        }
+        city.replaceChildren();
+        const anyCity = document.createElement("option");
+        anyCity.value = "";
+        anyCity.textContent = "不限城市";
+        city.appendChild(anyCity);
+        for (const name of payload.cities || []) {
+          const option = document.createElement("option");
+          option.value = name;
+          option.textContent = name;
+          city.appendChild(option);
+        }
+        careerJob.replaceChildren();
+        const automaticCareer = document.createElement("option");
+        automaticCareer.value = "";
+        automaticCareer.textContent = "不限职位分类";
+        careerJob.appendChild(automaticCareer);
+        for (const item of payload.career_jobs || []) {
+          const option = document.createElement("option");
+          option.value = item.id;
+          option.textContent = item.label;
+          careerJob.appendChild(option);
+        }
+        city.value = [...city.options].some(
+          option => option.value === selectedCity
+        ) ? selectedCity : "";
+        careerJob.value = [...careerJob.options].some(
+          option => option.value === selectedCareerJob
+        ) ? selectedCareerJob : "";
+      } catch (error) {
+        anonymousFiltersLoaded = false;
+        city.replaceChildren(
+          new Option(`${selectedCity}（保留的城市）`, selectedCity)
+        );
+        careerJob.replaceChildren(
+          new Option("不限职位分类（分类加载失败）", "")
+        );
+        document.querySelector("#status-detail").textContent = error.message;
+        document.querySelector("#status-detail").className = "error";
+      }
     }
 
     async function loadProjects() {
@@ -266,6 +348,9 @@
       document.querySelector("#status-title").textContent =
         statusLabels[task.status] || task.status;
       document.querySelector("#status-detail").textContent = [
+        task.acquisition_mode === "public" ? "采集方式：免登录自动筛选" :
+          task.acquisition_mode === "browser" ? "采集方式：浏览器精确筛选" : "",
+        task.filtered_url ? `筛选 URL：${task.filtered_url}` : "",
         task.stop_reason ? `停止原因：${task.stop_reason}` : "",
         task.error_type ? `错误类型：${task.error_type}` : "",
         task.project_id ? `项目：${task.project_id}` : "",
@@ -274,6 +359,7 @@
       document.querySelector("#task-id").textContent = task.task_id;
       document.querySelector("#pages").textContent = task.pages_read;
       document.querySelector("#discovered").textContent = task.discovered_count;
+      document.querySelector("#matched").textContent = task.deduplicated_count;
       document.querySelector("#success").textContent = task.detail_success_count;
       document.querySelector("#partial").textContent = task.partial_detail_count;
       document.querySelector("#failed").textContent = task.detail_failure_count;
@@ -304,7 +390,7 @@
         title.textContent = job.title;
         const score = document.createElement("span");
         score.className = "score";
-        score.textContent = job.score === null ? "未评分" : `${job.score} 分`;
+        score.textContent = job.score === null ? "画像未评分" : `画像匹配 ${job.score} 分`;
         head.append(title, score);
         card.appendChild(head);
         const meta = document.createElement("div");
@@ -367,9 +453,11 @@
       const body = {
         keyword: document.querySelector("#keyword").value,
         recruitment_channel: document.querySelector("#channel").value,
-        city: document.querySelector("#city").value || null,
+        city: city.value || null,
         graduation_year: document.querySelector("#graduation-year").value || null,
         sort: document.querySelector("#sort").value,
+        acquisition_mode: document.querySelector("#acquisition-mode").value,
+        career_job_id: acquisitionMode.value === "public" ? careerJob.value || null : null,
         mode: mode.value,
         candidate_id: research && projectChoice.value !== "new" ? projectChoice.value : null,
         project_name: research && projectChoice.value === "new" ? projectName.value || null : null
@@ -421,7 +509,10 @@
       if (mode.value === "research") loadProjects();
     });
     projectChoice.addEventListener("change", setResearchFields);
+    acquisitionMode.addEventListener("change", setAcquisitionFields);
     setResearchFields();
+    setAcquisitionFields();
+    loadAnonymousFilters();
     loadTaskHistory();
   </script>
 </body>

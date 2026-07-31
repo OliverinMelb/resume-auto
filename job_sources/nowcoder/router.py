@@ -25,14 +25,21 @@ from resume_agent.settings import get_settings
 from .browser import NowcoderPlaywrightSearchCollector
 from .checkpoints import NowcoderCheckpointStore
 from .research import NowcoderResearchSink
+from .anonymous import (
+    AnonymousUpstreamError,
+    NowcoderAnonymousApi,
+    UrllibNowcoderTransport,
+)
 from .source import (
     InvalidSourceRequest,
     EmploymentTypeFilter,
     NowcoderPublicSource,
+    NowcoderPublicSearchCollector,
     NowcoderSourceError,
     SourceKind,
     NowcoderSourceAdapter,
 )
+from .models import NowcoderAcquisitionMode
 from .tasks import NowcoderTaskManager
 
 
@@ -42,12 +49,17 @@ router = APIRouter(
     dependencies=[Depends(require_local_request)],
 )
 _source = NowcoderPublicSource()
+_anonymous_api = NowcoderAnonymousApi(UrllibNowcoderTransport())
 _browser_collector = NowcoderPlaywrightSearchCollector()
 _repo_root = Path(__file__).resolve().parents[2]
 _resume_settings = get_settings()
 _tasks = NowcoderTaskManager(
     NowcoderSourceAdapter(
         search_collector=_browser_collector,
+        public_search_collector=NowcoderPublicSearchCollector(
+            _source,
+            anonymous_api=_anonymous_api,
+        ),
         detail_source=_source,
     ),
     checkpoint_store=NowcoderCheckpointStore(
@@ -70,6 +82,14 @@ class NowcoderTaskCreateRequest(BaseModel):
     graduation_year: str | None = Field(default=None, max_length=50)
     sort: JobSort = "recommended"
     mode: CollectionMode = "quick"
+    acquisition_mode: NowcoderAcquisitionMode = "public"
+    career_job_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+        pattern=r"^\d+$",
+    )
+    filtered_url: str | None = Field(default=None, max_length=2048)
     candidate_id: str | None = Field(default=None, max_length=100)
     project_name: str | None = Field(default=None, max_length=200)
 
@@ -79,6 +99,8 @@ def _raise_source_error(error: Exception) -> NoReturn:
         raise HTTPException(status_code=400, detail=str(error)) from error
     if isinstance(error, NowcoderSourceError):
         raise HTTPException(status_code=502, detail=str(error)) from error
+    if isinstance(error, AnonymousUpstreamError):
+        raise HTTPException(status_code=502, detail=str(error)) from error
     raise error
 
 
@@ -87,12 +109,52 @@ def _raise_task_error(error: Exception) -> NoReturn:
         raise HTTPException(status_code=404, detail=str(error)) from error
     if isinstance(error, (ValueError, InvalidSourceRequest)):
         raise HTTPException(status_code=400, detail=str(error)) from error
+    if isinstance(error, (NowcoderSourceError, AnonymousUpstreamError)):
+        raise HTTPException(status_code=502, detail=str(error)) from error
     raise error
+
+
+def _task_filtered_url(payload: NowcoderTaskCreateRequest) -> str | None:
+    if payload.acquisition_mode != "public":
+        return None
+    if payload.career_job_id is not None:
+        return _source.build_filtered_url(
+            payload.recruitment_channel,
+            city=payload.city,
+            career_job_id=payload.career_job_id,
+            keyword=payload.keyword,
+        )
+    if payload.filtered_url is not None:
+        return _source.validate_filtered_url(
+            payload.recruitment_channel,
+            payload.filtered_url,
+        )
+    return _source.build_filtered_url(
+        payload.recruitment_channel,
+        city=payload.city,
+        career_job_id=None,
+        keyword=payload.keyword,
+    )
 
 
 @router.get("/health")
 def nowcoder_health():
     return _source.health_check()
+
+
+@router.get("/filters")
+def nowcoder_filters():
+    try:
+        options = _anonymous_api.get_filter_options()
+        return {
+            "career_jobs": [
+                asdict(option) for option in options.career_jobs
+            ],
+            "hot_cities": list(options.hot_cities),
+            "cities": list(options.cities),
+        }
+    except Exception as error:
+        _raise_source_error(error)
 
 
 @router.get("/ui", response_class=HTMLResponse)
@@ -116,6 +178,7 @@ def nowcoder_search_ui():
 @router.post("/tasks", status_code=202)
 def create_nowcoder_task(payload: NowcoderTaskCreateRequest):
     try:
+        filtered_url = _task_filtered_url(payload)
         query = JobQuery(
             keyword=payload.keyword,
             recruitment_channel=payload.recruitment_channel,
@@ -126,6 +189,8 @@ def create_nowcoder_task(payload: NowcoderTaskCreateRequest):
         snapshot = _tasks.create_task(
             query,
             mode=payload.mode,
+            acquisition_mode=payload.acquisition_mode,
+            filtered_url=filtered_url,
             candidate_id=payload.candidate_id,
             project_name=payload.project_name,
         )

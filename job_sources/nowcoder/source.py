@@ -12,7 +12,14 @@ from time import monotonic, sleep
 from collections.abc import Callable
 from typing import Any, Literal, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import (
+    parse_qs,
+    quote,
+    urlencode,
+    urljoin,
+    urlsplit,
+    urlunsplit,
+)
 from urllib.request import Request, urlopen
 
 from job_sources.contracts import (
@@ -23,7 +30,17 @@ from job_sources.contracts import (
 )
 from job_sources.evaluation import evaluate_normalized_job
 
-from .models import BrowserSearchResult, NowcoderCollectionProgress
+from .models import (
+    NowcoderAcquisitionMode,
+    NowcoderCollectionProgress,
+    NowcoderSearchResult,
+)
+from .anonymous import (
+    AnonymousAccessRestrictedError,
+    AnonymousTransportError,
+    AnonymousUpstreamError,
+    NowcoderAnonymousApi,
+)
 
 
 SourceKind = Literal["campus", "internship", "social"]
@@ -37,6 +54,7 @@ LIST_PATHS: dict[SourceKind, str] = {
     "social": "/jobs/fulltime/center",
 }
 MAX_LIST_ITEMS = 20
+MAX_FILTERED_URL_LENGTH = 2048
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_CACHE_TTL_SECONDS = 60
@@ -243,10 +261,66 @@ class NowcoderPublicSource:
         self._request_lock = Lock()
         self._last_request_at = 0.0
 
+    @staticmethod
+    def validate_filtered_url(kind: SourceKind, value: str) -> str:
+        if kind not in LIST_PATHS:
+            raise InvalidSourceRequest(
+                f"unsupported Nowcoder job kind: {kind}"
+            )
+        return _validated_filtered_url(value, kind)
+
+    @staticmethod
+    def build_filtered_url(
+        kind: SourceKind,
+        *,
+        city: str | None,
+        career_job_id: str | None,
+        keyword: str | None = None,
+    ) -> str:
+        if kind not in LIST_PATHS:
+            raise InvalidSourceRequest(
+                f"unsupported Nowcoder job kind: {kind}"
+            )
+        normalized_city = _normalize_text(city or "") or None
+        normalized_keyword = _normalize_text(keyword or "") or None
+        normalized_career_job_id = (
+            _normalize_text(career_job_id or "") or None
+        )
+        if normalized_city is not None and len(normalized_city) > 100:
+            raise InvalidSourceRequest("Nowcoder city is too long")
+        if (
+            normalized_career_job_id is not None
+            and not normalized_career_job_id.isdecimal()
+        ):
+            raise InvalidSourceRequest(
+                "Nowcoder career_job_id must contain digits only"
+            )
+        params: list[tuple[str, str]] = []
+        if normalized_keyword is not None:
+            params.append(("search", normalized_keyword))
+        if normalized_city is not None:
+            params.append(("city", normalized_city))
+        if normalized_career_job_id is not None:
+            params.append(("careerJob", normalized_career_job_id))
+        if not params:
+            raise InvalidSourceRequest(
+                "anonymous Nowcoder search needs a keyword, career, or city"
+            )
+        return urlunsplit(
+            (
+                "https",
+                "www.nowcoder.com",
+                LIST_PATHS[kind],
+                urlencode(params),
+                "",
+            )
+        )
+
     def list_jobs(
         self,
         kind: SourceKind = "internship",
         limit: int = MAX_LIST_ITEMS,
+        filtered_url: str | None = None,
     ) -> list[JobReference]:
         if kind not in LIST_PATHS:
             raise InvalidSourceRequest(f"unsupported Nowcoder job kind: {kind}")
@@ -254,7 +328,11 @@ class NowcoderPublicSource:
             raise InvalidSourceRequest(
                 f"limit must be between 1 and {MAX_LIST_ITEMS}"
             )
-        page_url = urljoin(BASE_URL, LIST_PATHS[kind])
+        page_url = (
+            _validated_filtered_url(filtered_url, kind)
+            if filtered_url is not None
+            else urljoin(BASE_URL, LIST_PATHS[kind])
+        )
         html = self._fetch(page_url)
         _raise_for_verification(html)
         parser = _JobLinkParser()
@@ -468,6 +546,150 @@ class NowcoderPublicSource:
             return html
 
 
+class NowcoderPublicSearchCollector:
+    """Reads bounded anonymous public search results."""
+
+    def __init__(
+        self,
+        source: NowcoderPublicSource,
+        anonymous_api: NowcoderAnonymousApi | None = None,
+    ):
+        self._source = source
+        self._anonymous_api = anonymous_api
+
+    def collect(
+        self,
+        query: JobQuery,
+        *,
+        target: int | None,
+        max_pages: int,
+        should_stop: Callable[[], bool],
+        filtered_url: str | None = None,
+    ) -> NowcoderSearchResult:
+        if should_stop():
+            return NowcoderSearchResult(
+                references=(),
+                pages_read=0,
+                discovered_count=0,
+                complete=False,
+                stop_reason="user_stop",
+            )
+        if filtered_url is not None and self._anonymous_api is not None:
+            return self._collect_filtered_pages(
+                query,
+                target=target,
+                max_pages=max_pages,
+                should_stop=should_stop,
+                filtered_url=filtered_url,
+            )
+        limit = min(target or MAX_LIST_ITEMS, MAX_LIST_ITEMS)
+        if filtered_url is None:
+            listed_jobs = self._source.list_jobs(
+                kind=query.recruitment_channel,
+                limit=limit,
+            )
+        else:
+            listed_jobs = self._source.list_jobs(
+                kind=query.recruitment_channel,
+                limit=limit,
+                filtered_url=filtered_url,
+            )
+        references = tuple(listed_jobs)
+        return NowcoderSearchResult(
+            references=references,
+            pages_read=1,
+            discovered_count=len(references),
+            complete=True,
+            stop_reason=(
+                "public_filtered_page_end"
+                if filtered_url is not None
+                else "public_sample_end"
+            ),
+        )
+
+    def _collect_filtered_pages(
+        self,
+        query: JobQuery,
+        *,
+        target: int | None,
+        max_pages: int,
+        should_stop: Callable[[], bool],
+        filtered_url: str,
+    ) -> NowcoderSearchResult:
+        if max_pages < 1:
+            raise InvalidSourceRequest("max_pages must be positive")
+        keyword, city, career_job_id = _filtered_search_params(
+            filtered_url,
+            query.recruitment_channel,
+        )
+        references: list[JobReference] = []
+        seen_ids: set[str] = set()
+        pages_read = 0
+        next_page = 1
+        stop_reason = "public_api_end"
+        complete = True
+        while pages_read < max_pages and not should_stop():
+            try:
+                page = self._anonymous_api.search_page(
+                    recruitment_channel=query.recruitment_channel,
+                    city=city,
+                    career_job_id=career_job_id,
+                    keyword=keyword,
+                    page=next_page,
+                )
+            except AnonymousAccessRestrictedError as error:
+                raise SourceAccessRestrictedError(str(error)) from error
+            except AnonymousTransportError as error:
+                raise UpstreamHttpError(str(error)) from error
+            except AnonymousUpstreamError as error:
+                raise UpstreamChangedError(str(error)) from error
+            if page.current_page != next_page:
+                raise UpstreamChangedError(
+                    "Nowcoder anonymous search returned an unexpected page"
+                )
+            pages_read += 1
+            for job in page.jobs:
+                if job.id in seen_ids:
+                    continue
+                seen_ids.add(job.id)
+                references.append(
+                    JobReference(
+                        source="nowcoder",
+                        source_job_id=job.id,
+                        source_url=f"{BASE_URL}/jobs/detail/{job.id}",
+                        title=job.title,
+                        source_section=query.recruitment_channel,
+                        type_verified=False,
+                    )
+                )
+            if target is not None and len(references) >= target:
+                references = references[:target]
+                stop_reason = "target_reached"
+                complete = False
+                break
+            if (
+                page.total_pages == 0
+                or page.current_page >= page.total_pages
+            ):
+                stop_reason = "public_api_end"
+                complete = True
+                break
+            next_page = page.current_page + 1
+        else:
+            if should_stop():
+                stop_reason = "user_stop"
+            else:
+                stop_reason = "page_limit"
+            complete = False
+        return NowcoderSearchResult(
+            references=tuple(references),
+            pages_read=pages_read,
+            discovered_count=len(seen_ids),
+            complete=complete,
+            stop_reason=stop_reason,
+        )
+
+
 class NowcoderSearchCollector(Protocol):
     def collect(
         self,
@@ -476,7 +698,7 @@ class NowcoderSearchCollector(Protocol):
         target: int | None,
         max_pages: int,
         should_stop: Callable[[], bool],
-    ) -> BrowserSearchResult: ...
+    ) -> NowcoderSearchResult: ...
 
 
 class NowcoderDetailSource(Protocol):
@@ -492,6 +714,7 @@ class NowcoderSourceAdapter:
         self,
         *,
         search_collector: NowcoderSearchCollector,
+        public_search_collector: NowcoderSearchCollector | None = None,
         detail_source: NowcoderDetailSource | None = None,
         evaluate_job: Callable[
             [NormalizedJob],
@@ -499,6 +722,7 @@ class NowcoderSourceAdapter:
         ] = evaluate_normalized_job,
     ):
         self._search_collector = search_collector
+        self._public_search_collector = public_search_collector
         self._detail_source = detail_source or NowcoderPublicSource()
         self._evaluate_job = evaluate_job
 
@@ -507,11 +731,15 @@ class NowcoderSourceAdapter:
         query: JobQuery,
         *,
         mode: CollectionMode,
+        acquisition_mode: NowcoderAcquisitionMode = "browser",
+        filtered_url: str | None = None,
         should_stop: Callable[[], bool],
     ) -> CollectionResult:
         return self._collect(
             query,
             mode=mode,
+            acquisition_mode=acquisition_mode,
+            filtered_url=filtered_url,
             should_stop=should_stop,
             resume=None,
             on_progress=None,
@@ -522,6 +750,8 @@ class NowcoderSourceAdapter:
         query: JobQuery,
         *,
         mode: CollectionMode,
+        acquisition_mode: NowcoderAcquisitionMode = "browser",
+        filtered_url: str | None = None,
         should_stop: Callable[[], bool],
         resume: NowcoderCollectionProgress | None,
         on_progress: Callable[[NowcoderCollectionProgress], None],
@@ -529,6 +759,8 @@ class NowcoderSourceAdapter:
         return self._collect(
             query,
             mode=mode,
+            acquisition_mode=acquisition_mode,
+            filtered_url=filtered_url,
             should_stop=should_stop,
             resume=resume,
             on_progress=on_progress,
@@ -539,6 +771,8 @@ class NowcoderSourceAdapter:
         query: JobQuery,
         *,
         mode: CollectionMode,
+        acquisition_mode: NowcoderAcquisitionMode,
+        filtered_url: str | None,
         should_stop: Callable[[], bool],
         resume: NowcoderCollectionProgress | None,
         on_progress: Callable[[NowcoderCollectionProgress], None] | None,
@@ -547,20 +781,33 @@ class NowcoderSourceAdapter:
             raise InvalidSourceRequest(
                 f"unsupported Nowcoder collection mode: {mode}"
             )
-        resume_browser = (
-            BrowserSearchResult(
+        if acquisition_mode not in {"public", "browser"}:
+            raise InvalidSourceRequest(
+                f"unsupported Nowcoder acquisition mode: {acquisition_mode}"
+            )
+        search_collector = (
+            self._public_search_collector
+            if acquisition_mode == "public"
+            else self._search_collector
+        )
+        if search_collector is None:
+            raise InvalidSourceRequest(
+                "public Nowcoder acquisition is not configured"
+            )
+        resume_search = (
+            NowcoderSearchResult(
                 references=resume.references,
                 pages_read=resume.pages_read,
                 discovered_count=resume.discovered_count,
-                complete=resume.browser_complete,
-                stop_reason=resume.browser_stop_reason,
+                complete=resume.search_complete,
+                stop_reason=resume.search_stop_reason,
             )
             if resume is not None
             else None
         )
         existing_jobs = list(resume.jobs if resume is not None else ())
 
-        def browser_progress(value: BrowserSearchResult):
+        def search_progress(value: NowcoderSearchResult):
             if on_progress is not None:
                 on_progress(
                     NowcoderCollectionProgress(
@@ -568,8 +815,8 @@ class NowcoderSourceAdapter:
                         jobs=tuple(existing_jobs),
                         pages_read=value.pages_read,
                         discovered_count=value.discovered_count,
-                        browser_complete=value.complete,
-                        browser_stop_reason=value.stop_reason,
+                        search_complete=value.complete,
+                        search_stop_reason=value.stop_reason,
                         failed_detail_ids=(
                             resume.failed_detail_ids if resume else ()
                         ),
@@ -577,36 +824,54 @@ class NowcoderSourceAdapter:
                 )
 
         collect_resumable = getattr(
-            self._search_collector,
+            search_collector,
             "collect_resumable",
             None,
         )
-        if callable(collect_resumable) and mode == "research":
-            browser_result = collect_resumable(
+        if (
+            callable(collect_resumable)
+            and mode == "research"
+            and acquisition_mode == "browser"
+        ):
+            search_result = collect_resumable(
                 query,
                 target=None,
                 max_pages=100,
                 should_stop=should_stop,
-                resume_result=resume_browser,
-                on_progress=browser_progress,
+                resume_result=resume_search,
+                on_progress=search_progress,
             )
         else:
-            browser_result = self._search_collector.collect(
-                query,
-                target=30 if mode == "quick" else None,
-                max_pages=3 if mode == "quick" else 100,
-                should_stop=should_stop,
-            )
+            if acquisition_mode == "public" and filtered_url is not None:
+                search_result = search_collector.collect(
+                    query,
+                    target=30 if mode == "quick" else None,
+                    max_pages=3 if mode == "quick" else 100,
+                    should_stop=should_stop,
+                    filtered_url=filtered_url,
+                )
+            else:
+                search_result = search_collector.collect(
+                    query,
+                    target=30 if mode == "quick" else None,
+                    max_pages=3 if mode == "quick" else 100,
+                    should_stop=should_stop,
+                )
 
         jobs_by_id = {job.source_job_id: job for job in existing_jobs}
         failed_detail_ids: set[str] = set()
-        for reference in browser_result.references:
+        for reference in search_result.references:
             if should_stop():
                 break
             if reference.source_job_id in jobs_by_id:
                 continue
             try:
-                job = self._get_job(reference.source_job_id)
+                job = self._get_job(
+                    reference.source_job_id,
+                    allow_browser_fallback=(
+                        acquisition_mode == "browser"
+                    ),
+                )
             except (
                 VerificationRequiredError,
                 SourceAccessRestrictedError,
@@ -617,12 +882,12 @@ class NowcoderSourceAdapter:
                 if on_progress is not None:
                     on_progress(
                         NowcoderCollectionProgress(
-                            references=browser_result.references,
+                            references=search_result.references,
                             jobs=tuple(jobs_by_id.values()),
-                            pages_read=browser_result.pages_read,
-                            discovered_count=browser_result.discovered_count,
-                            browser_complete=browser_result.complete,
-                            browser_stop_reason=browser_result.stop_reason,
+                            pages_read=search_result.pages_read,
+                            discovered_count=search_result.discovered_count,
+                            search_complete=search_result.complete,
+                            search_stop_reason=search_result.stop_reason,
                             failed_detail_ids=tuple(
                                 sorted(failed_detail_ids)
                             ),
@@ -635,36 +900,49 @@ class NowcoderSourceAdapter:
             if on_progress is not None:
                 on_progress(
                     NowcoderCollectionProgress(
-                        references=browser_result.references,
+                        references=search_result.references,
                         jobs=tuple(jobs_by_id.values()),
-                        pages_read=browser_result.pages_read,
-                        discovered_count=browser_result.discovered_count,
-                        browser_complete=browser_result.complete,
-                        browser_stop_reason=browser_result.stop_reason,
+                        pages_read=search_result.pages_read,
+                        discovered_count=search_result.discovered_count,
+                        search_complete=search_result.complete,
+                        search_stop_reason=search_result.stop_reason,
                         failed_detail_ids=tuple(
                             sorted(failed_detail_ids)
                         ),
                     )
                 )
 
-        jobs = tuple(jobs_by_id.values())
+        collected_jobs = tuple(jobs_by_id.values())
+        jobs = (
+            _public_sample_jobs(
+                collected_jobs,
+                query,
+                apply_evidence_filters=filtered_url is None,
+            )
+            if acquisition_mode == "public"
+            else collected_jobs
+        )
         partial_details = sum(
-            job.detail_status == "partial" for job in jobs
+            job.detail_status == "partial" for job in collected_jobs
         )
         complete = (
-            browser_result.complete
+            search_result.complete
             and not failed_detail_ids
-            and len(jobs) == len(browser_result.references)
+            and len(collected_jobs) == len(search_result.references)
             and not should_stop()
         )
         return CollectionResult(
             source=self.source,
             query=query,
             jobs=jobs,
-            pages_read=browser_result.pages_read,
-            discovered_count=browser_result.discovered_count,
-            deduplicated_count=len(browser_result.references),
-            detail_success_count=len(jobs) - partial_details,
+            pages_read=search_result.pages_read,
+            discovered_count=search_result.discovered_count,
+            deduplicated_count=(
+                len(jobs)
+                if acquisition_mode == "public"
+                else len(search_result.references)
+            ),
+            detail_success_count=len(collected_jobs) - partial_details,
             partial_detail_count=partial_details,
             detail_failure_count=len(failed_detail_ids),
             complete=complete,
@@ -674,17 +952,24 @@ class NowcoderSourceAdapter:
                 else (
                     "detail_failures"
                     if failed_detail_ids
-                    else browser_result.stop_reason
+                    else search_result.stop_reason
                 )
             ),
         )
 
-    def _get_job(self, source_job_id: str) -> NormalizedJob:
+    def _get_job(
+        self,
+        source_job_id: str,
+        *,
+        allow_browser_fallback: bool,
+    ) -> NormalizedJob:
         try:
             return self._detail_source.get_job(source_job_id)
         except (VerificationRequiredError, SourceAccessRestrictedError):
             raise
         except NowcoderSourceError:
+            if not allow_browser_fallback:
+                raise
             load_detail_html = getattr(
                 self._search_collector,
                 "load_detail_html",
@@ -699,6 +984,184 @@ class NowcoderSourceAdapter:
                 raise
             html = load_detail_html(source_job_id)
             return normalize_html(source_job_id, html)
+
+
+def _public_sample_jobs(
+    jobs: tuple[NormalizedJob, ...],
+    query: JobQuery,
+    *,
+    apply_evidence_filters: bool = True,
+) -> tuple[NormalizedJob, ...]:
+    filtered = (
+        [
+            job for job in jobs if _matches_public_evidence(job, query)
+        ]
+        if apply_evidence_filters
+        else list(jobs)
+    )
+    if query.sort == "latest":
+        filtered.sort(
+            key=lambda job: (
+                job.published_at or "",
+                _public_relevance(job, query.keyword),
+                job.source_job_id,
+            ),
+            reverse=True,
+        )
+    else:
+        filtered.sort(
+            key=lambda job: (
+                _public_relevance(job, query.keyword),
+                job.published_at or "",
+                job.source_job_id,
+            ),
+            reverse=True,
+        )
+    return tuple(filtered)
+
+
+def _matches_public_evidence(job: NormalizedJob, query: JobQuery) -> bool:
+    if query.recruitment_channel == "internship":
+        if job.employment_type != "intern":
+            return False
+    elif job.recruitment_channel != query.recruitment_channel:
+        return False
+    if query.city:
+        city = query.city.casefold()
+        if not any(
+            city in location.casefold()
+            or location.casefold() in city
+            for location in job.locations
+        ):
+            return False
+    if query.graduation_year:
+        years = (
+            job.campus.get("graduation_years", ())
+            if job.campus is not None
+            else ()
+        )
+        requested_years = {
+            int(value)
+            for value in _GRADUATION_YEAR_PATTERN.findall(
+                query.graduation_year
+            )
+        }
+        available_years = {
+            int(value)
+            for value in years
+            if str(value).isdigit()
+        }
+        if not requested_years.intersection(available_years):
+            return False
+    return True
+
+
+def _public_relevance(job: NormalizedJob, keyword: str) -> int:
+    normalized = keyword.casefold()
+    if normalized in job.title.casefold():
+        return 3
+    if job.company and normalized in job.company.casefold():
+        return 2
+    if job.description and normalized in job.description.casefold():
+        return 1
+    return 0
+
+
+def _validated_filtered_url(
+    value: str,
+    kind: SourceKind,
+) -> str:
+    filtered_url = value.strip()
+    if (
+        not filtered_url
+        or len(filtered_url) > MAX_FILTERED_URL_LENGTH
+        or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in filtered_url
+        )
+    ):
+        raise InvalidSourceRequest("invalid Nowcoder filtered URL")
+    try:
+        parsed = urlsplit(filtered_url)
+        port = parsed.port
+    except ValueError as error:
+        raise InvalidSourceRequest("invalid Nowcoder filtered URL") from error
+    if (
+        parsed.scheme.casefold() != "https"
+        or parsed.hostname is None
+        or parsed.hostname.casefold() != "www.nowcoder.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or parsed.fragment
+    ):
+        raise InvalidSourceRequest(
+            "Nowcoder filtered URL must use https://www.nowcoder.com "
+            "without credentials, a custom port, or a fragment"
+        )
+    expected_path = LIST_PATHS[kind]
+    if parsed.path.rstrip("/") != expected_path.rstrip("/"):
+        raise InvalidSourceRequest(
+            "Nowcoder filtered URL path does not match the selected "
+            "recruitment channel"
+        )
+    if not parsed.query:
+        raise InvalidSourceRequest(
+            "Nowcoder filtered URL must include its public filter parameters"
+        )
+    return urlunsplit(
+        (
+            "https",
+            "www.nowcoder.com",
+            expected_path,
+            quote(
+                parsed.query,
+                safe="!$&'()*+,-./:;=?@_%~",
+            ),
+            "",
+        )
+    )
+
+
+def _filtered_search_params(
+    value: str,
+    kind: SourceKind,
+) -> tuple[str | None, str | None, str | None]:
+    filtered_url = _validated_filtered_url(value, kind)
+    params = parse_qs(
+        urlsplit(filtered_url).query,
+        keep_blank_values=True,
+    )
+    city_values = params.get("city", [])
+    career_values = params.get("careerJob", [])
+    keyword_values = params.get("search", [])
+    if (
+        len(keyword_values) > 1
+        or len(city_values) > 1
+        or len(career_values) > 1
+    ):
+        raise InvalidSourceRequest(
+            "Nowcoder filtered URL contains ambiguous filter parameters"
+        )
+    keyword = (
+        _normalize_text(keyword_values[0]) if keyword_values else None
+    )
+    city = _normalize_text(city_values[0]) if city_values else None
+    if city is not None and len(city) > 100:
+        raise InvalidSourceRequest(
+            "Nowcoder filtered URL city is too long"
+        )
+    career_job_id = (
+        _normalize_text(career_values[0]) if career_values else None
+    )
+    if (
+        career_job_id is not None
+        and not career_job_id.isdecimal()
+    ):
+        raise InvalidSourceRequest(
+            "Nowcoder careerJob must contain digits only"
+        )
+    return keyword, city, career_job_id
 
 
 def _load_public_html(url: str) -> str:

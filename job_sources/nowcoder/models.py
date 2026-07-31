@@ -1,9 +1,9 @@
-"""Source-local models for Nowcoder browser collection."""
+"""Source-local models for Nowcoder collection."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from job_sources.contracts import NormalizedJob
@@ -11,8 +11,11 @@ if TYPE_CHECKING:
     from .source import JobReference
 
 
+NowcoderAcquisitionMode = Literal["public", "browser"]
+
+
 @dataclass(frozen=True)
-class BrowserSearchResult:
+class NowcoderSearchResult:
     references: tuple[JobReference, ...]
     pages_read: int
     discovered_count: int
@@ -26,6 +29,6 @@ class NowcoderCollectionProgress:
     jobs: tuple[NormalizedJob, ...]
     pages_read: int
     discovered_count: int
-    browser_complete: bool
-    browser_stop_reason: str
+    search_complete: bool
+    search_stop_reason: str
     failed_detail_ids: tuple[str, ...] = ()

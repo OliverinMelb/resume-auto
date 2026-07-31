@@ -18,7 +18,7 @@ from job_sources.contracts import (
     JobQuery,
     NormalizedJob,
 )
-from .models import NowcoderCollectionProgress
+from .models import NowcoderAcquisitionMode, NowcoderCollectionProgress
 from .source import JobReference
 
 
@@ -41,6 +41,8 @@ class NowcoderCollectingSource(Protocol):
         query: JobQuery,
         *,
         mode: CollectionMode,
+        acquisition_mode: NowcoderAcquisitionMode,
+        filtered_url: str | None,
         should_stop: Callable[[], bool],
     ) -> CollectionResult: ...
 
@@ -84,6 +86,8 @@ class TaskSnapshot:
     stop_reason: str | None
     project_id: str | None = None
     persisted_count: int = 0
+    acquisition_mode: NowcoderAcquisitionMode = "public"
+    filtered_url: str | None = None
 
 
 @dataclass
@@ -91,6 +95,8 @@ class _TaskRecord:
     task_id: str
     query: JobQuery
     mode: CollectionMode
+    acquisition_mode: NowcoderAcquisitionMode = "public"
+    filtered_url: str | None = None
     status: TaskStatus = "pending"
     result: CollectionResult | None = None
     stop_requested: bool = False
@@ -102,7 +108,7 @@ class _TaskRecord:
 
 
 class NowcoderTaskManager:
-    """Queues all browser-backed work behind one source-local worker."""
+    """Queues Nowcoder collection behind one source-local worker."""
 
     def __init__(
         self,
@@ -132,11 +138,17 @@ class NowcoderTaskManager:
         query: JobQuery,
         *,
         mode: CollectionMode,
+        acquisition_mode: NowcoderAcquisitionMode = "public",
+        filtered_url: str | None = None,
         candidate_id: str | None = None,
         project_name: str | None = None,
     ) -> TaskSnapshot:
         if mode not in {"quick", "research"}:
             raise ValueError(f"unsupported collection mode: {mode}")
+        if acquisition_mode not in {"public", "browser"}:
+            raise ValueError(
+                f"unsupported acquisition mode: {acquisition_mode}"
+            )
         with self._changed:
             if self._closed:
                 raise RuntimeError("Nowcoder task manager is closed")
@@ -145,6 +157,8 @@ class NowcoderTaskManager:
                 task_id=task_id,
                 query=query,
                 mode=mode,
+                acquisition_mode=acquisition_mode,
+                filtered_url=filtered_url,
                 project_id=candidate_id,
                 project_name=project_name,
             )
@@ -273,24 +287,38 @@ class NowcoderTaskManager:
                 if record.mode == "research" and callable(
                     collect_resumable
                 ):
-                    result = collect_resumable(
-                        record.query,
-                        mode=record.mode,
-                        should_stop=lambda: self._is_stop_requested(
+                    resumable_kwargs = {
+                        "mode": record.mode,
+                        "acquisition_mode": record.acquisition_mode,
+                        "should_stop": lambda: self._is_stop_requested(
                             task_id
                         ),
-                        resume=record.progress,
-                        on_progress=lambda progress: (
+                        "resume": record.progress,
+                        "on_progress": lambda progress: (
                             self._handle_progress(task_id, progress)
                         ),
+                    }
+                    if record.filtered_url is not None:
+                        resumable_kwargs["filtered_url"] = (
+                            record.filtered_url
+                        )
+                    result = collect_resumable(
+                        record.query,
+                        **resumable_kwargs,
                     )
                 else:
-                    result = self._source.collect(
-                        record.query,
-                        mode=record.mode,
-                        should_stop=lambda: self._is_stop_requested(
+                    collect_kwargs = {
+                        "mode": record.mode,
+                        "acquisition_mode": record.acquisition_mode,
+                        "should_stop": lambda: self._is_stop_requested(
                             task_id
                         ),
+                    }
+                    if record.filtered_url is not None:
+                        collect_kwargs["filtered_url"] = record.filtered_url
+                    result = self._source.collect(
+                        record.query,
+                        **collect_kwargs,
                     )
                 persisted_job_ids: tuple[str, ...] = ()
                 if (
@@ -453,6 +481,8 @@ class NowcoderTaskManager:
             stop_reason=result.stop_reason if result is not None else None,
             project_id=record.project_id,
             persisted_count=len(record.persisted_job_ids),
+            acquisition_mode=record.acquisition_mode,
+            filtered_url=record.filtered_url,
         )
 
     @staticmethod
@@ -482,6 +512,8 @@ class NowcoderTaskManager:
                 "task_id": record.task_id,
                 "query": cast(dict[str, object], asdict(record.query)),
                 "mode": record.mode,
+                "acquisition_mode": record.acquisition_mode,
+                "filtered_url": record.filtered_url,
                 "status": record.status,
                 "error_type": record.error_type,
                 "project_id": record.project_id,
@@ -519,6 +551,12 @@ class NowcoderTaskManager:
         query_payload = cast(dict[str, object], payload["query"])
         query = JobQuery(**query_payload)
         mode = cast(CollectionMode, payload["mode"])
+        acquisition_mode = cast(
+            NowcoderAcquisitionMode,
+            payload.get("acquisition_mode", "browser"),
+        )
+        if acquisition_mode not in {"public", "browser"}:
+            raise ValueError("unsupported checkpoint acquisition mode")
         status = cast(TaskStatus, payload["status"])
         result_payload = payload.get("result")
         progress_payload = payload.get("progress")
@@ -535,6 +573,12 @@ class NowcoderTaskManager:
             task_id=str(payload["task_id"]),
             query=query,
             mode=mode,
+            acquisition_mode=acquisition_mode,
+            filtered_url=(
+                str(payload["filtered_url"])
+                if payload.get("filtered_url")
+                else None
+            ),
             status=status,
             result=result,
             error_type=(
@@ -623,8 +667,18 @@ def _progress_from_dict(
         jobs=jobs,
         pages_read=int(cast(int, payload["pages_read"])),
         discovered_count=int(cast(int, payload["discovered_count"])),
-        browser_complete=bool(payload["browser_complete"]),
-        browser_stop_reason=str(payload["browser_stop_reason"]),
+        search_complete=bool(
+            payload.get(
+                "search_complete",
+                payload.get("browser_complete", False),
+            )
+        ),
+        search_stop_reason=str(
+            payload.get(
+                "search_stop_reason",
+                payload.get("browser_stop_reason", ""),
+            )
+        ),
         failed_detail_ids=tuple(
             str(value)
             for value in cast(
@@ -652,8 +706,8 @@ def _progress_to_dict(
         "jobs": [_safe_job_dict(job) for job in progress.jobs],
         "pages_read": progress.pages_read,
         "discovered_count": progress.discovered_count,
-        "browser_complete": progress.browser_complete,
-        "browser_stop_reason": progress.browser_stop_reason,
+        "search_complete": progress.search_complete,
+        "search_stop_reason": progress.search_stop_reason,
         "failed_detail_ids": list(progress.failed_detail_ids),
     }
 

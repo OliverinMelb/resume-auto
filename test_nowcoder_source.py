@@ -21,6 +21,7 @@ from job_sources.nowcoder import (
     JobSearchResult,
     NormalizedJob,
     NowcoderPublicSource,
+    NowcoderPublicSearchCollector,
     UpstreamChangedError,
     UpstreamHttpError,
     SourceAccessRestrictedError,
@@ -28,8 +29,11 @@ from job_sources.nowcoder import (
     NowcoderSourceAdapter,
     _load_public_html,
 )
-from job_sources.nowcoder.models import BrowserSearchResult
-from job_sources.nowcoder.browser import NowcoderPlaywrightSearchCollector
+from job_sources.nowcoder.models import NowcoderSearchResult
+from job_sources.nowcoder.browser import (
+    BrowserLoginRequiredError,
+    NowcoderPlaywrightSearchCollector,
+)
 from job_sources.nowcoder.checkpoints import NowcoderCheckpointStore
 from job_sources.nowcoder.research import NowcoderResearchSink
 from job_sources.nowcoder.tasks import NowcoderTaskManager, TaskSnapshot
@@ -165,6 +169,270 @@ ATS_DETAIL_HTML = detail_html(
 
 
 class NowcoderPublicSourceTests(unittest.TestCase):
+    def test_anonymous_adapter_normalizes_filter_metadata(self):
+        from job_sources.nowcoder.anonymous import NowcoderAnonymousApi
+
+        responses = {
+            "/np-api/u/job/career-job": {
+                "code": 0,
+                "msg": "OK",
+                "data": {
+                    "allCareerJob": [
+                        {
+                            "id": 11226,
+                            "name": "技术",
+                            "value": [
+                                {
+                                    "id": 11200,
+                                    "name": "后端开发",
+                                    "value": [
+                                        {
+                                            "id": 11002,
+                                            "name": "java工程师",
+                                            "value": [],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+            "/nccommon/city/all-with-china": {
+                "code": 0,
+                "msg": "OK",
+                "data": {
+                    "hotCities": ["北京", "上海"],
+                    "allCities": [
+                        {
+                            "name": "中国",
+                            "level2": [
+                                {
+                                    "name": "北京市",
+                                    "level3": [
+                                        {"isCity": True, "name": "北京"}
+                                    ],
+                                },
+                                {
+                                    "name": "上海市",
+                                    "level3": [
+                                        {"isCity": True, "name": "上海"}
+                                    ],
+                                },
+                                {
+                                    "name": "江苏省",
+                                    "level3": [
+                                        {"isCity": True, "name": "昆山"}
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "name": "美国",
+                            "level2": [
+                                {
+                                    "name": "伊利诺伊州",
+                                    "level3": [
+                                        {"isCity": True, "name": "芝加哥"}
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                },
+            },
+        }
+
+        class FakeTransport:
+            @staticmethod
+            def get(path):
+                return responses[path]
+
+            @staticmethod
+            def post(path, body):
+                raise AssertionError("filter metadata must use GET")
+
+        options = NowcoderAnonymousApi(FakeTransport()).get_filter_options()
+
+        self.assertEqual(
+            options.career_jobs[0].id,
+            "11002",
+        )
+        self.assertEqual(
+            options.career_jobs[0].label,
+            "技术 / 后端开发 / java工程师",
+        )
+        self.assertEqual(options.hot_cities, ("北京", "上海"))
+        self.assertEqual(options.cities, ("北京", "上海"))
+
+    def test_anonymous_adapter_searches_keyword_square_page(self):
+        from job_sources.nowcoder.anonymous import NowcoderAnonymousApi
+
+        class FakeTransport:
+            @staticmethod
+            def get(path):
+                raise AssertionError("search must use POST")
+
+            def post(self, path, body):
+                self.assertEqual(
+                    path,
+                    "/np-api/u/job/square-search",
+                )
+                self.assertEqual(
+                    body,
+                    {
+                        "careerJobId": "11002",
+                        "companyFinancing": None,
+                        "jobCity": ["北京"],
+                        "graduateYearList": None,
+                        "scaleList": None,
+                        "page": 2,
+                        "query": "AI-Agent",
+                        "random": True,
+                        "recommend": False,
+                        "recruitType": 1,
+                        "salaryMax": None,
+                        "salaryMin": None,
+                        "salaryType": 2,
+                        "pageSize": 20,
+                        "requestFrom": 1,
+                        "order": 0,
+                        "pageSource": 5001,
+                    },
+                )
+                return {
+                    "code": 0,
+                    "msg": "OK",
+                    "data": {
+                        "currentPage": 2,
+                        "totalPage": 3,
+                        "datas": [
+                            {
+                                "data": {
+                                    "id": 301,
+                                    "jobName": "AI Agent 工程师",
+                                },
+                                "rc_type": 3010,
+                            },
+                            {
+                                "data": {
+                                    "id": 302,
+                                    "jobName": "大模型 Agent 开发",
+                                },
+                                "rc_type": 3010,
+                            },
+                        ],
+                    },
+                }
+
+            assertEqual = self.assertEqual
+
+        page = NowcoderAnonymousApi(FakeTransport()).search_page(
+            recruitment_channel="campus",
+            city="北京",
+            career_job_id="11002",
+            keyword="AI-Agent",
+            page=2,
+        )
+
+        self.assertEqual(page.current_page, 2)
+        self.assertEqual(page.total_pages, 3)
+        self.assertEqual(
+            [(job.id, job.title) for job in page.jobs],
+            [
+                ("301", "AI Agent 工程师"),
+                ("302", "大模型 Agent 开发"),
+            ],
+        )
+
+    def test_anonymous_adapter_rejects_contradictory_page_bounds(self):
+        from job_sources.nowcoder.anonymous import (
+            AnonymousUpstreamError,
+            NowcoderAnonymousApi,
+        )
+
+        class FakeTransport:
+            @staticmethod
+            def get(path):
+                raise AssertionError("search must use POST")
+
+            @staticmethod
+            def post(path, body):
+                return {
+                    "code": 0,
+                    "msg": "OK",
+                    "data": {
+                        "currentPage": 3,
+                        "totalPage": 2,
+                        "datas": [],
+                    },
+                }
+
+        with self.assertRaisesRegex(
+            AnonymousUpstreamError,
+            "page bounds",
+        ):
+            NowcoderAnonymousApi(FakeTransport()).search_page(
+                recruitment_channel="campus",
+                city="北京",
+                career_job_id="11002",
+                keyword="Java",
+                page=3,
+            )
+
+    def test_anonymous_transport_posts_json_without_credentials(self):
+        from job_sources.nowcoder.anonymous import UrllibNowcoderTransport
+
+        class FakeResponse:
+            def __init__(self):
+                self.headers = Message()
+                self.headers["Content-Type"] = (
+                    "application/json; charset=utf-8"
+                )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            @staticmethod
+            def geturl():
+                return (
+                    "https://www.nowcoder.com/np-api/u/job/square-search"
+                )
+
+            @staticmethod
+            def read(amount):
+                return b'{"code":0,"msg":"OK","data":{}}'
+
+        def fake_urlopen(request, timeout):
+            self.assertEqual(
+                request.full_url,
+                "https://www.nowcoder.com/np-api/u/job/square-search",
+            )
+            self.assertEqual(request.get_method(), "POST")
+            self.assertEqual(timeout, 15)
+            self.assertNotIn("Cookie", request.headers)
+            self.assertEqual(
+                json.loads(request.data.decode("utf-8")),
+                {"page": 1, "jobCity": ["北京"]},
+            )
+            return FakeResponse()
+
+        with patch(
+            "job_sources.nowcoder.anonymous.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            payload = UrllibNowcoderTransport(
+                minimum_interval_seconds=0,
+            ).post(
+                "/np-api/u/job/square-search",
+                {"page": 1, "jobCity": ["北京"]},
+            )
+
+        self.assertEqual(payload["code"], 0)
+
     def test_normalizes_nowcoder_ats_aggregate_by_global_job_id(self):
         source = NowcoderPublicSource(load_text=lambda _: ATS_DETAIL_HTML)
 
@@ -215,6 +483,72 @@ class NowcoderPublicSourceTests(unittest.TestCase):
                 self.assertEqual(jobs[0].source_section, kind)
                 self.assertFalse(jobs[0].type_verified)
                 self.assertIn(expected_path, requested_urls[-1])
+
+    def test_lists_jobs_from_exact_validated_filtered_url(self):
+        requested_urls: list[str] = []
+        filtered_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?careerJob=11002&city=%E4%B8%8A%E6%B5%B7"
+        )
+
+        def load_text(url: str) -> str:
+            requested_urls.append(url)
+            return CAMPUS_LIST_HTML
+
+        jobs = NowcoderPublicSource(load_text=load_text).list_jobs(
+            kind="campus",
+            limit=20,
+            filtered_url=filtered_url,
+        )
+
+        self.assertEqual(requested_urls, [filtered_url])
+        self.assertEqual([job.source_job_id for job in jobs], ["301", "302"])
+
+    def test_encodes_unicode_filtered_url_values_for_http(self):
+        requested_urls: list[str] = []
+        raw_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?careerJob=11002&city=上海"
+        )
+        encoded_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?careerJob=11002&city=%E4%B8%8A%E6%B5%B7"
+        )
+
+        source = NowcoderPublicSource(
+            load_text=lambda url: (
+                requested_urls.append(url) or CAMPUS_LIST_HTML
+            )
+        )
+        source.list_jobs(
+            kind="campus",
+            limit=20,
+            filtered_url=raw_url,
+        )
+
+        self.assertEqual(requested_urls, [encoded_url])
+
+    def test_rejects_unsafe_or_channel_mismatched_filtered_url(self):
+        source = NowcoderPublicSource(
+            load_text=lambda _: self.fail("unsafe URL must not be fetched")
+        )
+        invalid_urls = (
+            "http://www.nowcoder.com/jobs/school/jobs?careerJob=11002",
+            "https://example.com/jobs/school/jobs?careerJob=11002",
+            "https://user@www.nowcoder.com/jobs/school/jobs?careerJob=11002",
+            "https://www.nowcoder.com:8443/jobs/school/jobs?careerJob=11002",
+            "https://www.nowcoder.com/jobs/school/jobs?careerJob=11002#jobs",
+            "https://www.nowcoder.com/jobs/intern/center?careerJob=11002",
+        )
+
+        for filtered_url in invalid_urls:
+            with self.subTest(filtered_url=filtered_url):
+                with self.assertRaises(InvalidSourceRequest):
+                    source.list_jobs(
+                        kind="campus",
+                        limit=20,
+                        filtered_url=filtered_url,
+                    )
 
     def test_list_limit_is_bounded_and_validated(self):
         source = NowcoderPublicSource(load_text=lambda _: LIST_HTML)
@@ -724,7 +1058,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                 type_verified=False,
             ),
         )
-        browser_result = BrowserSearchResult(
+        browser_result = NowcoderSearchResult(
             references=references,
             pages_read=2,
             discovered_count=2,
@@ -745,7 +1079,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
             ):
                 if resume_result is None:
                     on_progress(
-                        BrowserSearchResult(
+                        NowcoderSearchResult(
                             references=references,
                             pages_read=1,
                             discovered_count=2,
@@ -827,7 +1161,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
         class Collector:
             @staticmethod
             def collect(query, *, target, max_pages, should_stop):
-                return BrowserSearchResult(
+                return NowcoderSearchResult(
                     references=(
                         JobReference(
                             source="nowcoder",
@@ -873,6 +1207,556 @@ class NowcoderTaskManagerTests(unittest.TestCase):
             )
         self.assertEqual(fallback_calls, [])
 
+    def test_public_acquisition_never_calls_browser_search(self):
+        calls: list[str] = []
+        reference = JobReference(
+            source="nowcoder",
+            source_job_id="101",
+            source_url="https://www.nowcoder.com/jobs/detail/101",
+            title="AI 应用开发实习生",
+            source_section="internship",
+            type_verified=False,
+        )
+
+        class PublicCollector:
+            @staticmethod
+            def collect(query, *, target, max_pages, should_stop):
+                calls.append("public")
+                return NowcoderSearchResult(
+                    references=(reference,),
+                    pages_read=1,
+                    discovered_count=1,
+                    complete=True,
+                    stop_reason="public_sample_end",
+                )
+
+        class BrowserCollector:
+            @staticmethod
+            def collect(query, *, target, max_pages, should_stop):
+                calls.append("browser")
+                raise AssertionError("browser must not run in public mode")
+
+        source = NowcoderSourceAdapter(
+            search_collector=BrowserCollector(),
+            public_search_collector=PublicCollector(),
+            detail_source=NowcoderPublicSource(
+                load_text=lambda _: DETAIL_HTML
+            ),
+            evaluate_job=lambda job: job,
+        )
+
+        result = source.collect(
+            JobQuery(
+                keyword="后端开发",
+                recruitment_channel="internship",
+                city="上海",
+            ),
+            mode="quick",
+            acquisition_mode="public",
+            should_stop=lambda: False,
+        )
+
+        self.assertEqual(calls, ["public"])
+        self.assertEqual(result.stop_reason, "public_sample_end")
+
+    def test_public_acquisition_passes_exact_filtered_url(self):
+        calls: list[str] = []
+        filtered_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?careerJob=11002&city=%E4%B8%8A%E6%B5%B7"
+        )
+
+        class PublicCollector:
+            @staticmethod
+            def collect(
+                query,
+                *,
+                target,
+                max_pages,
+                should_stop,
+                filtered_url,
+            ):
+                calls.append(filtered_url)
+                return NowcoderSearchResult(
+                    references=(),
+                    pages_read=1,
+                    discovered_count=0,
+                    complete=True,
+                    stop_reason="public_filtered_page_end",
+                )
+
+        class BrowserCollector:
+            @staticmethod
+            def collect(query, *, target, max_pages, should_stop):
+                raise AssertionError("browser must not run in public mode")
+
+        result = NowcoderSourceAdapter(
+            search_collector=BrowserCollector(),
+            public_search_collector=PublicCollector(),
+            evaluate_job=lambda job: job,
+        ).collect(
+            JobQuery(
+                keyword="backend",
+                recruitment_channel="campus",
+                city="Shanghai",
+            ),
+            mode="quick",
+            acquisition_mode="public",
+            filtered_url=filtered_url,
+            should_stop=lambda: False,
+        )
+
+        self.assertEqual(calls, [filtered_url])
+        self.assertEqual(result.stop_reason, "public_filtered_page_end")
+
+    def test_filtered_url_results_are_not_removed_by_legacy_sample_filters(self):
+        filtered_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?careerJob=11002&city=%E4%B8%8A%E6%B5%B7"
+        )
+        job = replace(
+            NowcoderPublicSource(
+                load_text=lambda _: DETAIL_HTML
+            ).get_job("101"),
+            recruitment_channel="social",
+            locations=("Beijing",),
+        )
+        reference = JobReference(
+            source="nowcoder",
+            source_job_id=job.source_job_id,
+            source_url=job.source_url,
+            title=job.title,
+            source_section="campus",
+            type_verified=False,
+        )
+
+        class PublicCollector:
+            @staticmethod
+            def collect(
+                query,
+                *,
+                target,
+                max_pages,
+                should_stop,
+                filtered_url,
+            ):
+                return NowcoderSearchResult(
+                    references=(reference,),
+                    pages_read=1,
+                    discovered_count=1,
+                    complete=True,
+                    stop_reason="public_filtered_page_end",
+                )
+
+        class DetailSource:
+            @staticmethod
+            def get_job(source_job_id):
+                return job
+
+        result = NowcoderSourceAdapter(
+            search_collector=PublicCollector(),
+            public_search_collector=PublicCollector(),
+            detail_source=DetailSource(),
+            evaluate_job=lambda value: value,
+        ).collect(
+            JobQuery(
+                keyword="backend",
+                recruitment_channel="campus",
+                city="Shanghai",
+            ),
+            mode="quick",
+            acquisition_mode="public",
+            filtered_url=filtered_url,
+            should_stop=lambda: False,
+        )
+
+        self.assertEqual(result.jobs, (job,))
+        self.assertEqual(result.deduplicated_count, 1)
+
+    def test_public_acquisition_never_uses_browser_detail_fallback(self):
+        fallback_calls: list[str] = []
+        reference = JobReference(
+            source="nowcoder",
+            source_job_id="101",
+            source_url="https://www.nowcoder.com/jobs/detail/101",
+            title="后端开发实习生",
+            source_section="internship",
+            type_verified=False,
+        )
+
+        class PublicCollector:
+            @staticmethod
+            def collect(query, *, target, max_pages, should_stop):
+                return NowcoderSearchResult(
+                    references=(reference,),
+                    pages_read=1,
+                    discovered_count=1,
+                    complete=True,
+                    stop_reason="public_sample_end",
+                )
+
+        class BrowserCollector:
+            @staticmethod
+            def collect(query, *, target, max_pages, should_stop):
+                raise AssertionError("browser search must not run")
+
+            @staticmethod
+            def load_detail_html(source_job_id):
+                fallback_calls.append(source_job_id)
+                return DETAIL_HTML
+
+        class FailingDetailSource(NowcoderPublicSource):
+            def get_job(self, source_job_id):
+                raise UpstreamHttpError("public detail unavailable")
+
+        result = NowcoderSourceAdapter(
+            search_collector=BrowserCollector(),
+            public_search_collector=PublicCollector(),
+            detail_source=FailingDetailSource(load_text=lambda _: ""),
+        ).collect(
+            JobQuery(
+                keyword="后端开发",
+                recruitment_channel="internship",
+                city="上海",
+            ),
+            mode="quick",
+            acquisition_mode="public",
+            should_stop=lambda: False,
+        )
+
+        self.assertEqual(fallback_calls, [])
+        self.assertEqual(result.detail_failure_count, 1)
+
+    def test_public_collector_reads_only_the_selected_route_sample(self):
+        calls: list[tuple[str, int]] = []
+        reference = JobReference(
+            source="nowcoder",
+            source_job_id="301",
+            source_url="https://www.nowcoder.com/jobs/detail/301",
+            title="校招后端工程师",
+            source_section="campus",
+            type_verified=False,
+        )
+
+        class PublicSource:
+            @staticmethod
+            def list_jobs(*, kind, limit):
+                calls.append((kind, limit))
+                return [reference]
+
+        result = NowcoderPublicSearchCollector(PublicSource()).collect(
+            JobQuery(
+                keyword="后端开发",
+                recruitment_channel="campus",
+                city="上海",
+            ),
+            target=30,
+            max_pages=3,
+            should_stop=lambda: False,
+        )
+
+        self.assertEqual(calls, [("campus", 20)])
+        self.assertEqual(result.references, (reference,))
+        self.assertTrue(result.complete)
+        self.assertEqual(result.stop_reason, "public_sample_end")
+
+    def test_public_collector_reads_the_exact_filtered_url(self):
+        calls: list[tuple[str, int, str]] = []
+        filtered_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?careerJob=11002&city=%E4%B8%8A%E6%B5%B7"
+        )
+
+        class PublicSource:
+            @staticmethod
+            def list_jobs(*, kind, limit, filtered_url):
+                calls.append((kind, limit, filtered_url))
+                return []
+
+        result = NowcoderPublicSearchCollector(PublicSource()).collect(
+            JobQuery(
+                keyword="backend",
+                recruitment_channel="campus",
+                city="Shanghai",
+            ),
+            target=30,
+            max_pages=3,
+            should_stop=lambda: False,
+            filtered_url=filtered_url,
+        )
+
+        self.assertEqual(calls, [("campus", 20, filtered_url)])
+        self.assertEqual(result.stop_reason, "public_filtered_page_end")
+
+    def test_public_collector_paginates_anonymous_filtered_search(self):
+        from job_sources.nowcoder.anonymous import (
+            AnonymousJobPage,
+            AnonymousJobSummary,
+        )
+
+        calls: list[
+            tuple[str, str | None, str | None, str | None, int]
+        ] = []
+
+        class AnonymousApi:
+            @staticmethod
+            def search_page(
+                *,
+                recruitment_channel,
+                city,
+                career_job_id,
+                keyword,
+                page,
+            ):
+                calls.append(
+                    (
+                        recruitment_channel,
+                        city,
+                        career_job_id,
+                        keyword,
+                        page,
+                    )
+                )
+                start = (page - 1) * 20 + 1
+                return AnonymousJobPage(
+                    jobs=tuple(
+                        AnonymousJobSummary(
+                            id=str(job_id),
+                            title=f"Java工程师 {job_id}",
+                        )
+                        for job_id in range(start, start + 20)
+                    ),
+                    current_page=page,
+                    total_pages=3,
+                )
+
+        collector = NowcoderPublicSearchCollector(
+            NowcoderPublicSource(load_text=lambda _: CAMPUS_LIST_HTML),
+            anonymous_api=AnonymousApi(),
+        )
+        result = collector.collect(
+            JobQuery(
+                keyword="Java",
+                recruitment_channel="campus",
+                city="北京",
+            ),
+            target=30,
+            max_pages=3,
+            should_stop=lambda: False,
+            filtered_url=(
+                "https://www.nowcoder.com/jobs/school/jobs"
+                "?search=Java&city=%E5%8C%97%E4%BA%AC"
+                "&careerJob=11002"
+            ),
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                ("campus", "北京", "11002", "Java", 1),
+                ("campus", "北京", "11002", "Java", 2),
+            ],
+        )
+        self.assertEqual(len(result.references), 30)
+        self.assertEqual(result.pages_read, 2)
+        self.assertEqual(result.discovered_count, 40)
+        self.assertFalse(result.complete)
+        self.assertEqual(result.stop_reason, "target_reached")
+
+    def test_public_collector_reads_through_the_reported_last_page(self):
+        from job_sources.nowcoder.anonymous import (
+            AnonymousJobPage,
+            AnonymousJobSummary,
+        )
+
+        requested_pages: list[int] = []
+
+        class AnonymousApi:
+            @staticmethod
+            def search_page(
+                *,
+                recruitment_channel,
+                city,
+                career_job_id,
+                keyword,
+                page,
+            ):
+                self.assertIsNone(keyword)
+                requested_pages.append(page)
+                return AnonymousJobPage(
+                    jobs=(
+                        AnonymousJobSummary(
+                            id=str(page),
+                            title=f"岗位 {page}",
+                        ),
+                    ),
+                    current_page=page,
+                    total_pages=3,
+                )
+
+            assertIsNone = self.assertIsNone
+
+        result = NowcoderPublicSearchCollector(
+            NowcoderPublicSource(load_text=lambda _: CAMPUS_LIST_HTML),
+            anonymous_api=AnonymousApi(),
+        ).collect(
+            JobQuery(
+                keyword="岗位",
+                recruitment_channel="campus",
+                city="北京",
+            ),
+            target=None,
+            max_pages=100,
+            should_stop=lambda: False,
+            filtered_url=(
+                "https://www.nowcoder.com/jobs/school/jobs"
+                "?careerJob=11002&city=%E5%8C%97%E4%BA%AC"
+            ),
+        )
+
+        self.assertEqual(requested_pages, [1, 2, 3])
+        self.assertEqual(result.pages_read, 3)
+        self.assertEqual(result.discovered_count, 3)
+        self.assertTrue(result.complete)
+        self.assertEqual(result.stop_reason, "public_api_end")
+
+    def test_public_sample_filters_evidence_and_ranks_keyword_matches(self):
+        base_job = NowcoderPublicSource(
+            load_text=lambda _: DETAIL_HTML
+        ).get_job("101")
+        jobs = {
+            "101": replace(
+                base_job,
+                source_job_id="101",
+                title="平台研发实习生",
+                locations=("上海",),
+                recruitment_channel="internship",
+                employment_type="intern",
+            ),
+            "202": replace(
+                base_job,
+                source_job_id="202",
+                title="后端开发实习生",
+                locations=("上海",),
+                recruitment_channel="internship",
+                employment_type="intern",
+            ),
+            "303": replace(
+                base_job,
+                source_job_id="303",
+                title="后端开发实习生",
+                locations=("北京",),
+                recruitment_channel="internship",
+                employment_type="intern",
+            ),
+        }
+        references = tuple(
+            JobReference(
+                source="nowcoder",
+                source_job_id=source_job_id,
+                source_url=(
+                    f"https://www.nowcoder.com/jobs/detail/{source_job_id}"
+                ),
+                title=job.title,
+                source_section="internship",
+                type_verified=False,
+            )
+            for source_job_id, job in jobs.items()
+        )
+
+        class PublicCollector:
+            @staticmethod
+            def collect(query, *, target, max_pages, should_stop):
+                return NowcoderSearchResult(
+                    references=references,
+                    pages_read=1,
+                    discovered_count=3,
+                    complete=True,
+                    stop_reason="public_sample_end",
+                )
+
+        class DetailSource:
+            @staticmethod
+            def get_job(source_job_id):
+                return jobs[source_job_id]
+
+        result = NowcoderSourceAdapter(
+            search_collector=PublicCollector(),
+            public_search_collector=PublicCollector(),
+            detail_source=DetailSource(),
+            evaluate_job=lambda job: job,
+        ).collect(
+            JobQuery(
+                keyword="后端开发",
+                recruitment_channel="internship",
+                city="上海",
+            ),
+            mode="quick",
+            acquisition_mode="public",
+            should_stop=lambda: False,
+        )
+
+        self.assertEqual(
+            [job.source_job_id for job in result.jobs],
+            ["202", "101"],
+        )
+        self.assertEqual(result.discovered_count, 3)
+        self.assertEqual(result.deduplicated_count, 2)
+
+    def test_public_sample_matches_ui_graduation_year_label(self):
+        job = replace(
+            NowcoderPublicSource(
+                load_text=lambda _: DETAIL_HTML
+            ).get_job("101"),
+            locations=("上海",),
+            recruitment_channel="campus",
+            employment_type="full_time",
+            campus={"graduation_years": [2027]},
+        )
+        reference = JobReference(
+            source="nowcoder",
+            source_job_id=job.source_job_id,
+            source_url=job.source_url,
+            title=job.title,
+            source_section="campus",
+            type_verified=False,
+        )
+
+        class Collector:
+            @staticmethod
+            def collect(query, *, target, max_pages, should_stop):
+                return NowcoderSearchResult(
+                    references=(reference,),
+                    pages_read=1,
+                    discovered_count=1,
+                    complete=True,
+                    stop_reason="public_sample_end",
+                )
+
+        class DetailSource:
+            @staticmethod
+            def get_job(source_job_id):
+                return job
+
+        result = NowcoderSourceAdapter(
+            search_collector=Collector(),
+            public_search_collector=Collector(),
+            detail_source=DetailSource(),
+            evaluate_job=lambda value: value,
+        ).collect(
+            JobQuery(
+                keyword="后端开发",
+                recruitment_channel="campus",
+                city="上海",
+                graduation_year="2027届",
+            ),
+            mode="quick",
+            acquisition_mode="public",
+            should_stop=lambda: False,
+        )
+
+        self.assertEqual(result.jobs, (job,))
+
     def test_browser_reports_visible_login_dialog_before_pagination(self):
         class LoginDialog:
             @staticmethod
@@ -901,11 +1785,228 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                     return Body()
                 raise AssertionError(selector)
 
-        from job_sources.nowcoder.browser import BrowserLoginRequiredError
-
         with self.assertRaises(BrowserLoginRequiredError):
             NowcoderPlaywrightSearchCollector._raise_for_blocked_page(
                 FakePage()
+            )
+
+    def test_browser_reports_login_dialog_that_appears_after_search(self):
+        state = {"login_visible": False}
+
+        class LoginDialog:
+            @staticmethod
+            def count():
+                return int(state["login_visible"])
+
+            @staticmethod
+            def is_visible():
+                return state["login_visible"]
+
+        class Body:
+            @staticmethod
+            def inner_text(timeout):
+                return "岗位列表"
+
+        class Keyword:
+            @staticmethod
+            def wait_for(*, state, timeout):
+                return None
+
+            @staticmethod
+            def count():
+                return 1
+
+            @staticmethod
+            def input_value():
+                return ""
+
+            @staticmethod
+            def fill(value):
+                return None
+
+            @staticmethod
+            def press(key):
+                state["login_visible"] = True
+
+        class Links:
+            first = None
+
+            @staticmethod
+            def count():
+                return 1
+
+            @staticmethod
+            def wait_for(*, state, timeout):
+                return None
+
+            @staticmethod
+            def evaluate_all(script):
+                return ["https://www.nowcoder.com/jobs/detail/101"]
+
+        Links.first = Links()
+
+        class FakePage:
+            url = "https://www.nowcoder.com/jobs/school/jobs"
+
+            @staticmethod
+            def goto(*args, **kwargs):
+                return None
+
+            @staticmethod
+            def title():
+                return "牛客招聘"
+
+            @staticmethod
+            def get_by_placeholder(*args, **kwargs):
+                return Keyword()
+
+            @staticmethod
+            def locator(selector):
+                if selector == ".login-dialog":
+                    return LoginDialog()
+                if selector == "body":
+                    return Body()
+                return Links()
+
+            @staticmethod
+            def wait_for_url(*args, **kwargs):
+                raise TimeoutError("search was blocked by login")
+
+        class Collector(NowcoderPlaywrightSearchCollector):
+            @staticmethod
+            def _search_page():
+                return FakePage()
+
+        with self.assertRaises(BrowserLoginRequiredError):
+            Collector().collect(
+                JobQuery(
+                    keyword="后端开发",
+                    recruitment_channel="campus",
+                    city="上海",
+                ),
+                target=30,
+                max_pages=3,
+                should_stop=lambda: False,
+            )
+
+    def test_browser_reports_login_dialog_after_sort_filter(self):
+        state = {"login_visible": False, "refresh_count": 0}
+
+        class LoginDialog:
+            @staticmethod
+            def count():
+                return int(state["login_visible"])
+
+            @staticmethod
+            def is_visible():
+                return state["login_visible"]
+
+        class Body:
+            @staticmethod
+            def inner_text(timeout):
+                return "岗位列表"
+
+        class Keyword:
+            @staticmethod
+            def wait_for(*, state, timeout):
+                return None
+
+            @staticmethod
+            def count():
+                return 1
+
+            @staticmethod
+            def input_value():
+                return ""
+
+            @staticmethod
+            def fill(value):
+                return None
+
+            @staticmethod
+            def press(key):
+                return None
+
+        class Latest:
+            @staticmethod
+            def count():
+                return 1
+
+            @staticmethod
+            def click():
+                state["login_visible"] = True
+
+        class Links:
+            first = None
+
+            @staticmethod
+            def count():
+                return 1
+
+            @staticmethod
+            def wait_for(*, state, timeout):
+                return None
+
+            @staticmethod
+            def evaluate_all(script):
+                return ["https://www.nowcoder.com/jobs/detail/101"]
+
+        Links.first = Links()
+
+        class FakePage:
+            url = "https://www.nowcoder.com/jobs/school/jobs"
+
+            @staticmethod
+            def goto(*args, **kwargs):
+                return None
+
+            @staticmethod
+            def title():
+                return "牛客招聘"
+
+            @staticmethod
+            def get_by_placeholder(*args, **kwargs):
+                return Keyword()
+
+            @staticmethod
+            def get_by_text(text, **kwargs):
+                self.assertEqual(text, "最新")
+                return Latest()
+
+            @staticmethod
+            def locator(selector):
+                if selector == ".login-dialog":
+                    return LoginDialog()
+                if selector == "body":
+                    return Body()
+                return Links()
+
+            @staticmethod
+            def wait_for_url(*args, **kwargs):
+                return None
+
+            @staticmethod
+            def wait_for_function(*args, **kwargs):
+                state["refresh_count"] += 1
+                if state["refresh_count"] > 1:
+                    raise TimeoutError("sort was blocked by login")
+
+        class Collector(NowcoderPlaywrightSearchCollector):
+            @staticmethod
+            def _search_page():
+                return FakePage()
+
+        with self.assertRaises(BrowserLoginRequiredError):
+            Collector().collect(
+                JobQuery(
+                    keyword="后端开发",
+                    recruitment_channel="campus",
+                    city="上海",
+                    sort="latest",
+                ),
+                target=30,
+                max_pages=3,
+                should_stop=lambda: False,
             )
 
     def test_browser_uses_nowcoder_icon_next_page_button(self):
@@ -971,7 +2072,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
             @staticmethod
             def collect(query, *, target, max_pages, should_stop):
                 calls.append((target, max_pages))
-                return BrowserSearchResult(
+                return NowcoderSearchResult(
                     references=(),
                     pages_read=1,
                     discovered_count=0,
@@ -1004,12 +2105,24 @@ class NowcoderTaskManagerTests(unittest.TestCase):
 
         class FailingSource:
             @staticmethod
-            def collect(query, *, mode, should_stop):
+            def collect(
+                query,
+                *,
+                mode,
+                acquisition_mode,
+                should_stop,
+            ):
                 raise RuntimeError("temporary failure")
 
         class SuccessfulSource:
             @staticmethod
-            def collect(query, *, mode, should_stop):
+            def collect(
+                query,
+                *,
+                mode,
+                acquisition_mode,
+                should_stop,
+            ):
                 return CollectionResult(
                     source="nowcoder",
                     query=query,
@@ -1067,6 +2180,117 @@ class NowcoderTaskManagerTests(unittest.TestCase):
             finally:
                 second_manager.close()
 
+    def test_legacy_checkpoint_restores_browser_acquisition(self):
+        class Source:
+            @staticmethod
+            def collect(
+                query,
+                *,
+                mode,
+                acquisition_mode,
+                should_stop,
+            ):
+                raise AssertionError("restored task must remain paused")
+
+        with TemporaryDirectory() as directory:
+            store = NowcoderCheckpointStore(Path(directory))
+            task_id = "a" * 32
+            store.save(
+                task_id,
+                {
+                    "version": 1,
+                    "task_id": task_id,
+                    "query": {
+                        "keyword": "后端开发",
+                        "recruitment_channel": "campus",
+                        "city": "上海",
+                        "graduation_year": None,
+                        "sort": "recommended",
+                    },
+                    "mode": "research",
+                    "status": "failed",
+                    "error_type": "BrowserPageChangedError",
+                    "project_id": None,
+                    "project_name": None,
+                    "persisted_job_ids": [],
+                    "progress": None,
+                    "result": None,
+                },
+            )
+
+            manager = NowcoderTaskManager(
+                Source(),
+                checkpoint_store=store,
+            )
+            try:
+                restored = manager.get_task(task_id)
+            finally:
+                manager.close()
+
+        self.assertEqual(restored.status, "paused")
+        self.assertEqual(restored.acquisition_mode, "browser")
+
+    def test_filtered_url_survives_research_checkpoint_restore(self):
+        filtered_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?careerJob=11002&city=%E4%B8%8A%E6%B5%B7"
+        )
+        query = JobQuery(
+            keyword="backend",
+            recruitment_channel="campus",
+            city="Shanghai",
+        )
+
+        class Source:
+            @staticmethod
+            def collect(
+                query,
+                *,
+                mode,
+                acquisition_mode,
+                filtered_url,
+                should_stop,
+            ):
+                return CollectionResult(
+                    source="nowcoder",
+                    query=query,
+                    jobs=(),
+                    pages_read=1,
+                    discovered_count=0,
+                    deduplicated_count=0,
+                    detail_success_count=0,
+                    partial_detail_count=0,
+                    detail_failure_count=0,
+                    complete=True,
+                    stop_reason="public_filtered_page_end",
+                )
+
+        with TemporaryDirectory() as directory:
+            store = NowcoderCheckpointStore(Path(directory))
+            manager = NowcoderTaskManager(Source(), checkpoint_store=store)
+            try:
+                created = manager.create_task(
+                    query,
+                    mode="research",
+                    acquisition_mode="public",
+                    filtered_url=filtered_url,
+                )
+                completed = manager.wait_for_task(created.task_id, timeout=2)
+                self.assertEqual(completed.filtered_url, filtered_url)
+            finally:
+                manager.close()
+
+            restored_manager = NowcoderTaskManager(
+                Source(),
+                checkpoint_store=store,
+            )
+            try:
+                restored = restored_manager.get_task(created.task_id)
+            finally:
+                restored_manager.close()
+
+        self.assertEqual(restored.filtered_url, filtered_url)
+
     def test_research_sink_deduplicates_and_excludes_intern_salary_stats(self):
         with TemporaryDirectory() as directory:
             repository = Repository(Path(directory) / "research.db")
@@ -1100,7 +2324,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
         class FakeSearchCollector:
             @staticmethod
             def collect(query, *, target, max_pages, should_stop):
-                return BrowserSearchResult(
+                return NowcoderSearchResult(
                     references=(
                         JobReference(
                             source="nowcoder",
@@ -1301,7 +2525,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
             @staticmethod
             def collect(query, *, target, max_pages, should_stop):
                 query_seen.append(query)
-                return BrowserSearchResult(
+                return NowcoderSearchResult(
                     references=(
                         JobReference(
                             source="nowcoder",
@@ -1385,7 +2609,13 @@ class NowcoderTaskManagerTests(unittest.TestCase):
 
         class BlockingSource:
             @staticmethod
-            def collect(query, *, mode, should_stop):
+            def collect(
+                query,
+                *,
+                mode,
+                acquisition_mode,
+                should_stop,
+            ):
                 calls.append(query.keyword)
                 if query.keyword == "first":
                     first_started.set()
@@ -1413,6 +2643,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                     city="上海",
                 ),
                 mode="quick",
+                acquisition_mode="browser",
             )
             second = manager.create_task(
                 JobQuery(
@@ -1421,6 +2652,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                     city="北京",
                 ),
                 mode="quick",
+                acquisition_mode="browser",
             )
 
             self.assertTrue(first_started.wait(timeout=1))
@@ -1448,6 +2680,10 @@ class NowcoderTaskManagerTests(unittest.TestCase):
             graduation_year="2027届",
             sort="latest",
         )
+        filtered_url = (
+            "https://www.nowcoder.com/jobs/intern/center"
+            "?careerJob=11002&city=%E4%B8%8A%E6%B5%B7"
+        )
         snapshot = TaskSnapshot(
             task_id="task-1",
             query=query,
@@ -1461,6 +2697,8 @@ class NowcoderTaskManagerTests(unittest.TestCase):
             detail_failure_count=0,
             error_type=None,
             stop_reason=None,
+            acquisition_mode="public",
+            filtered_url=filtered_url,
         )
 
         class FakeTasks:
@@ -1469,11 +2707,15 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                 actual_query,
                 *,
                 mode,
+                acquisition_mode,
+                filtered_url,
                 candidate_id,
                 project_name,
             ):
                 self.assertEqual(actual_query, query)
                 self.assertEqual(mode, "quick")
+                self.assertEqual(acquisition_mode, "public")
+                self.assertEqual(filtered_url, snapshot.filtered_url)
                 self.assertIsNone(candidate_id)
                 self.assertIsNone(project_name)
                 return snapshot
@@ -1508,6 +2750,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                     "graduation_year": "2027届",
                     "sort": "latest",
                     "mode": "quick",
+                    "filtered_url": filtered_url,
                 },
             )
             fetched = client.get("/job-sources/nowcoder/tasks/task-1")
@@ -1519,6 +2762,8 @@ class NowcoderTaskManagerTests(unittest.TestCase):
 
         self.assertEqual(created.status_code, 202)
         self.assertEqual(created.json()["task_id"], "task-1")
+        self.assertEqual(created.json()["acquisition_mode"], "public")
+        self.assertEqual(created.json()["filtered_url"], filtered_url)
         self.assertEqual(
             created.json()["query"]["recruitment_channel"],
             "internship",
@@ -1530,6 +2775,310 @@ class NowcoderTaskManagerTests(unittest.TestCase):
         )
         self.assertEqual(resumed.status_code, 200)
         self.assertEqual(jobs.json(), {"task_id": "task-1", "jobs": []})
+
+    def test_fastapi_rejects_external_filtered_url_before_queueing(self):
+        from fastapi.testclient import TestClient
+
+        import main
+
+        class FakeTasks:
+            @staticmethod
+            def create_task(*args, **kwargs):
+                raise AssertionError("invalid URL must not be queued")
+
+        with patch("job_sources.nowcoder.router._tasks", FakeTasks()):
+            response = TestClient(main.app).post(
+                "/job-sources/nowcoder/tasks",
+                json={
+                    "keyword": "backend",
+                    "recruitment_channel": "campus",
+                    "city": "Shanghai",
+                    "mode": "quick",
+                    "acquisition_mode": "public",
+                    "filtered_url": (
+                        "https://example.com/jobs/school/jobs"
+                        "?careerJob=11002"
+                    ),
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_fastapi_builds_public_filter_snapshot_from_structured_choices(self):
+        from fastapi.testclient import TestClient
+
+        import main
+
+        expected_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?search=Java&city=%E5%8C%97%E4%BA%AC&careerJob=11002"
+        )
+
+        class FakeTasks:
+            @staticmethod
+            def create_task(
+                query,
+                *,
+                mode,
+                acquisition_mode,
+                filtered_url,
+                candidate_id,
+                project_name,
+            ):
+                self.assertEqual(query.city, "北京")
+                self.assertEqual(filtered_url, expected_url)
+                return TaskSnapshot(
+                    task_id="structured-task",
+                    query=query,
+                    mode=mode,
+                    status="pending",
+                    pages_read=0,
+                    discovered_count=0,
+                    deduplicated_count=0,
+                    detail_success_count=0,
+                    partial_detail_count=0,
+                    detail_failure_count=0,
+                    error_type=None,
+                    stop_reason=None,
+                    acquisition_mode=acquisition_mode,
+                    filtered_url=filtered_url,
+                )
+
+        with patch("job_sources.nowcoder.router._tasks", FakeTasks()):
+            response = TestClient(main.app).post(
+                "/job-sources/nowcoder/tasks",
+                json={
+                    "keyword": "Java",
+                    "recruitment_channel": "campus",
+                    "city": "北京",
+                    "career_job_id": "11002",
+                    "mode": "quick",
+                    "acquisition_mode": "public",
+                },
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["filtered_url"], expected_url)
+
+    def test_fastapi_builds_anonymous_keyword_search_without_category(self):
+        from fastapi.testclient import TestClient
+
+        import main
+
+        expected_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?search=AI-Agent&city=%E5%B9%BF%E5%B7%9E"
+        )
+
+        class FakeTasks:
+            @staticmethod
+            def create_task(
+                query,
+                *,
+                mode,
+                acquisition_mode,
+                filtered_url,
+                candidate_id,
+                project_name,
+            ):
+                self.assertEqual(query.keyword, "AI-Agent")
+                self.assertEqual(filtered_url, expected_url)
+                return TaskSnapshot(
+                    task_id="keyword-search-task",
+                    query=query,
+                    mode=mode,
+                    status="pending",
+                    pages_read=0,
+                    discovered_count=0,
+                    deduplicated_count=0,
+                    detail_success_count=0,
+                    partial_detail_count=0,
+                    detail_failure_count=0,
+                    error_type=None,
+                    stop_reason=None,
+                    acquisition_mode=acquisition_mode,
+                    filtered_url=filtered_url,
+                )
+
+        with patch("job_sources.nowcoder.router._tasks", FakeTasks()):
+            response = TestClient(main.app).post(
+                "/job-sources/nowcoder/tasks",
+                json={
+                    "keyword": "AI-Agent",
+                    "recruitment_channel": "campus",
+                    "city": "广州",
+                    "mode": "quick",
+                    "acquisition_mode": "public",
+                },
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["filtered_url"], expected_url)
+
+    def test_fastapi_does_not_infer_embedded_category_for_software_keyword(self):
+        from fastapi.testclient import TestClient
+
+        import main
+
+        expected_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?search=%E8%BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91"
+            "&city=%E5%B9%BF%E5%B7%9E"
+        )
+
+        class FakeTasks:
+            def create_task(
+                self,
+                query,
+                *,
+                mode,
+                acquisition_mode,
+                filtered_url,
+                candidate_id,
+                project_name,
+            ):
+                self.assertEqual(query.keyword, "软件开发")
+                self.assertEqual(filtered_url, expected_url)
+                self.assertNotIn("careerJob=143068", filtered_url)
+                return TaskSnapshot(
+                    task_id="software-keyword-task",
+                    query=query,
+                    mode=mode,
+                    status="pending",
+                    pages_read=0,
+                    discovered_count=0,
+                    deduplicated_count=0,
+                    detail_success_count=0,
+                    partial_detail_count=0,
+                    detail_failure_count=0,
+                    error_type=None,
+                    stop_reason=None,
+                    acquisition_mode=acquisition_mode,
+                    filtered_url=filtered_url,
+                )
+
+            assertEqual = self.assertEqual
+            assertNotIn = self.assertNotIn
+
+        with patch("job_sources.nowcoder.router._tasks", FakeTasks()):
+            response = TestClient(main.app).post(
+                "/job-sources/nowcoder/tasks",
+                json={
+                    "keyword": "软件开发",
+                    "recruitment_channel": "campus",
+                    "city": "广州",
+                    "mode": "quick",
+                    "acquisition_mode": "public",
+                },
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["filtered_url"], expected_url)
+
+    def test_fastapi_exposes_normalized_anonymous_filters(self):
+        from fastapi.testclient import TestClient
+
+        import main
+        from job_sources.nowcoder.anonymous import (
+            CareerJobOption,
+            NowcoderFilterOptions,
+        )
+
+        class FakeAnonymousApi:
+            @staticmethod
+            def get_filter_options():
+                return NowcoderFilterOptions(
+                    career_jobs=(
+                        CareerJobOption(
+                            id="11002",
+                            label="技术 / 后端开发 / java工程师",
+                        ),
+                    ),
+                    hot_cities=("北京", "上海"),
+                    cities=("北京", "上海"),
+                )
+
+        with patch(
+            "job_sources.nowcoder.router._anonymous_api",
+            FakeAnonymousApi(),
+        ):
+            response = TestClient(main.app).get(
+                "/job-sources/nowcoder/filters"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "career_jobs": [
+                    {
+                        "id": "11002",
+                        "label": "技术 / 后端开发 / java工程师",
+                    }
+                ],
+                "hot_cities": ["北京", "上海"],
+                "cities": ["北京", "上海"],
+            },
+        )
+
+    def test_nowcoder_ui_uses_structured_anonymous_filters(self):
+        from fastapi.testclient import TestClient
+
+        import main
+
+        response = TestClient(main.app).get(
+            "/job-sources/nowcoder/ui"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="acquisition-mode"', response.text)
+        self.assertIn(
+            '<option value="public" selected>',
+            response.text,
+        )
+        self.assertIn('<option value="browser">', response.text)
+        self.assertIn(
+            'id="career-job"',
+            response.text,
+        )
+        self.assertNotIn('id="filtered-url"', response.text)
+        self.assertIn(
+            'fetch("/job-sources/nowcoder/filters")',
+            response.text,
+        )
+        self.assertIn("职位分类（可选）", response.text)
+        self.assertIn(
+            "关键词会直接搜索职位名称、标签和 JD",
+            response.text,
+        )
+        self.assertIn("option.value = item.id", response.text)
+        self.assertIn("option.textContent = item.label", response.text)
+        self.assertIn(
+            '<option value="">不限职位分类</option>',
+            response.text,
+        )
+        self.assertIn("只会进一步缩小范围", response.text)
+        self.assertNotIn('|| "11002"', response.text)
+        self.assertIn(
+            'acquisition_mode: document.querySelector("#acquisition-mode").value',
+            response.text,
+        )
+        self.assertIn(
+            'career_job_id: acquisitionMode.value === "public" ? careerJob.value || null : null',
+            response.text,
+        )
+        self.assertNotIn("filtered_url:", response.text)
+        self.assertIn(
+            'new Option(`${selectedCity}（保留的城市）`, selectedCity)',
+            response.text,
+        )
+        self.assertIn("loadAnonymousFilters();", response.text)
+        self.assertIn("画像匹配", response.text)
+        self.assertIn('id="matched"', response.text)
+        self.assertIn(
+            'document.querySelector("#matched").textContent = task.deduplicated_count',
+            response.text,
+        )
 
 
 if __name__ == "__main__":

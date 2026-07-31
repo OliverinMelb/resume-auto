@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 from job_sources.contracts import JobQuery
 
-from .models import BrowserSearchResult
+from .models import NowcoderSearchResult
 from .source import BASE_URL, JobReference, SourceKind
 
 if TYPE_CHECKING:
@@ -83,7 +83,7 @@ class NowcoderPlaywrightSearchCollector:
         target: int | None,
         max_pages: int,
         should_stop: Callable[[], bool],
-    ) -> BrowserSearchResult:
+    ) -> NowcoderSearchResult:
         return self._collect(
             query,
             target=target,
@@ -100,9 +100,9 @@ class NowcoderPlaywrightSearchCollector:
         target: int | None,
         max_pages: int,
         should_stop: Callable[[], bool],
-        resume_result: BrowserSearchResult | None,
-        on_progress: Callable[[BrowserSearchResult], None],
-    ) -> BrowserSearchResult:
+        resume_result: NowcoderSearchResult | None,
+        on_progress: Callable[[NowcoderSearchResult], None],
+    ) -> NowcoderSearchResult:
         return self._collect(
             query,
             target=target,
@@ -119,9 +119,9 @@ class NowcoderPlaywrightSearchCollector:
         target: int | None,
         max_pages: int,
         should_stop: Callable[[], bool],
-        resume_result: BrowserSearchResult | None,
-        on_progress: Callable[[BrowserSearchResult], None] | None,
-    ) -> BrowserSearchResult:
+        resume_result: NowcoderSearchResult | None,
+        on_progress: Callable[[NowcoderSearchResult], None] | None,
+    ) -> NowcoderSearchResult:
         if max_pages < 1:
             raise ValueError("max_pages must be positive")
         if target is not None and target < 1:
@@ -150,7 +150,7 @@ class NowcoderPlaywrightSearchCollector:
             return resume_result
         for _ in range(pages_read):
             if should_stop() or not self._advance_results(page, seen_ids):
-                return BrowserSearchResult(
+                return NowcoderSearchResult(
                     references=tuple(references),
                     pages_read=pages_read,
                     discovered_count=len(seen_ids),
@@ -168,7 +168,7 @@ class NowcoderPlaywrightSearchCollector:
                 references,
                 seen_ids,
             )
-            progress_result = BrowserSearchResult(
+            progress_result = NowcoderSearchResult(
                 references=tuple(references),
                 pages_read=pages_read,
                 discovered_count=len(seen_ids),
@@ -196,7 +196,7 @@ class NowcoderPlaywrightSearchCollector:
                 stop_reason = "page_limit"
                 complete = False
 
-        return BrowserSearchResult(
+        return NowcoderSearchResult(
             references=tuple(references),
             pages_read=pages_read,
             discovered_count=len(seen_ids),
@@ -383,6 +383,7 @@ class NowcoderPlaywrightSearchCollector:
                 previous_hrefs,
             )
         except Exception as error:
+            NowcoderPlaywrightSearchCollector._raise_for_blocked_page(page)
             raise BrowserPageChangedError(
                 "Nowcoder search results did not refresh after submission"
             ) from error
@@ -421,6 +422,7 @@ class NowcoderPlaywrightSearchCollector:
                 timeout=20_000,
             )
         except Exception as error:
+            NowcoderPlaywrightSearchCollector._raise_for_blocked_page(page)
             raise BrowserPageChangedError(
                 "Nowcoder filtered results did not refresh"
             ) from error
