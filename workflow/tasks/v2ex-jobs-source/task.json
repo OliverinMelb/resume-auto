@@ -1,0 +1,355 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "task_id": "v2ex-jobs-source",
+  "title": "V2EX 酷工作岗位数据源",
+  "tier": "contract",
+  "workflow_class": "python-source-change",
+  "state": "CLOSED",
+  "created_at": "2026-07-30T09:31:28+00:00",
+  "updated_at": "2026-07-30T11:09:57+00:00",
+  "workspace": {
+    "kind": "linked-worktree",
+    "branch": "v2ex",
+    "detached": false,
+    "head_sha": "d9c2e8dab030cea0f36b2ded5f7567c53310445e",
+    "dirty_fingerprint": "575eed187399b97b4d498a02b14c4895424af6eb68183810fc456f809abfc772",
+    "dirty_entries": [
+      {
+        "status": "??",
+        "path": "AGENTS.md",
+        "hash": "aa62d5d72906e6f572254de939e2c150d433ef3daf218df17fdef17ab18c3b12"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/domain.md",
+        "hash": "8fcd1a12ea3b928dbc76ed85cbb03f2058a4d98b0e754f33f17534c24cd8cce6"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/issue-tracker.md",
+        "hash": "7c79eccc26290e75c734377176a9ee32f90fca950d3cd42ce5dd4714c94aad41"
+      },
+      {
+        "status": "??",
+        "path": "workflow/config.json",
+        "hash": "b9651d0ebeab308b43def1dd4e28204bdc1f9eb1416e60eb09088bea02cef138"
+      }
+    ],
+    "base_sha": "d9c2e8dab030cea0f36b2ded5f7567c53310445e"
+  },
+  "scope": {
+    "owned_paths": [
+      "docs/research/v2ex-jobs-feed.md",
+      "job_sources/v2ex",
+      "test_v2ex_source.py",
+      "workflow/tasks/v2ex-jobs-source"
+    ]
+  },
+  "cognitive_routing": {
+    "skills": [
+      "code-review",
+      "codebase-design",
+      "research",
+      "tdd"
+    ],
+    "source_refs": [
+      "docs/research/v2ex-jobs-feed.md",
+      "https://www.v2ex.com/feed/jobs.json"
+    ],
+    "notes": [
+      "一次匿名官方 Feed 观测与 JSON Feed v1 规范已形成研究证据。"
+    ]
+  },
+  "delegation": {
+    "subagent_limit": "runtime",
+    "parallel_write_isolation": "dedicated-worktree",
+    "writers": []
+  },
+  "planning": {
+    "status": "ready",
+    "grilling_status": "confirmed",
+    "unresolved_decisions": [],
+    "decisions": [
+      "公共测试 seam 为 V2exJobSource.fetch(cursor)，HTTP opener 仅作构造注入。",
+      "单 item 可恢复错误返回 partial outcome；整次 HTTP/JSON 失败保持输入游标。",
+      "只有无冲突双证据的 recruitment/referral 规范化，其他全部显式 review/invalid。"
+    ],
+    "acceptance_criteria": [
+      "HTML 转有界纯文本并在任何结构化输出前移除邮箱、手机号、微信和 QQ。",
+      "item 级畸形产生 partial 语义，导入无网络线程，fetch 不写数据库或文件。",
+      "七类分类完整返回且仅高置信 recruitment/referral 复用共享 NormalizedJob。",
+      "官方固定匿名 GET 具备超时、1 MiB 上限、最终 URL 和 Content-Type 校验。",
+      "最终变更只在明确 owned paths，所有单测、compileall 和 diff-check 通过。",
+      "调用方 cursor 支持增量去重；失败不推进；Feed 缺席不表示删除。"
+    ],
+    "spec_ref": "workflow/tasks/v2ex-jobs-source/spec.md",
+    "multi_session": true,
+    "tickets": [
+      {
+        "id": "T1",
+        "title": "建立安全 Feed fetch 与首个规范化 tracer",
+        "blocked_by": [],
+        "acceptance_criteria": [
+          "公共 fetch seam 对正常 JSON Feed 产生逐 item outcome 和最小 NormalizedJob，并通过 HTTP 边界测试。"
+        ]
+      },
+      {
+        "id": "T2",
+        "title": "完成分类矩阵与明确字段提取",
+        "blocked_by": [
+          "T1"
+        ],
+        "acceptance_criteria": [
+          "七类样本、冲突 uncertain、remote/internship/part_time/contract/foreign/location/salary 规则通过测试。"
+        ]
+      },
+      {
+        "id": "T3",
+        "title": "完成隐私、HTML、partial 与 cursor 语义",
+        "blocked_by": [
+          "T2"
+        ],
+        "acceptance_criteria": [
+          "恶意/超长 HTML、联系方式脱敏、畸形 item、重复/cursor 和失败不推进均通过公共 seam 测试。"
+        ]
+      },
+      {
+        "id": "T4",
+        "title": "完整验证与独立双轴审查",
+        "blocked_by": [
+          "T3"
+        ],
+        "acceptance_criteria": [
+          "V2EX 专项、全量测试、compileall、diff-check、scope 检查及 Standards/Spec 审查全部通过。"
+        ]
+      }
+    ]
+  },
+  "budget": {
+    "max_fix_loops": 2,
+    "fix_loops": 2,
+    "verification_attempts": 5
+  },
+  "verification": {
+    "latest": {
+      "result": "PASS",
+      "verification_id": "20260730-190809-034582",
+      "head_sha": "d9c2e8dab030cea0f36b2ded5f7567c53310445e",
+      "dirty_fingerprint": "d73cad702cb4232b05fb8226a618787da190e1284155a7a853bfd9c7583925b6",
+      "config_sha256": "b9651d0ebeab308b43def1dd4e28204bdc1f9eb1416e60eb09088bea02cef138",
+      "planning_sha256": "8760895dc16fbb1ffc95629649d90a5b9e1e3d0f670eb8792c3a426cf95716b8",
+      "evidence": "workflow/tasks/v2ex-jobs-source/verification/20260730-190809-034582.md"
+    }
+  },
+  "history": [
+    {
+      "at": "2026-07-30T09:31:28+00:00",
+      "event": "TASK_STARTED",
+      "details": null
+    },
+    {
+      "at": "2026-07-30T09:41:38+00:00",
+      "event": "COGNITIVE_ROUTE",
+      "details": {
+        "skills": [
+          "research"
+        ],
+        "source_refs": [
+          "docs/research/v2ex-jobs-feed.md"
+        ],
+        "notes": [
+          "一次匿名官方 Feed 观测与 JSON Feed v1 规范已形成研究证据。"
+        ]
+      }
+    },
+    {
+      "at": "2026-07-30T09:41:39+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": "discovering",
+        "opened": [],
+        "resolved": [],
+        "decisions": [
+          "公共测试 seam 为 V2exJobSource.fetch(cursor)，HTTP opener 仅作构造注入。",
+          "单 item 可恢复错误返回 partial outcome；整次 HTTP/JSON 失败保持输入游标。",
+          "只有无冲突双证据的 recruitment/referral 规范化，其他全部显式 review/invalid。"
+        ],
+        "acceptance": [
+          "HTML 转有界纯文本并在任何结构化输出前移除邮箱、手机号、微信和 QQ。",
+          "item 级畸形产生 partial 语义，导入无网络线程，fetch 不写数据库或文件。",
+          "七类分类完整返回且仅高置信 recruitment/referral 复用共享 NormalizedJob。",
+          "官方固定匿名 GET 具备超时、1 MiB 上限、最终 URL 和 Content-Type 校验。",
+          "最终变更只在明确 owned paths，所有单测、compileall 和 diff-check 通过。",
+          "调用方 cursor 支持增量去重；失败不推进；Feed 缺席不表示删除。"
+        ],
+        "spec_ref": "workflow/tasks/v2ex-jobs-source/spec.md",
+        "multi_session": true,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-07-30T09:41:40+00:00",
+      "event": "TICKET_UPSERTED",
+      "details": {
+        "id": "T1",
+        "title": "建立安全 Feed fetch 与首个规范化 tracer",
+        "blocked_by": [],
+        "acceptance_criteria": [
+          "公共 fetch seam 对正常 JSON Feed 产生逐 item outcome 和最小 NormalizedJob，并通过 HTTP 边界测试。"
+        ]
+      }
+    },
+    {
+      "at": "2026-07-30T09:41:41+00:00",
+      "event": "TICKET_UPSERTED",
+      "details": {
+        "id": "T2",
+        "title": "完成分类矩阵与明确字段提取",
+        "blocked_by": [
+          "T1"
+        ],
+        "acceptance_criteria": [
+          "七类样本、冲突 uncertain、remote/internship/part_time/contract/foreign/location/salary 规则通过测试。"
+        ]
+      }
+    },
+    {
+      "at": "2026-07-30T09:41:42+00:00",
+      "event": "TICKET_UPSERTED",
+      "details": {
+        "id": "T3",
+        "title": "完成隐私、HTML、partial 与 cursor 语义",
+        "blocked_by": [
+          "T2"
+        ],
+        "acceptance_criteria": [
+          "恶意/超长 HTML、联系方式脱敏、畸形 item、重复/cursor 和失败不推进均通过公共 seam 测试。"
+        ]
+      }
+    },
+    {
+      "at": "2026-07-30T09:41:43+00:00",
+      "event": "TICKET_UPSERTED",
+      "details": {
+        "id": "T4",
+        "title": "完整验证与独立双轴审查",
+        "blocked_by": [
+          "T3"
+        ],
+        "acceptance_criteria": [
+          "V2EX 专项、全量测试、compileall、diff-check、scope 检查及 Standards/Spec 审查全部通过。"
+        ]
+      }
+    },
+    {
+      "at": "2026-07-30T10:20:28+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": "ready",
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [],
+        "spec_ref": "workflow/tasks/v2ex-jobs-source/spec.md",
+        "multi_session": true,
+        "grilling_status": "confirmed"
+      }
+    },
+    {
+      "at": "2026-07-30T10:20:29+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "EXECUTE",
+        "note": "用户回复进入，确认 spec 与 V2exJobSource.fetch(cursor) 测试 seam。"
+      }
+    },
+    {
+      "at": "2026-07-30T10:37:37+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-v2ex\\workflow\\tasks\\v2ex-jobs-source\\verification\\20260730-183737-811853.md"
+      }
+    },
+    {
+      "at": "2026-07-30T10:44:21+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "fix",
+        "finding": "Standards/Spec blockers: deep JSON RecursionError; control-character item URL; 微信号 redaction; contradictory Content-Length; explicit extraction/deadline/outsourcing risk edges; standalone 培训 advertisement signal."
+      }
+    },
+    {
+      "at": "2026-07-30T10:47:12+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-v2ex\\workflow\\tasks\\v2ex-jobs-source\\verification\\20260730-184712-725326.md"
+      }
+    },
+    {
+      "at": "2026-07-30T10:49:43+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "fix",
+        "finding": "Spec re-review blockers: vx numeric contact value is not redacted; title bracket location extraction depends on incomplete whitelist and misses [昆明][招聘]."
+      }
+    },
+    {
+      "at": "2026-07-30T10:53:10+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-v2ex\\workflow\\tasks\\v2ex-jobs-source\\verification\\20260730-185310-540107.md"
+      }
+    },
+    {
+      "at": "2026-07-30T10:56:01+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "FIX",
+        "note": "继续第二轮 FIX：最终 Spec 复审发现该轮尚未覆盖的 generic role、title bound、NaN JSON、invalid url fallback 四项。"
+      }
+    },
+    {
+      "at": "2026-07-30T10:59:04+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-v2ex\\workflow\\tasks\\v2ex-jobs-source\\verification\\20260730-185904-412920.md"
+      }
+    },
+    {
+      "at": "2026-07-30T11:07:49+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "FIX",
+        "note": "继续既有第二轮 FIX：最终 Spec 复审补充发现括号地点误猜与宽松 ISO 日期两项边界，已按 TDD 收紧。"
+      }
+    },
+    {
+      "at": "2026-07-30T11:08:09+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-v2ex\\workflow\\tasks\\v2ex-jobs-source\\verification\\20260730-190809-034582.md"
+      }
+    },
+    {
+      "at": "2026-07-30T11:09:46+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "pass",
+        "finding": null
+      }
+    },
+    {
+      "at": "2026-07-30T11:09:57+00:00",
+      "event": "CLOSED",
+      "details": {
+        "summary": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-v2ex\\workflow\\tasks\\v2ex-jobs-source\\summary.md"
+      }
+    }
+  ]
+}

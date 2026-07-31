@@ -1,0 +1,69 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "verification_id": "20260730-183737-811853",
+  "task_id": "v2ex-jobs-source",
+  "run_at": "2026-07-30T10:37:37+00:00",
+  "result": "PASS",
+  "head_sha": "d9c2e8dab030cea0f36b2ded5f7567c53310445e",
+  "dirty_fingerprint": "d40cd8053d3503eb5e2b3685f02a4a150ee2f232ffaa09666e571d922fab32ac",
+  "config_sha256": "b9651d0ebeab308b43def1dd4e28204bdc1f9eb1416e60eb09088bea02cef138",
+  "planning_sha256": "8760895dc16fbb1ffc95629649d90a5b9e1e3d0f670eb8792c3a426cf95716b8",
+  "changed_files": [
+    "docs/research/v2ex-jobs-feed.md",
+    "job_sources/v2ex/__init__.py",
+    "job_sources/v2ex/source.py",
+    "test_v2ex_source.py"
+  ],
+  "unchanged_preexisting_dirty": [
+    "workflow/config.json"
+  ],
+  "scope_violations": [],
+  "checks": [
+    {
+      "name": "python-compile",
+      "command": [
+        ".venv/Scripts\\python.exe",
+        "-m",
+        "compileall",
+        "-q",
+        "job_sources",
+        "test_nowcoder_source.py"
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-v2ex",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 0.547,
+      "output": ""
+    },
+    {
+      "name": "all-unit-tests",
+      "command": [
+        ".venv/Scripts\\python.exe",
+        "-m",
+        "unittest",
+        "discover",
+        "-p",
+        "test_*.py"
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-v2ex",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 2.141,
+      "output": "source=nowcoder operation=detail finished_at=2026-07-30T10:37:36+00:00 success=false error_type=InvalidSourceRequest elapsed_ms=0\n........................source=nowcoder task_id=e81366d29c294a03beca3dc07f12396e finished_at=2026-07-30T10:37:36+00:00 status=failed error_type=RuntimeError elapsed_ms=0\n.......................[2026-07-30 18:37:37] /get-job-score | title=AI产品工程师 | matched=岗位名称 | keyword=ai产品工程师 | title_score=98 | detail_score=34 | combo_score=10 | title_penalty_score=0 | penalty_score=0 | delay_ms=0 | score=100 | reason=岗位名称命中正向关键词\n....................\n----------------------------------------------------------------------\nRan 67 tests in 0.891s\n\nOK\n"
+    },
+    {
+      "name": "diff-check",
+      "command": [
+        "C:\\Program Files\\Git\\cmd\\git.EXE",
+        "diff",
+        "--check"
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-v2ex",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 0.047,
+      "output": ""
+    }
+  ]
+}
