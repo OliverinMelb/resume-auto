@@ -270,6 +270,13 @@ class NowcoderPublicSourceTests(unittest.TestCase):
             options.career_jobs[0].name,
             "java工程师",
         )
+        self.assertEqual(
+            [
+                (option.id, option.group, option.name)
+                for option in options.campaign_careers
+            ],
+            [("11200", "技术", "后端开发")],
+        )
         self.assertEqual(options.hot_cities, ("北京", "上海"))
         self.assertEqual(options.cities, ("北京", "上海"))
 
@@ -447,6 +454,7 @@ class NowcoderPublicSourceTests(unittest.TestCase):
         page = NowcoderCampaignApi(FakeTransport()).list_page(
             keyword="大疆",
             city="上海",
+            career_job_id="11200",
             page=2,
             page_size=20,
         )
@@ -463,6 +471,7 @@ class NowcoderPublicSourceTests(unittest.TestCase):
                         "pageSize": 20,
                         "tab": 1,
                         "cities": ["上海"],
+                        "careerJobId": "11200",
                     },
                 )
             ],
@@ -3190,6 +3199,7 @@ class NowcoderTaskManagerTests(unittest.TestCase):
 
         import main
         from job_sources.nowcoder.anonymous import (
+            CampaignCareerOption,
             CareerJobOption,
             NowcoderFilterOptions,
         )
@@ -3208,6 +3218,14 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                     ),
                     hot_cities=("北京", "上海"),
                     cities=("北京", "上海"),
+                    campaign_careers=(
+                        CampaignCareerOption(
+                            id="11200",
+                            label="技术 / 后端开发",
+                            group="技术",
+                            name="后端开发",
+                        ),
+                    ),
                 )
 
         with patch(
@@ -3228,6 +3246,14 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                         "label": "技术 / 后端开发 / java工程师",
                         "group": "技术 / 后端开发",
                         "name": "java工程师",
+                    }
+                ],
+                "campaign_careers": [
+                    {
+                        "id": "11200",
+                        "label": "技术 / 后端开发",
+                        "group": "技术",
+                        "name": "后端开发",
                     }
                 ],
                 "hot_cities": ["北京", "上海"],
@@ -3270,9 +3296,12 @@ class NowcoderTaskManagerTests(unittest.TestCase):
 
         class FakeCampaignApi:
             @staticmethod
-            def list_page(*, keyword, city, page, page_size):
+            def list_page(
+                *, keyword, city, career_job_id, page, page_size
+            ):
                 self.assertEqual(keyword, "大疆")
                 self.assertEqual(city, "上海")
+                self.assertEqual(career_job_id, "11200")
                 self.assertEqual(page, 2)
                 self.assertEqual(page_size, 20)
                 return CampaignPage(
@@ -3288,7 +3317,12 @@ class NowcoderTaskManagerTests(unittest.TestCase):
         ):
             response = TestClient(main.app).get(
                 "/job-sources/nowcoder/campaigns",
-                params={"keyword": "大疆", "city": "上海", "page": 2},
+                params={
+                    "keyword": "大疆",
+                    "city": "上海",
+                    "career_job_id": "11200",
+                    "page": 2,
+                },
             )
 
         self.assertEqual(response.status_code, 200)
@@ -3363,6 +3397,13 @@ class NowcoderTaskManagerTests(unittest.TestCase):
         self.assertIn("loadAnonymousFilters();", response.text)
         self.assertIn("画像匹配", response.text)
         self.assertIn('id="campaign-panel"', response.text)
+        self.assertIn('id="campaign-career"', response.text)
+        self.assertIn('id="toggle-campaign-results"', response.text)
+        self.assertIn("收起结果", response.text)
+        self.assertIn(
+            'params.set("career_job_id", campaignCareer.value)',
+            response.text,
+        )
         self.assertIn("网申日历是招聘项目入口，不是具体岗位", response.text)
         self.assertIn(
             'fetch(`/job-sources/nowcoder/campaigns?${params}`)',

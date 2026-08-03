@@ -153,6 +153,9 @@ def nowcoder_filters():
             "career_jobs": [
                 asdict(option) for option in options.career_jobs
             ],
+            "campaign_careers": [
+                asdict(option) for option in options.campaign_careers
+            ],
             "hot_cities": list(options.hot_cities),
             "cities": list(options.cities),
         }
@@ -164,6 +167,12 @@ def nowcoder_filters():
 def list_nowcoder_campaigns(
     keyword: str | None = Query(default=None, max_length=100),
     city: str | None = Query(default=None, max_length=100),
+    career_job_id: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=32,
+        pattern=r"^\d+$",
+    ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=20),
 ):
@@ -171,6 +180,7 @@ def list_nowcoder_campaigns(
         result = _campaign_api.list_page(
             keyword=keyword,
             city=city,
+            career_job_id=career_job_id,
             page=page,
             page_size=page_size,
         )

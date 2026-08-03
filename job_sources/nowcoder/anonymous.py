@@ -189,10 +189,19 @@ class CareerJobOption:
 
 
 @dataclass(frozen=True)
+class CampaignCareerOption:
+    id: str
+    label: str
+    group: str
+    name: str
+
+
+@dataclass(frozen=True)
 class NowcoderFilterOptions:
     career_jobs: tuple[CareerJobOption, ...]
     hot_cities: tuple[str, ...]
     cities: tuple[str, ...]
+    campaign_careers: tuple[CampaignCareerOption, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -233,8 +242,13 @@ class NowcoderAnonymousApi:
                 "Nowcoder filter metadata changed shape"
             )
         career_jobs = tuple(_career_job_leaves(career_tree))
+        campaign_careers = tuple(_campaign_career_branches(career_tree))
         normalized_hot_cities = _unique_texts(hot_cities)
-        if not career_jobs or not normalized_hot_cities:
+        if (
+            not career_jobs
+            or not campaign_careers
+            or not normalized_hot_cities
+        ):
             raise AnonymousUpstreamError(
                 "Nowcoder filter metadata was empty"
             )
@@ -242,6 +256,7 @@ class NowcoderAnonymousApi:
             career_jobs=career_jobs,
             hot_cities=normalized_hot_cities,
             cities=normalized_hot_cities,
+            campaign_careers=campaign_careers,
         )
 
     def search_page(
@@ -374,6 +389,29 @@ def _career_job_leaves(
                 id=node_id,
                 label=" / ".join(path),
                 group=" / ".join(parents),
+                name=name,
+            )
+
+
+def _campaign_career_branches(nodes: list[Any]):
+    for root in nodes:
+        if not isinstance(root, Mapping):
+            continue
+        group = _text(root.get("name"))
+        children = root.get("value")
+        if group is None or not isinstance(children, list):
+            continue
+        for child in children:
+            if not isinstance(child, Mapping):
+                continue
+            child_id = _identifier(child.get("id"))
+            name = _text(child.get("name"))
+            if child_id is None or name is None:
+                continue
+            yield CampaignCareerOption(
+                id=child_id,
+                label=f"{group} / {name}",
+                group=group,
                 name=name,
             )
 

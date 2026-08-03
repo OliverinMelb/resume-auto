@@ -62,6 +62,7 @@ class NowcoderCampaignApi:
         *,
         keyword: str | None,
         city: str | None,
+        career_job_id: str | None,
         page: int,
         page_size: int = MAX_PAGE_SIZE,
     ) -> CampaignPage:
@@ -73,10 +74,13 @@ class NowcoderCampaignApi:
             )
         normalized_keyword = _text(keyword)
         normalized_city = _text(city)
+        normalized_career_job_id = _identifier(career_job_id)
         if normalized_keyword is not None and len(normalized_keyword) > 100:
             raise ValueError("campaign keyword cannot exceed 100 characters")
         if normalized_city is not None and len(normalized_city) > 100:
             raise ValueError("campaign city cannot exceed 100 characters")
+        if career_job_id is not None and normalized_career_job_id is None:
+            raise ValueError("campaign career_job_id must contain digits only")
 
         body: dict[str, Any] = {
             "query": normalized_keyword or "",
@@ -87,6 +91,8 @@ class NowcoderCampaignApi:
         }
         if normalized_city is not None:
             body["cities"] = [normalized_city]
+        if normalized_career_job_id is not None:
+            body["careerJobId"] = normalized_career_job_id
         payload = self._transport.post(SCHEDULE_PATH, body)
         data = _success_data(payload)
         current_page = _non_negative_int(data.get("currentPage"))
