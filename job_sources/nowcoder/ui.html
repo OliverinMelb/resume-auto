@@ -16,7 +16,7 @@
     h1 { margin: 0 0 8px; font-size: 30px; }
     h2 { margin: 0; font-size: 18px; }
     .muted { color: #687386; }
-    .panel, .job {
+    .panel, .job, .campaign {
       background: #fff;
       border: 1px solid #dfe4ea;
       border-radius: 14px;
@@ -78,9 +78,17 @@
     }
     .metric { padding: 12px; border-radius: 10px; background: #f6f8fa; }
     .metric strong { display: block; margin-top: 4px; font-size: 20px; }
-    #results { display: grid; gap: 12px; margin-top: 18px; }
-    .job { padding: 18px; }
-    .job h3 { margin: 0; font-size: 18px; }
+    #results, #campaign-results { display: grid; gap: 12px; margin-top: 18px; }
+    .job, .campaign { padding: 18px; }
+    .job h3, .campaign h3 { margin: 0; font-size: 18px; }
+    .campaign-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      margin-top: 16px;
+      align-items: end;
+    }
+    .campaign-pagination { margin-top: 14px; justify-content: space-between; }
     .score {
       min-width: 58px;
       padding: 5px 9px;
@@ -97,6 +105,7 @@
     .error { color: #b42318; }
     @media (max-width: 780px) {
       form { grid-template-columns: 1fr; }
+      .campaign-controls { grid-template-columns: 1fr; }
       .wide { grid-column: span 1; }
       .metrics { grid-template-columns: repeat(2, 1fr); }
     }
@@ -112,8 +121,8 @@
     <section id="form-panel" class="panel">
       <form id="task-form">
         <label class="wide">
-          公司名或职位关键词
-          <input id="keyword" value="后端开发" maxlength="100" required>
+          公司名或职位关键词（可选）
+          <input id="keyword" maxlength="100">
         </label>
         <label>
           招聘频道
@@ -127,17 +136,6 @@
           城市
           <select id="city">
             <option value="">正在加载城市…</option>
-          </select>
-        </label>
-        <label>
-          毕业年份（可选）
-          <input id="graduation-year" placeholder="例如：2027届" maxlength="50">
-        </label>
-        <label>
-          排序
-          <select id="sort">
-            <option value="recommended" selected>推荐排序</option>
-            <option value="latest">最新发布</option>
           </select>
         </label>
         <label>
@@ -188,6 +186,29 @@
       </div>
     </section>
 
+    <section id="campaign-panel" class="panel">
+      <div class="status-head">
+        <div>
+          <h2>网申日历</h2>
+          <div class="muted">网申日历是招聘项目入口，不是具体岗位。这里只读取牛客日历并展示官网链接，不会自动访问公司官网。</div>
+        </div>
+      </div>
+      <div class="campaign-controls">
+        <label>
+          公司名称（可选；城市沿用上方选择）
+          <input id="campaign-keyword" maxlength="100" placeholder="例如：大疆、字节跳动">
+        </label>
+        <button id="load-campaigns" class="secondary" type="button">查询网申项目</button>
+      </div>
+      <div id="campaign-summary" class="muted" style="margin-top: 12px">尚未查询</div>
+      <section id="campaign-results" aria-live="polite"></section>
+      <div class="actions campaign-pagination">
+        <button id="campaign-previous" class="secondary" type="button" disabled>上一页</button>
+        <span id="campaign-page" class="muted">第 0 / 0 页</span>
+        <button id="campaign-next" class="secondary" type="button" disabled>下一页</button>
+      </div>
+    </section>
+
     <section id="status-panel" class="panel">
       <div class="status-head">
         <div>
@@ -224,10 +245,19 @@
     const loadTask = document.querySelector("#load-task");
     const statusPanel = document.querySelector("#status-panel");
     const results = document.querySelector("#results");
+    const campaignKeyword = document.querySelector("#campaign-keyword");
+    const loadCampaignsButton = document.querySelector("#load-campaigns");
+    const campaignSummary = document.querySelector("#campaign-summary");
+    const campaignResults = document.querySelector("#campaign-results");
+    const campaignPrevious = document.querySelector("#campaign-previous");
+    const campaignNext = document.querySelector("#campaign-next");
+    const campaignPageLabel = document.querySelector("#campaign-page");
     let activeTaskId = null;
     let pollTimer = null;
     let projectsLoaded = false;
     let anonymousFiltersLoaded = false;
+    let campaignPage = 0;
+    let campaignTotalPages = 0;
 
     const statusLabels = {
       pending: "等待运行",
@@ -279,11 +309,20 @@
         automaticCareer.value = "";
         automaticCareer.textContent = "不限职位分类";
         careerJob.appendChild(automaticCareer);
+        const careerGroups = new Map();
         for (const item of payload.career_jobs || []) {
+          const groupName = item.group || "其他";
+          let group = careerGroups.get(groupName);
+          if (!group) {
+            group = document.createElement("optgroup");
+            group.label = groupName;
+            careerGroups.set(groupName, group);
+            careerJob.appendChild(group);
+          }
           const option = document.createElement("option");
           option.value = item.id;
-          option.textContent = item.label;
-          careerJob.appendChild(option);
+          option.textContent = item.name || item.label;
+          group.appendChild(option);
         }
         city.value = [...city.options].some(
           option => option.value === selectedCity
@@ -375,8 +414,98 @@
       link.textContent = label;
       link.href = url;
       link.target = "_blank";
-      link.rel = "noreferrer";
+      link.rel = "noopener noreferrer";
       container.appendChild(link);
+    }
+
+    function renderCampaigns(payload) {
+      campaignTotalPages = payload.total_pages || 0;
+      campaignPage = campaignTotalPages ? payload.current_page || 1 : 0;
+      campaignSummary.className = "muted";
+      campaignSummary.textContent = `共 ${payload.total_count || 0} 个招聘项目；当前城市：${city.value || "不限城市"}`;
+      campaignPageLabel.textContent = `第 ${campaignPage} / ${campaignTotalPages} 页`;
+      campaignPrevious.disabled = campaignPage <= 1;
+      campaignNext.disabled = campaignPage <= 0 || campaignPage >= campaignTotalPages;
+      campaignResults.replaceChildren();
+      for (const campaign of payload.campaigns || []) {
+        const card = document.createElement("article");
+        card.className = "campaign";
+        const head = document.createElement("div");
+        head.className = "job-head";
+        const company = document.createElement("h3");
+        company.textContent = campaign.company;
+        const status = document.createElement("span");
+        status.className = "score";
+        status.textContent = campaign.status === "open" ? "进行中" :
+          campaign.status === "closed" ? "已结束" : "状态未知";
+        head.append(company, status);
+        card.appendChild(head);
+        const meta = document.createElement("div");
+        meta.className = "muted";
+        meta.textContent = [
+          campaign.batch_name,
+          ...(campaign.locations || []),
+          campaign.application_start_date && campaign.application_end_date ?
+            `${campaign.application_start_date} 至 ${campaign.application_end_date}` :
+            campaign.schedule_text
+        ].filter(Boolean).join(" · ") || "批次/地点未提供";
+        card.appendChild(meta);
+        if (campaign.summary) {
+          const summary = document.createElement("p");
+          summary.textContent = campaign.summary;
+          card.appendChild(summary);
+        }
+        const tags = document.createElement("div");
+        tags.className = "tags";
+        const categories = campaign.career_categories || [];
+        categories.slice(0, 8).forEach(value => {
+          const tag = document.createElement("span");
+          tag.className = "tag";
+          tag.textContent = value;
+          tags.appendChild(tag);
+        });
+        if (categories.length > 8) {
+          const remaining = document.createElement("span");
+          remaining.className = "tag";
+          remaining.textContent = `另有 ${categories.length - 8} 类`;
+          tags.appendChild(remaining);
+        }
+        card.appendChild(tags);
+        const links = document.createElement("div");
+        links.className = "links";
+        addLink(links, "牛客日程", campaign.source_url);
+        addLink(links, "官网投递", campaign.official_apply_url);
+        addLink(links, "信息来源", campaign.source_information_url);
+        card.appendChild(links);
+        campaignResults.appendChild(card);
+      }
+    }
+
+    async function loadCampaigns(requestedPage = 1) {
+      loadCampaignsButton.disabled = true;
+      campaignSummary.className = "muted";
+      campaignSummary.textContent = "正在读取牛客网申日历…";
+      const params = new URLSearchParams({
+        page: String(requestedPage),
+        page_size: "20"
+      });
+      if (campaignKeyword.value.trim()) {
+        params.set("keyword", campaignKeyword.value.trim());
+      }
+      if (city.value) params.set("city", city.value);
+      try {
+        const response = await fetch(`/job-sources/nowcoder/campaigns?${params}`);
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || `HTTP ${response.status}`);
+        }
+        renderCampaigns(payload);
+      } catch (error) {
+        campaignSummary.textContent = `网申日历读取失败：${error.message}`;
+        campaignSummary.className = "error";
+      } finally {
+        loadCampaignsButton.disabled = false;
+      }
     }
 
     function renderJobs(jobs) {
@@ -454,8 +583,6 @@
         keyword: document.querySelector("#keyword").value,
         recruitment_channel: document.querySelector("#channel").value,
         city: city.value || null,
-        graduation_year: document.querySelector("#graduation-year").value || null,
-        sort: document.querySelector("#sort").value,
         acquisition_mode: document.querySelector("#acquisition-mode").value,
         career_job_id: acquisitionMode.value === "public" ? careerJob.value || null : null,
         mode: mode.value,
@@ -502,6 +629,14 @@
       if (!taskHistory.value) return;
       activeTaskId = taskHistory.value;
       pollTask();
+    });
+
+    loadCampaignsButton.addEventListener("click", () => loadCampaigns(1));
+    campaignPrevious.addEventListener("click", () => {
+      if (campaignPage > 1) loadCampaigns(campaignPage - 1);
+    });
+    campaignNext.addEventListener("click", () => {
+      if (campaignPage < campaignTotalPages) loadCampaigns(campaignPage + 1);
     });
 
     mode.addEventListener("change", () => {

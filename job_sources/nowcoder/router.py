@@ -23,6 +23,7 @@ from resume_agent.repository import Repository
 from resume_agent.settings import get_settings
 
 from .browser import NowcoderPlaywrightSearchCollector
+from .campaigns import NowcoderCampaignApi
 from .checkpoints import NowcoderCheckpointStore
 from .research import NowcoderResearchSink
 from .anonymous import (
@@ -49,7 +50,9 @@ router = APIRouter(
     dependencies=[Depends(require_local_request)],
 )
 _source = NowcoderPublicSource()
-_anonymous_api = NowcoderAnonymousApi(UrllibNowcoderTransport())
+_anonymous_transport = UrllibNowcoderTransport()
+_anonymous_api = NowcoderAnonymousApi(_anonymous_transport)
+_campaign_api = NowcoderCampaignApi(_anonymous_transport)
 _browser_collector = NowcoderPlaywrightSearchCollector()
 _repo_root = Path(__file__).resolve().parents[2]
 _resume_settings = get_settings()
@@ -76,7 +79,7 @@ atexit.register(_tasks.close)
 
 
 class NowcoderTaskCreateRequest(BaseModel):
-    keyword: str = Field(min_length=1, max_length=100)
+    keyword: str | None = Field(default=None, max_length=100)
     recruitment_channel: RecruitmentChannel
     city: str | None = Field(default=None, max_length=100)
     graduation_year: str | None = Field(default=None, max_length=50)
@@ -152,6 +155,28 @@ def nowcoder_filters():
             ],
             "hot_cities": list(options.hot_cities),
             "cities": list(options.cities),
+        }
+    except Exception as error:
+        _raise_source_error(error)
+
+
+@router.get("/campaigns")
+def list_nowcoder_campaigns(
+    keyword: str | None = Query(default=None, max_length=100),
+    city: str | None = Query(default=None, max_length=100),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=20),
+):
+    try:
+        result = _campaign_api.list_page(
+            keyword=keyword,
+            city=city,
+            page=page,
+            page_size=page_size,
+        )
+        return {
+            "resource_type": "campaign",
+            **asdict(result),
         }
     except Exception as error:
         _raise_source_error(error)

@@ -21,7 +21,10 @@ _GET_PATHS = {
     "/np-api/u/job/career-job",
     "/nccommon/city/all-with-china",
 }
-_POST_PATHS = {"/np-api/u/job/square-search"}
+_POST_PATHS = {
+    "/np-api/u/job/square-search",
+    "/np-api/u/school-schedule/list-card",
+}
 
 
 class AnonymousUpstreamError(RuntimeError):
@@ -181,6 +184,8 @@ class UrllibNowcoderTransport:
 class CareerJobOption:
     id: str
     label: str
+    group: str
+    name: str
 
 
 @dataclass(frozen=True)
@@ -275,7 +280,7 @@ class NowcoderAnonymousApi:
                 "careerJobId": normalized_career_job_id or "",
                 "companyFinancing": None,
                 "jobCity": (
-                    [normalized_city] if normalized_city is not None else ""
+                    [normalized_city] if normalized_city is not None else []
                 ),
                 "graduateYearList": None,
                 "scaleList": None,
@@ -368,6 +373,8 @@ def _career_job_leaves(
             yield CareerJobOption(
                 id=node_id,
                 label=" / ".join(path),
+                group=" / ".join(parents),
+                name=name,
             )
 
 

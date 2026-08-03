@@ -1,5 +1,6 @@
 """Nowcoder source adapter package."""
 
+from .campaigns import CampaignPage, NowcoderCampaignApi, RecruitmentCampaign
 from .source import (
     MAX_RESPONSE_BYTES,
     InvalidSourceRequest,
@@ -18,15 +19,18 @@ from .source import (
 from job_sources.contracts import NormalizedJob
 
 __all__ = [
+    "CampaignPage",
     "MAX_RESPONSE_BYTES",
     "InvalidSourceRequest",
     "JobReference",
     "JobSearchResult",
     "NormalizedJob",
+    "NowcoderCampaignApi",
     "NowcoderPublicSource",
     "NowcoderPublicSearchCollector",
     "NowcoderSourceAdapter",
     "NowcoderSourceError",
+    "RecruitmentCampaign",
     "SourceAccessRestrictedError",
     "UpstreamChangedError",
     "UpstreamHttpError",

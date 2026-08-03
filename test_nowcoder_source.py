@@ -262,6 +262,14 @@ class NowcoderPublicSourceTests(unittest.TestCase):
             options.career_jobs[0].label,
             "技术 / 后端开发 / java工程师",
         )
+        self.assertEqual(
+            options.career_jobs[0].group,
+            "技术 / 后端开发",
+        )
+        self.assertEqual(
+            options.career_jobs[0].name,
+            "java工程师",
+        )
         self.assertEqual(options.hot_cities, ("北京", "上海"))
         self.assertEqual(options.cities, ("北京", "上海"))
 
@@ -344,6 +352,152 @@ class NowcoderPublicSourceTests(unittest.TestCase):
                 ("302", "大模型 Agent 开发"),
             ],
         )
+
+    def test_anonymous_adapter_uses_empty_city_list_for_nationwide_search(self):
+        from job_sources.nowcoder.anonymous import NowcoderAnonymousApi
+
+        captured_bodies = []
+
+        class FakeTransport:
+            @staticmethod
+            def get(path):
+                raise AssertionError("search must use POST")
+
+            @staticmethod
+            def post(path, body):
+                captured_bodies.append(body)
+                return {
+                    "code": 0,
+                    "msg": "OK",
+                    "data": {
+                        "currentPage": 1,
+                        "totalPage": 1,
+                        "datas": [],
+                    },
+                }
+
+        NowcoderAnonymousApi(FakeTransport()).search_page(
+            recruitment_channel="internship",
+            city=None,
+            career_job_id="11022",
+            keyword="",
+            page=1,
+        )
+
+        self.assertEqual(captured_bodies[0]["jobCity"], [])
+
+    def test_campaign_adapter_normalizes_schedule_without_visiting_apply_url(self):
+        from job_sources.nowcoder.campaigns import NowcoderCampaignApi
+
+        requests = []
+
+        class FakeTransport:
+            @staticmethod
+            def get(path):
+                raise AssertionError("campaign listing must use POST")
+
+            @staticmethod
+            def post(path, body):
+                requests.append((path, body))
+                return {
+                    "code": 0,
+                    "msg": "OK",
+                    "data": {
+                        "currentPage": 2,
+                        "totalPage": 12,
+                        "totalCount": 222,
+                        "datas": [
+                            {
+                                "companyId": 708,
+                                "name": "大疆",
+                                "batch": 1206,
+                                "batchName": "27秋招",
+                                "cityList": ["深圳", "北京", "上海"],
+                                "careerNameList": ["后端开发", "人工智能/算法"],
+                                "industryList": ["机械制造", "硬件"],
+                                "companyEvaluation": "多类技术职位热招中",
+                                "wangshenBeginDate": 1767225600000,
+                                "wangshenEndDate": 1769904000000,
+                                "wangshenTime": "1月1日-2月1日",
+                                "wangshenUpdateTime": 1767225600000,
+                                "end": 0,
+                                "customWangshenLink": (
+                                    "https://apply.example.com/campus"
+                                ),
+                                "sourceInformation": (
+                                    "https://mp.weixin.qq.com/s/example"
+                                ),
+                            },
+                            {
+                                "companyId": 709,
+                                "name": "安全链接示例",
+                                "batch": 1207,
+                                "batchName": "27届校招",
+                                "customWangshenLink": "javascript:alert(1)",
+                                "adInfo": {
+                                    "rawUrl": "https://fallback.example.com"
+                                },
+                                "sourceInformation": "data:text/plain,unsafe",
+                                "end": 1,
+                            }
+                        ],
+                    },
+                }
+
+        page = NowcoderCampaignApi(FakeTransport()).list_page(
+            keyword="大疆",
+            city="上海",
+            page=2,
+            page_size=20,
+        )
+
+        self.assertEqual(
+            requests,
+            [
+                (
+                    "/np-api/u/school-schedule/list-card",
+                    {
+                        "query": "大疆",
+                        "propertyId": "",
+                        "page": 2,
+                        "pageSize": 20,
+                        "tab": 1,
+                        "cities": ["上海"],
+                    },
+                )
+            ],
+        )
+        self.assertEqual(page.current_page, 2)
+        self.assertEqual(page.total_pages, 12)
+        self.assertEqual(page.total_count, 222)
+        campaign = page.campaigns[0]
+        self.assertEqual(campaign.source_campaign_id, "708:1206")
+        self.assertEqual(campaign.company, "大疆")
+        self.assertEqual(campaign.batch_name, "27秋招")
+        self.assertEqual(campaign.locations, ("深圳", "北京", "上海"))
+        self.assertEqual(
+            campaign.career_categories,
+            ("后端开发", "人工智能/算法"),
+        )
+        self.assertEqual(campaign.application_start_date, "2026-01-01")
+        self.assertEqual(campaign.application_end_date, "2026-02-01")
+        self.assertEqual(campaign.status, "open")
+        self.assertEqual(
+            campaign.source_url,
+            "https://www.nowcoder.com/enterprise/708"
+            "?channel=recruitmentSchedule&pageSource=5014",
+        )
+        self.assertEqual(
+            campaign.official_apply_url,
+            "https://apply.example.com/campus",
+        )
+        fallback_campaign = page.campaigns[1]
+        self.assertEqual(
+            fallback_campaign.official_apply_url,
+            "https://fallback.example.com",
+        )
+        self.assertIsNone(fallback_campaign.source_information_url)
+        self.assertEqual(fallback_campaign.status, "closed")
 
     def test_anonymous_adapter_rejects_contradictory_page_bounds(self):
         from job_sources.nowcoder.anonymous import (
@@ -2915,6 +3069,62 @@ class NowcoderTaskManagerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["filtered_url"], expected_url)
 
+    def test_fastapi_builds_structured_filter_without_keyword(self):
+        from fastapi.testclient import TestClient
+
+        import main
+
+        expected_url = (
+            "https://www.nowcoder.com/jobs/school/jobs"
+            "?city=%E4%B8%8A%E6%B5%B7&careerJob=11022"
+        )
+
+        class FakeTasks:
+            @staticmethod
+            def create_task(
+                query,
+                *,
+                mode,
+                acquisition_mode,
+                filtered_url,
+                candidate_id,
+                project_name,
+            ):
+                self.assertEqual(query.keyword, "")
+                self.assertEqual(query.city, "\u4e0a\u6d77")
+                self.assertEqual(filtered_url, expected_url)
+                return TaskSnapshot(
+                    task_id="structured-no-keyword-task",
+                    query=query,
+                    mode=mode,
+                    status="pending",
+                    pages_read=0,
+                    discovered_count=0,
+                    deduplicated_count=0,
+                    detail_success_count=0,
+                    partial_detail_count=0,
+                    detail_failure_count=0,
+                    error_type=None,
+                    stop_reason=None,
+                    acquisition_mode=acquisition_mode,
+                    filtered_url=filtered_url,
+                )
+
+        with patch("job_sources.nowcoder.router._tasks", FakeTasks()):
+            response = TestClient(main.app).post(
+                "/job-sources/nowcoder/tasks",
+                json={
+                    "recruitment_channel": "campus",
+                    "city": "\u4e0a\u6d77",
+                    "career_job_id": "11022",
+                    "mode": "quick",
+                    "acquisition_mode": "public",
+                },
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["filtered_url"], expected_url)
+
     def test_fastapi_does_not_infer_embedded_category_for_software_keyword(self):
         from fastapi.testclient import TestClient
 
@@ -2992,6 +3202,8 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                         CareerJobOption(
                             id="11002",
                             label="技术 / 后端开发 / java工程师",
+                            group="技术 / 后端开发",
+                            name="java工程师",
                         ),
                     ),
                     hot_cities=("北京", "上海"),
@@ -3014,12 +3226,77 @@ class NowcoderTaskManagerTests(unittest.TestCase):
                     {
                         "id": "11002",
                         "label": "技术 / 后端开发 / java工程师",
+                        "group": "技术 / 后端开发",
+                        "name": "java工程师",
                     }
                 ],
                 "hot_cities": ["北京", "上海"],
                 "cities": ["北京", "上海"],
             },
         )
+
+    def test_fastapi_lists_schedule_campaigns_separately_from_jobs(self):
+        from fastapi.testclient import TestClient
+
+        import main
+        from job_sources.nowcoder.campaigns import (
+            CampaignPage,
+            RecruitmentCampaign,
+        )
+
+        campaign = RecruitmentCampaign(
+            source="nowcoder",
+            source_campaign_id="708:1206",
+            source_url=(
+                "https://www.nowcoder.com/enterprise/708"
+                "?channel=recruitmentSchedule&pageSource=5014"
+            ),
+            official_apply_url="https://apply.example.com/campus",
+            source_information_url=None,
+            company_id="708",
+            company="大疆",
+            batch_id="1206",
+            batch_name="27秋招",
+            locations=("上海",),
+            career_categories=("后端开发",),
+            industries=("硬件",),
+            summary="多类技术职位热招中",
+            application_start_date="2026-01-01",
+            application_end_date="2026-02-01",
+            schedule_text="1月1日-2月1日",
+            status="open",
+            last_updated_at="2026-01-01T08:00:00+08:00",
+        )
+
+        class FakeCampaignApi:
+            @staticmethod
+            def list_page(*, keyword, city, page, page_size):
+                self.assertEqual(keyword, "大疆")
+                self.assertEqual(city, "上海")
+                self.assertEqual(page, 2)
+                self.assertEqual(page_size, 20)
+                return CampaignPage(
+                    campaigns=(campaign,),
+                    current_page=2,
+                    total_pages=12,
+                    total_count=222,
+                )
+
+        with patch(
+            "job_sources.nowcoder.router._campaign_api",
+            FakeCampaignApi(),
+        ):
+            response = TestClient(main.app).get(
+                "/job-sources/nowcoder/campaigns",
+                params={"keyword": "大疆", "city": "上海", "page": 2},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["resource_type"], "campaign")
+        self.assertEqual(payload["total_count"], 222)
+        self.assertEqual(payload["campaigns"][0]["company"], "大疆")
+        self.assertNotIn("title", payload["campaigns"][0])
 
     def test_nowcoder_ui_uses_structured_anonymous_filters(self):
         from fastapi.testclient import TestClient
@@ -3041,6 +3318,10 @@ class NowcoderTaskManagerTests(unittest.TestCase):
             'id="career-job"',
             response.text,
         )
+        self.assertNotIn('id="graduation-year"', response.text)
+        self.assertNotIn('id="sort"', response.text)
+        self.assertNotIn("graduation_year:", response.text)
+        self.assertNotIn("sort:", response.text)
         self.assertNotIn('id="filtered-url"', response.text)
         self.assertIn(
             'fetch("/job-sources/nowcoder/filters")',
@@ -3052,7 +3333,14 @@ class NowcoderTaskManagerTests(unittest.TestCase):
             response.text,
         )
         self.assertIn("option.value = item.id", response.text)
-        self.assertIn("option.textContent = item.label", response.text)
+        self.assertIn(
+            'document.createElement("optgroup")',
+            response.text,
+        )
+        self.assertIn(
+            "option.textContent = item.name || item.label",
+            response.text,
+        )
         self.assertIn(
             '<option value="">不限职位分类</option>',
             response.text,
@@ -3074,6 +3362,12 @@ class NowcoderTaskManagerTests(unittest.TestCase):
         )
         self.assertIn("loadAnonymousFilters();", response.text)
         self.assertIn("画像匹配", response.text)
+        self.assertIn('id="campaign-panel"', response.text)
+        self.assertIn("网申日历是招聘项目入口，不是具体岗位", response.text)
+        self.assertIn(
+            'fetch(`/job-sources/nowcoder/campaigns?${params}`)',
+            response.text,
+        )
         self.assertIn('id="matched"', response.text)
         self.assertIn(
             'document.querySelector("#matched").textContent = task.deduplicated_count',

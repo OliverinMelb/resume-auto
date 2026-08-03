@@ -14,6 +14,7 @@
 - 支持不写数据库的快速预览；
 - 支持带检查点、停止和恢复能力的完整调研；
 - 保留牛客原文链接及聚合岗位的官网申请链接；
+- 独立分页读取网申日历中的招聘项目和官网入口，不将招聘项目伪装成岗位；
 - 遇到登录、验证、HTTP 403 或 429 时暂停或报错，不尝试绕过。
 
 本功能不会自动投递、自动联系招聘者、破解接口签名、绕过验证码或访问权限。
@@ -25,6 +26,7 @@ job_sources/contracts.py             最小统一岗位与查询契约
 job_sources/evaluation.py            复用现有 JD 评分器
 job_sources/router.py                数据源聚合路由
 job_sources/nowcoder/anonymous.py    匿名筛选元数据与分页搜索适配器
+job_sources/nowcoder/campaigns.py    网申日历招聘项目分页适配器
 job_sources/nowcoder/browser.py      可见 Chrome 搜索与翻页
 job_sources/nowcoder/source.py       公开详情读取、解析和标准化
 job_sources/nowcoder/tasks.py        快速/调研任务、停止与恢复
@@ -43,6 +45,15 @@ test_nowcoder_source.py              单元与路由测试
 → 标准化岗位并复用现有 JD 评分
 → 页面展示
 → 完整调研模式才写入 Resume Agent
+```
+
+网申日历是另一条独立链路：
+
+```text
+公司名称和城市
+→ 牛客网申日历分页接口
+→ 招聘项目（公司、批次、日期、城市、岗位类别）
+→ 展示牛客日程、官网投递和信息来源链接
 ```
 
 ## 数据获取方式
@@ -73,6 +84,16 @@ https://www.nowcoder.com/jobs/school/jobs?search=Java&city=上海&careerJob=1100
 当前匿名接口属于牛客页面内部接口，不是对外稳定 API。若出现 HTTP 403/429、验证或
 响应结构变化，匿名任务会停止；需要时由用户显式选择浏览器模式，不会自动打开
 Chrome。
+
+### 网申日历（招聘项目）
+
+- 网申日历使用独立的 `/job-sources/nowcoder/campaigns` 本地接口；
+- 每次读取一页并保留牛客返回的当前页、总页数和总项目数，页面支持上一页和下一页；
+- 公司名称是可选搜索条件，城市沿用页面上方的热门城市选择；
+- 每个项目包含公司、招聘批次、城市、岗位类别、网申日期和状态；
+- 官网申请地址只作为链接展示，采集过程不会访问或解析公司官网；
+- 外链只接受没有用户名和密码的 HTTP(S) URL，并使用独立新窗口打开；
+- 招聘项目不是具体岗位，不参与 JD 评分，也不写入 Resume Agent 的岗位表。
 
 ### 浏览器精确筛选
 

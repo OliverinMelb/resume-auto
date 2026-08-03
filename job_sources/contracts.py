@@ -13,16 +13,14 @@ JobSort = Literal["recommended", "latest"]
 
 @dataclass(frozen=True)
 class JobQuery:
-    keyword: str
+    keyword: str | None
     recruitment_channel: RecruitmentChannel
     city: str | None = None
     graduation_year: str | None = None
     sort: JobSort = "recommended"
 
     def __post_init__(self):
-        keyword = self.keyword.strip()
-        if not keyword:
-            raise ValueError("job keyword cannot be empty")
+        keyword = (self.keyword or "").strip()
         if len(keyword) > 100:
             raise ValueError("job keyword cannot exceed 100 characters")
         if self.recruitment_channel not in {
