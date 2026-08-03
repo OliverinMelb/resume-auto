@@ -1,0 +1,186 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "task_id": "20260803-172114-388869-rss-api",
+  "title": "接入电鸭 RSS 调研 API 与页面",
+  "tier": "contract",
+  "workflow_class": "app-change",
+  "state": "CLOSED",
+  "created_at": "2026-08-03T09:21:14+00:00",
+  "updated_at": "2026-08-03T10:28:57+00:00",
+  "workspace": {
+    "kind": "linked-worktree",
+    "branch": "eleduck",
+    "detached": false,
+    "head_sha": "1e79989f54884cb0dfc1668278f86f4293ca8881",
+    "dirty_fingerprint": "b8e45b6b271a4510145d97ced3f8c6e9a85deed2961c745e5c96b6056dbb7b4d",
+    "dirty_entries": [
+      {
+        "status": "??",
+        "path": "AGENTS.md",
+        "hash": "aa62d5d72906e6f572254de939e2c150d433ef3daf218df17fdef17ab18c3b12"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/domain.md",
+        "hash": "8fcd1a12ea3b928dbc76ed85cbb03f2058a4d98b0e754f33f17534c24cd8cce6"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/issue-tracker.md",
+        "hash": "7c79eccc26290e75c734377176a9ee32f90fca950d3cd42ce5dd4714c94aad41"
+      },
+      {
+        "status": "??",
+        "path": "workflow/config.json",
+        "hash": "c0f9109ace85ec7200374c4713943f2880f0060d5ba37ad81d93f2c22bfaaa7e"
+      }
+    ],
+    "base_sha": "1e79989f54884cb0dfc1668278f86f4293ca8881"
+  },
+  "scope": {
+    "owned_paths": [
+      "job_sources/eleduck",
+      "job_sources/router.py",
+      "test_eleduck_source.py"
+    ]
+  },
+  "cognitive_routing": {
+    "skills": [
+      "codebase-design",
+      "tdd"
+    ],
+    "source_refs": [
+      "workflow/tasks/20260730-183005-392840-rss-jd/spec.md"
+    ],
+    "notes": [
+      "沿用已确认的 EleduckCoordinator 深模块接口作为测试和调用 seam。"
+    ]
+  },
+  "delegation": {
+    "subagent_limit": "runtime",
+    "parallel_write_isolation": "dedicated-worktree",
+    "writers": []
+  },
+  "planning": {
+    "status": "ready",
+    "grilling_status": "confirmed",
+    "unresolved_decisions": [],
+    "decisions": [],
+    "acceptance_criteria": [
+      "通过 EleduckCoordinator 与本地 HTTP 路由 seam 验证预览、增量调研、幂等入库、人工审核和安全失败；页面可操作且不自动抓取；牛客及共享契约不变；目标与全仓测试通过"
+    ],
+    "spec_ref": "workflow/tasks/20260730-183005-392840-rss-jd/spec.md",
+    "multi_session": false,
+    "tickets": []
+  },
+  "budget": {
+    "max_fix_loops": 2,
+    "fix_loops": 0,
+    "verification_attempts": 4
+  },
+  "verification": {
+    "latest": {
+      "result": "PASS",
+      "verification_id": "20260803-182749-331805",
+      "head_sha": "1e79989f54884cb0dfc1668278f86f4293ca8881",
+      "dirty_fingerprint": "16b180c18dbc69fe2950655b58eccf7a98cca3fe697f1d44dc9adc50cf88b32f",
+      "config_sha256": "c0f9109ace85ec7200374c4713943f2880f0060d5ba37ad81d93f2c22bfaaa7e",
+      "planning_sha256": "daf1fb9a7dce75af47ebe8069d7689bff6635c931336de8a4f3d762c5e9285fa",
+      "evidence": "workflow/tasks/20260803-172114-388869-rss-api/verification/20260803-182749-331805.md"
+    }
+  },
+  "history": [
+    {
+      "at": "2026-08-03T09:21:14+00:00",
+      "event": "TASK_STARTED",
+      "details": null
+    },
+    {
+      "at": "2026-08-03T09:21:53+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": "ready",
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "通过 EleduckCoordinator 与本地 HTTP 路由 seam 验证预览、增量调研、幂等入库、人工审核和安全失败；页面可操作且不自动抓取；牛客及共享契约不变；目标与全仓测试通过"
+        ],
+        "spec_ref": "workflow/tasks/20260730-183005-392840-rss-jd/spec.md",
+        "multi_session": false,
+        "grilling_status": "confirmed"
+      }
+    },
+    {
+      "at": "2026-08-03T09:21:54+00:00",
+      "event": "COGNITIVE_ROUTE",
+      "details": {
+        "skills": [
+          "codebase-design"
+        ],
+        "source_refs": [
+          "workflow/tasks/20260730-183005-392840-rss-jd/spec.md"
+        ],
+        "notes": [
+          "沿用已确认的 EleduckCoordinator 深模块接口作为测试和调用 seam。"
+        ]
+      }
+    },
+    {
+      "at": "2026-08-03T09:21:55+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "EXECUTE",
+        "note": null
+      }
+    },
+    {
+      "at": "2026-08-03T09:38:52+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-eleduck\\workflow\\tasks\\20260803-172114-388869-rss-api\\verification\\20260803-173852-530802.md"
+      }
+    },
+    {
+      "at": "2026-08-03T09:48:12+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "FAIL",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-eleduck\\workflow\\tasks\\20260803-172114-388869-rss-api\\verification\\20260803-174812-599410.md"
+      }
+    },
+    {
+      "at": "2026-08-03T09:52:25+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-eleduck\\workflow\\tasks\\20260803-172114-388869-rss-api\\verification\\20260803-175225-152411.md"
+      }
+    },
+    {
+      "at": "2026-08-03T10:27:49+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-eleduck\\workflow\\tasks\\20260803-172114-388869-rss-api\\verification\\20260803-182749-331805.md"
+      }
+    },
+    {
+      "at": "2026-08-03T10:28:56+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "pass",
+        "finding": null
+      }
+    },
+    {
+      "at": "2026-08-03T10:28:57+00:00",
+      "event": "CLOSED",
+      "details": {
+        "summary": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-eleduck\\workflow\\tasks\\20260803-172114-388869-rss-api\\summary.md"
+      }
+    }
+  ]
+}

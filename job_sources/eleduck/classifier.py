@@ -13,6 +13,8 @@ _STRONG_NEGATED_RECRUITMENT = re.compile(
     r"|(?:招聘|招人)"
     r"[^。；，,：:！？?!\n]{0,8}(?:结束|暂停|取消|招满)"
     r"|不(?:招聘|招人)"
+    r"|(?:这|此|本文|本帖)?不(?:是|属于|算)(?:一次|一则|一个)?招聘"
+    r"|非招聘"
 )
 _WEAK_NEGATED_RECRUITMENT = re.compile(
     r"(?:无需|不需要|不要求)"
@@ -34,6 +36,7 @@ _DISCUSSION_MARKERS = (
     "?",
     "？",
 )
+_INTERVIEW_MARKERS = ("聊聊", "访谈", "聊30分钟", "聊 30 分钟")
 
 
 def classify(item: FeedItem) -> Classification:
@@ -112,6 +115,14 @@ def classify(item: FeedItem) -> Classification:
             tuple(rules) + ("uncertain.conflict",),
             "multiple transactional categories matched",
             transactional_candidates,
+        )
+    if negated_recruitment and (
+        discussion_evidence or _matches(text, _INTERVIEW_MARKERS)
+    ):
+        return Classification(
+            PostCategory.DISCUSSION,
+            ("recruitment.negated", "discussion.exchange"),
+            "recruitment is negated and discussion intent is explicit",
         )
     if negated_recruitment:
         return Classification(

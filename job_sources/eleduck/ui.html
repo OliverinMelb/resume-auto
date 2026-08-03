@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>电鸭 JD 调研</title>
+  <style>
+    :root { font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; color: #172033; background: #f5f7fb; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; }
+    main { width: min(1120px, calc(100% - 32px)); margin: 36px auto 64px; }
+    h1 { margin: 0 0 8px; }
+    h2 { margin: 0; font-size: 19px; }
+    h3 { margin: 0; font-size: 16px; }
+    p { line-height: 1.65; }
+    .muted { color: #667085; }
+    .panel, .card { background: #fff; border: 1px solid #dfe4ec; border-radius: 14px; box-shadow: 0 8px 24px rgba(20, 34, 55, .05); }
+    .panel { margin-top: 20px; padding: 20px; }
+    .head, .actions, .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    button, input, select { min-height: 40px; border: 1px solid #cbd3df; border-radius: 9px; padding: 0 12px; font: inherit; background: #fff; }
+    button { border-color: #3858cf; background: #3858cf; color: #fff; cursor: pointer; font-weight: 650; }
+    button.secondary { color: #344054; background: #fff; border-color: #cbd3df; }
+    button.danger { background: #fff; color: #b42318; border-color: #f0b8b3; }
+    button:disabled { opacity: .55; cursor: wait; }
+    label { display: grid; gap: 6px; color: #475467; font-size: 13px; }
+    fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+    .project-modes { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+    .mode-option { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 12px; border: 1px solid #cbd3df; border-radius: 9px; cursor: pointer; }
+    .mode-option input { min-height: auto; margin: 0; padding: 0; }
+    .project { display: grid; grid-template-columns: 1fr auto; gap: 12px; margin-top: 12px; align-items: end; }
+    .project-fields { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; }
+    .project-help { display: block; margin-top: 6px; color: #667085; font-size: 12px; }
+    .notice { padding: 12px 14px; background: #eef4ff; color: #264b91; border-radius: 10px; }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 16px; }
+    .metric { background: #f6f8fb; border-radius: 10px; padding: 12px; }
+    .metric strong { display: block; font-size: 21px; margin-top: 4px; }
+    .groups { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 16px; }
+    .group { min-width: 0; }
+    .cards { display: grid; gap: 10px; margin-top: 10px; }
+    .card { padding: 14px; box-shadow: none; }
+    .card p { margin: 8px 0; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .tag { padding: 3px 7px; border-radius: 999px; background: #eef1f5; color: #475467; font-size: 11px; }
+    a { color: #3157c8; }
+    .status { min-height: 24px; margin-top: 12px; }
+    .error { color: #b42318; }
+    @media (max-width: 850px) { .groups, .project, .project-fields { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>电鸭 JD 调研</h1>
+  <p class="muted">只读取电鸭官方公开职位列表的最近 20 页，不登录、不抓详情页。列表摘要可能被截断；预览零写入，正式调研只把高置信招聘以有损字段写入现有 JD 项目。</p>
+
+  <section class="panel">
+    <div class="head"><h2>公开职位列表（最近 20 页）</h2><button id="preview-button">读取预览</button></div>
+    <div id="preview-status" class="status muted">不会自动请求；点击后读取最多 500 条，首次约需 1 分钟。</div>
+    <div id="metrics" class="metrics"></div>
+    <div class="groups">
+      <div class="group"><h3>高置信招聘</h3><div id="accepted" class="cards"></div></div>
+      <div class="group"><h3>待确认</h3><div id="review" class="cards"></div></div>
+      <div class="group"><h3>确定性非招聘</h3><div id="non-job" class="cards"></div></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="head"><h2>正式调研</h2></div>
+    <fieldset class="project-modes">
+      <legend class="muted">选择保存位置</legend>
+      <label class="mode-option"><input type="radio" name="project-mode" id="project-mode-new" value="new" checked>新建 JD 调研项目</label>
+      <label class="mode-option"><input type="radio" name="project-mode" id="project-mode-existing" value="existing">使用已有 JD 调研项目</label>
+    </fieldset>
+    <div class="project">
+      <div id="new-project-fields" class="project-fields">
+        <label>新项目名称（可留空）<input id="project-name" maxlength="200" placeholder="例如：电鸭远程岗位调研"></label>
+        <span class="project-help">留空时会按当天日期自动命名。</span>
+      </div>
+      <div id="existing-project-fields" class="project-fields" hidden>
+        <label>已有 JD 调研项目<select id="candidate" disabled><option value="">请先加载并选择</option></select></label>
+        <button id="load-projects" class="secondary" disabled>加载已有项目</button>
+      </div>
+      <button id="research-button">运行调研</button>
+    </div>
+    <div id="research-status" class="status muted"></div>
+  </section>
+
+  <section class="panel">
+    <div class="head"><h2>人工确认</h2><button id="reviews-button" class="secondary">刷新审核队列</button></div>
+    <p class="muted">确认招聘会使用服务端保存的脱敏内容评分并入库；确认非招聘不会写入 JD。决定不可在此版本中推翻。</p>
+    <div class="groups">
+      <div class="group"><h3>待确认</h3><div id="pending" class="cards"></div></div>
+      <div class="group"><h3>已确认招聘</h3><div id="confirmed" class="cards"></div></div>
+      <div class="group"><h3>已忽略</h3><div id="ignored" class="cards"></div></div>
+    </div>
+    <div id="reviews-status" class="status muted"></div>
+  </section>
+</main>
+<script>
+  const byId = (id) => document.getElementById(id);
+
+  async function request(path, options) {
+    const response = await fetch(path, options);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || `请求失败 (${response.status})`);
+    return data;
+  }
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+  function text(tag, value, className) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    node.textContent = value == null ? "" : String(value);
+    return node;
+  }
+  function itemCard(entry) {
+    const source = entry.item || entry;
+    const card = text("article", "", "card");
+    const head = text("div", "", "card-head");
+    head.append(text("strong", source.title || "无标题"));
+    const category = entry.classification && entry.classification.category;
+    if (category) head.append(text("span", category, "tag"));
+    card.append(head, text("p", source.description || "无摘要", "muted"));
+    const sourceUrl = source.canonical_url || source.source_url;
+    if (sourceUrl) {
+      const link = text("a", "打开电鸭帖子");
+      link.href = sourceUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      card.append(link);
+    }
+    return card;
+  }
+  function renderItems(id, values) {
+    const host = byId(id); clear(host);
+    if (!values.length) { host.append(text("p", "暂无", "muted")); return; }
+    values.forEach((value) => host.append(itemCard(value)));
+  }
+  function setStatus(id, message, isError) {
+    const node = byId(id); node.textContent = message; node.className = `status ${isError ? "error" : "muted"}`;
+  }
+  function projectPayload() {
+    if (byId("project-mode-existing").checked) {
+      const candidate = byId("candidate").value;
+      if (!candidate) throw new Error("请先加载并选择已有 JD 调研项目。");
+      return { candidate_id: candidate };
+    }
+    const name = byId("project-name").value.trim();
+    return name ? { project_name: name } : {};
+  }
+  function syncProjectMode() {
+    const useExisting = byId("project-mode-existing").checked;
+    byId("new-project-fields").hidden = useExisting;
+    byId("existing-project-fields").hidden = !useExisting;
+    byId("project-name").disabled = useExisting;
+    byId("candidate").disabled = !useExisting;
+    byId("load-projects").disabled = !useExisting;
+    if (useExisting) byId("project-name").value = "";
+    else byId("candidate").value = "";
+  }
+
+  byId("project-mode-new").addEventListener("change", syncProjectMode);
+  byId("project-mode-existing").addEventListener("change", syncProjectMode);
+  syncProjectMode();
+
+  byId("preview-button").addEventListener("click", async () => {
+    const button = byId("preview-button"); button.disabled = true; setStatus("preview-status", "正在读取公开职位列表…", false);
+    try {
+      const data = await request("/job-sources/eleduck/preview");
+      const metrics = byId("metrics"); clear(metrics);
+      [["发现", data.discovered_count], ["招聘", data.accepted_count], ["待确认", data.review_count], ["非招聘", data.non_job_count]].forEach(([label, value]) => {
+        const node = text("div", "", "metric"); node.append(text("span", label), text("strong", value)); metrics.append(node);
+      });
+      renderItems("accepted", data.accepted_jobs); renderItems("review", data.review_items); renderItems("non-job", data.non_job_items);
+      setStatus("preview-status", data.complete ? "预览完成，未写入任何数据。" : "结果不完整，仅供查看，不能入库。", !data.complete);
+    } catch (error) { setStatus("preview-status", error.message, true); } finally { button.disabled = false; }
+  });
+
+  byId("load-projects").addEventListener("click", async () => {
+    try {
+      const data = await request("/resume-agent/v1/candidates");
+      const select = byId("candidate"); clear(select); const empty = text("option", "请选择已有项目"); empty.value = ""; select.append(empty);
+      data.candidates.forEach((candidate) => { const option = text("option", candidate.display_name || candidate.id); option.value = candidate.id; select.append(option); });
+      setStatus("research-status", `已加载 ${data.candidates.length} 个项目。`, false);
+    } catch (error) { setStatus("research-status", error.message, true); }
+  });
+
+  byId("research-button").addEventListener("click", async () => {
+    const button = byId("research-button"); button.disabled = true; setStatus("research-status", "正在重新读取、评分并入库…", false);
+    try {
+      const data = await request("/job-sources/eleduck/research", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(projectPayload()) });
+      setStatus("research-status", `完成：新增 ${data.inserted_count}，已存在 ${data.deduplicated_count}，待确认 ${data.pending_review_count}。`, false);
+    } catch (error) { setStatus("research-status", error.message, true); } finally { button.disabled = false; }
+  });
+
+  async function decide(identity, decision) {
+    const payload = { ...projectPayload(), identity, decision };
+    await request("/job-sources/eleduck/reviews/decision", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    await loadReviews();
+  }
+  async function loadReviews() {
+    setStatus("reviews-status", "正在读取审核状态…", false);
+    try {
+      const data = await request("/job-sources/eleduck/reviews");
+      const pending = byId("pending"); clear(pending);
+      if (!data.pending.length) pending.append(text("p", "暂无", "muted"));
+      data.pending.forEach((entry) => {
+        const card = itemCard(entry); const actions = text("div", "", "actions");
+        const accept = text("button", "确认招聘"); accept.addEventListener("click", () => decide(entry.item.identity, "recruitment").catch((error) => setStatus("reviews-status", error.message, true)));
+        const ignore = text("button", "确认非招聘", "danger"); ignore.addEventListener("click", () => decide(entry.item.identity, "non_job").catch((error) => setStatus("reviews-status", error.message, true)));
+        actions.append(accept, ignore); card.append(actions); pending.append(card);
+      });
+      renderItems("confirmed", data.confirmed_recruitment.map((value) => value.item));
+      renderItems("ignored", data.ignored_non_job.map((value) => value.item));
+      setStatus("reviews-status", `待确认 ${data.pending.length} 条。`, false);
+    } catch (error) { setStatus("reviews-status", error.message, true); }
+  }
+  byId("reviews-button").addEventListener("click", loadReviews);
+</script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "verification_id": "20260803-174812-599410",
+  "task_id": "20260803-172114-388869-rss-api",
+  "run_at": "2026-08-03T09:48:12+00:00",
+  "result": "FAIL",
+  "head_sha": "1e79989f54884cb0dfc1668278f86f4293ca8881",
+  "dirty_fingerprint": "af4a29c3fa57c757771062ec05f36a06c8f0c91169ce3603c7ec963460e09371",
+  "config_sha256": "f487024c44df71cc86ee48692850a87ae82d67474e6ea57a643bfa3cb1589c6d",
+  "planning_sha256": "daf1fb9a7dce75af47ebe8069d7689bff6635c931336de8a4f3d762c5e9285fa",
+  "changed_files": [
+    "job_sources/eleduck/classifier.py",
+    "job_sources/eleduck/coordinator.py",
+    "job_sources/eleduck/research.py",
+    "job_sources/eleduck/router.py",
+    "job_sources/eleduck/source.py",
+    "job_sources/eleduck/state.py",
+    "job_sources/eleduck/ui.html",
+    "job_sources/router.py",
+    "test_eleduck_source.py",
+    "workflow/config.json"
+  ],
+  "unchanged_preexisting_dirty": [
+    "AGENTS.md",
+    "docs/agents/domain.md",
+    "docs/agents/issue-tracker.md"
+  ],
+  "scope_violations": [
+    "workflow/config.json"
+  ],
+  "checks": [
+    {
+      "name": "compileall",
+      "command": [
+        ".venv\\Scripts\\python.exe",
+        "-m",
+        "compileall",
+        "-q",
+        "."
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-eleduck",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 1.001,
+      "output": ""
+    },
+    {
+      "name": "eleduck-tests",
+      "command": [
+        ".venv\\Scripts\\python.exe",
+        "-m",
+        "unittest",
+        "test_eleduck_source.py"
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-eleduck",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 1.354,
+      "output": "..........Eleduck operation failed; error_type=ValueError\n.....................................\n----------------------------------------------------------------------\nRan 47 tests in 0.285s\n\nOK\n"
+    },
+    {
+      "name": "full-tests",
+      "command": [
+        ".venv\\Scripts\\python.exe",
+        "-m",
+        "unittest",
+        "discover",
+        "-p",
+        "test_*.py"
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-eleduck",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 2.296,
+      "output": "..........Eleduck operation failed; error_type=ValueError\n.....................................source=nowcoder operation=detail finished_at=2026-08-03T09:48:11+00:00 success=false error_type=InvalidSourceRequest elapsed_ms=0\n........................source=nowcoder task_id=d113ca6bbff845379fd908559bd79427 finished_at=2026-08-03T09:48:11+00:00 status=failed error_type=RuntimeError elapsed_ms=0\n.......................[2026-08-03 17:48:12] /get-job-score | title=AI产品工程师 | matched=岗位名称 | keyword=ai产品工程师 | title_score=98 | detail_score=34 | combo_score=10 | title_penalty_score=0 | penalty_score=0 | delay_ms=0 | score=100 | reason=岗位名称命中正向关键词\n.........\n----------------------------------------------------------------------\nRan 103 tests in 1.178s\n\nOK\n"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "verification_id": "20260803-200006-050700",
+  "task_id": "20260803-192158-171762-task",
+  "run_at": "2026-08-03T12:00:06+00:00",
+  "result": "PASS",
+  "head_sha": "1e79989f54884cb0dfc1668278f86f4293ca8881",
+  "dirty_fingerprint": "c3a959d082b3705b0590c0650b30c5d32270181bfb7fef152e253f48e0b1238a",
+  "config_sha256": "c0f9109ace85ec7200374c4713943f2880f0060d5ba37ad81d93f2c22bfaaa7e",
+  "planning_sha256": "afdb946a6ac392416a2a547f0119b6d34f5822d4c46e420236853921f3b36cf3",
+  "changed_files": [
+    ".scratch/eleduck-public-listing/issues/T1.md",
+    ".scratch/eleduck-public-listing/spec.md",
+    "job_sources/eleduck/__init__.py",
+    "job_sources/eleduck/coordinator.py",
+    "job_sources/eleduck/public_api.py",
+    "job_sources/eleduck/research.py",
+    "job_sources/eleduck/router.py",
+    "job_sources/eleduck/source.py",
+    "job_sources/eleduck/state.py",
+    "job_sources/eleduck/ui.html",
+    "test_eleduck_source.py"
+  ],
+  "unchanged_preexisting_dirty": [
+    "AGENTS.md",
+    "docs/agents/domain.md",
+    "docs/agents/issue-tracker.md",
+    "job_sources/eleduck/classifier.py",
+    "job_sources/router.py",
+    "workflow/config.json",
+    "workflow/tasks/20260803-172114-388869-rss-api/brief.md",
+    "workflow/tasks/20260803-172114-388869-rss-api/planning.md",
+    "workflow/tasks/20260803-172114-388869-rss-api/summary.md",
+    "workflow/tasks/20260803-172114-388869-rss-api/task.json",
+    "workflow/tasks/20260803-172114-388869-rss-api/verification/20260803-173852-530802.json",
+    "workflow/tasks/20260803-172114-388869-rss-api/verification/20260803-173852-530802.md",
+    "workflow/tasks/20260803-172114-388869-rss-api/verification/20260803-174812-599410.json",
+    "workflow/tasks/20260803-172114-388869-rss-api/verification/20260803-174812-599410.md",
+    "workflow/tasks/20260803-172114-388869-rss-api/verification/20260803-175225-152411.json",
+    "workflow/tasks/20260803-172114-388869-rss-api/verification/20260803-175225-152411.md",
+    "workflow/tasks/20260803-172114-388869-rss-api/verification/20260803-182749-331805.json",
+    "workflow/tasks/20260803-172114-388869-rss-api/verification/20260803-182749-331805.md"
+  ],
+  "scope_violations": [],
+  "checks": [
+    {
+      "name": "compileall",
+      "command": [
+        "C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
+        "-m",
+        "compileall",
+        "-q",
+        "."
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-eleduck",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 1.291,
+      "output": ""
+    }
+  ]
+}

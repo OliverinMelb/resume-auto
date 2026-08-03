@@ -1,4 +1,4 @@
-"""Public API for the isolated Eleduck RSS source."""
+"""Public interface for the isolated Eleduck source adapters."""
 
 from .models import (
     ClassifiedItem,
@@ -10,7 +10,7 @@ from .models import (
 )
 from .parser import EleduckFeedError, EleduckSourceError
 from .rss import EleduckHttpError
-from .source import EleduckRssSource
+from .source import EleduckPublicApiSource, EleduckRssSource
 
 __all__ = [
     "ClassifiedItem",
@@ -19,6 +19,7 @@ __all__ = [
     "EleduckCursor",
     "EleduckFeedError",
     "EleduckHttpError",
+    "EleduckPublicApiSource",
     "EleduckRssSource",
     "EleduckSourceError",
     "FeedItem",
