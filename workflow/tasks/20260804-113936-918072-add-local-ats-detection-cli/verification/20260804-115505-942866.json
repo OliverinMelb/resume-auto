@@ -1,0 +1,41 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "verification_id": "20260804-115505-942866",
+  "task_id": "20260804-113936-918072-add-local-ats-detection-cli",
+  "run_at": "2026-08-04T03:55:05+00:00",
+  "result": "PASS",
+  "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+  "dirty_fingerprint": "8687192a9ea258374a226b9d245c10b505dd83e04c86f5ccf95e3364a67c1ef7",
+  "config_sha256": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3",
+  "planning_sha256": "6dca6a26d130a0dc4fc7c155cf9d015532f6b1655244f1880071b2d2140bbfb6",
+  "changed_files": [
+    "job_sources/ats/cli.py",
+    "test_ats_detection_cli.py"
+  ],
+  "unchanged_preexisting_dirty": [
+    ".scratch/ats-detection/next-session-prompt.md",
+    "AGENTS.md",
+    "docs/agents/domain.md",
+    "docs/agents/issue-tracker.md",
+    "workflow/config.json"
+  ],
+  "scope_violations": [],
+  "checks": [
+    {
+      "name": "compileall",
+      "command": [
+        "C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
+        "-m",
+        "compileall",
+        "-q",
+        "."
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 3.778,
+      "output": ""
+    }
+  ]
+}

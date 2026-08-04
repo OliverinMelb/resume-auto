@@ -1,0 +1,475 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "task_id": "20260804-145553-963840-collect-and-score-greenhouse-and-lev",
+  "title": "Collect and score Greenhouse and Lever jobs",
+  "tier": "contract",
+  "workflow_class": "app-change",
+  "state": "CLOSED",
+  "created_at": "2026-08-04T06:55:54+00:00",
+  "updated_at": "2026-08-04T07:39:03+00:00",
+  "workspace": {
+    "kind": "linked-worktree",
+    "branch": "ats-detection",
+    "detached": false,
+    "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+    "dirty_fingerprint": "7398f93253f108efec084c53c78d3ded3f17c4fe57fb395ceb5b6bc3ffd9776c",
+    "dirty_entries": [
+      {
+        "status": "??",
+        "path": ".scratch/ats-detection/next-session-prompt.md",
+        "hash": "fbe30d4026c549d62e478f718290b2f3e2a9e3850472330aabc2e585eef09e5e"
+      },
+      {
+        "status": "??",
+        "path": "AGENTS.md",
+        "hash": "aa62d5d72906e6f572254de939e2c150d433ef3daf218df17fdef17ab18c3b12"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/domain.md",
+        "hash": "8fcd1a12ea3b928dbc76ed85cbb03f2058a4d98b0e754f33f17534c24cd8cce6"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/issue-tracker.md",
+        "hash": "7c79eccc26290e75c734377176a9ee32f90fca950d3cd42ce5dd4714c94aad41"
+      },
+      {
+        "status": "??",
+        "path": "job_sources/ats/cli.py",
+        "hash": "026eec4f392d87065d1adcef1fda21d89e9fe8e17e425d503a93dbbd9225e7da"
+      },
+      {
+        "status": "??",
+        "path": "job_sources/ats/router.py",
+        "hash": "ceb714b41969489d58b9abb6092b035750c938cdabb3e93777d561b852cb9e41"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/README.md",
+        "hash": "0fe3a8c9e7593c9cf5c909ec856ec05642ea48ef254c0265384fb6caa0d7e1e0"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/app/globals.css",
+        "hash": "bc10d526f68b04543bc50a091f25adafad3e3df7a6c9676d654d77bea3362088"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/app/layout.tsx",
+        "hash": "2c7e7190350f0250686f0d059f27d7df9d4f4b175d7fc5055148791718b90b15"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/app/page.tsx",
+        "hash": "34c36c08fe876e76f2c1f8e3901d917687d5be4921b479bb0b1f985fd61efe18"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/tests/rendered-html.test.mjs",
+        "hash": "d04d72c3a13e68d769235fc541f5daa7380e62b143738b3fe1bb4eff904ec44a"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/router.py",
+        "hash": "4f72e5e072ec5ca87ebd153c42d014f99cd3af7fe0dc682ec1d620ca26eb4e95"
+      },
+      {
+        "status": "??",
+        "path": "test_ats_detection_cli.py",
+        "hash": "ddc01ea3d2e03b1cbe03601d2bcdd931e35c0ad10c1e3220d8999b7789c4172e"
+      },
+      {
+        "status": "??",
+        "path": "test_ats_detection_web.py",
+        "hash": "a71ebe66783e41b33bef1680f1fa596428fe3d114cd45ab1155efcab42c0633c"
+      },
+      {
+        "status": "??",
+        "path": "workflow/config.json",
+        "hash": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/brief.md",
+        "hash": "1c66975b259e5b8f3ffcdef21ef0ec0c40e4d2e0dc7b424b7dde8ebef84e3c3d"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/planning.md",
+        "hash": "abe94d3a75db69008766539eaf5c00ce833a8f3940f4e7891c5852856f43ef1f"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/spec.md",
+        "hash": "aca603ecc06a04e7064eb4a3e2827724232da29c02a1af60e4d2168b14ef20a1"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/summary.md",
+        "hash": "c5ec7c1490efab7cc168e96e153d5138c8e1b401cfccd14f2a84085da43bcb45"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/task.json",
+        "hash": "2c34a5721a6bde139164c86084584409eb03e744d0ac47480c9d33577144befe"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115030-187934.json",
+        "hash": "a7c97a10cdca68450953cce815faebdb2d8a45df393bb54c6730b2efa6b22ef2"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115030-187934.md",
+        "hash": "13f2162b996c1b8101cab9078f95fe50e15e469c71ee1915fdc30372586e589e"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115505-942866.json",
+        "hash": "feb614b606e9d459da940f0e811c77c0f3258bbb2d4a7fad33764ab427388d7c"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115505-942866.md",
+        "hash": "d0387e195f450405ec62f20576dac8c6c4720fb9ea4704115078b768be437a61"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-120231-972078.json",
+        "hash": "65d4f55d7618a915539d53a0f808d58b7dc1d7d6cd8273c8bc1f2b4d63795864"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-120231-972078.md",
+        "hash": "25f7f982818ec8103df80d03f1e97a9ac5e766ffdccbe5bc6047a2456baf4297"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/manual-ats-tests.md",
+        "hash": "07f6583b2fd0eabb1dc041cd17aadf8615ef384cc2d5e3b1812534735b8b4f0a"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/brief.md",
+        "hash": "6a7182648a33dd4700a403b123fc28e9716e3890cd84ba74f38084cac9048210"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/planning.md",
+        "hash": "77757ff8bf4ad59a25ff8a4bcf880d97fac87f447bce9aa2a45527545c33e96d"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/spec.md",
+        "hash": "03583bc86811aa057282f974a2116934b64fdcbae4f792da4c96c8bd0c80a19b"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/summary.md",
+        "hash": "24f48a5f2d02ea51febff27f60b5f936a5bbcaec81d4a04dbe1c7506f7cee6fb"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/task.json",
+        "hash": "a9a5b425fd1e5692bedee44e546bc7cbe35a4ee64c55f49a7ec42bcf3968d6a5"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-143733-582099.json",
+        "hash": "91bca1edee92b60773f4082595a72c2adc0f4f7482f0bc3d0be8a598fd057edc"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-143733-582099.md",
+        "hash": "def0c60f45ec1c6d2405182f6d68f6ae0798139a8a1f0782073e31b19302c722"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-144445-584684.json",
+        "hash": "cb96ad9513934bb388d8e6fa60e017195eab3eb293b8710f2100423b754bd7ea"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-144445-584684.md",
+        "hash": "3a2297d74cc092f75305451b9436b182d0c78538f6fa796f672e9ab1f1476f6f"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-144554-672497.json",
+        "hash": "695e0d0e3fb35a80358e504a61e9f6e8b2ae200a655d916f07e3e53de7938b18"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-144554-672497.md",
+        "hash": "8859fb264a2451b2207d94612b02b80e39ab8e4a98bfeef38f8b79845f966e49"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/manual-web-tests.md",
+        "hash": "1a0c1ce651a7047eb2f4ee0d58f0dafe27f3b22615f7a877e4740c287854e411"
+      }
+    ],
+    "base_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f"
+  },
+  "scope": {
+    "owned_paths": [
+      "job_sources/ats/__init__.py",
+      "job_sources/ats/listings",
+      "job_sources/ats/router.py",
+      "job_sources/ats/ui",
+      "test_ats_detection_web.py",
+      "test_ats_job_listings.py",
+      "workflow/tasks"
+    ]
+  },
+  "cognitive_routing": {
+    "skills": [
+      "codebase-design",
+      "research",
+      "tdd"
+    ],
+    "source_refs": [
+      "official:greenhouse-job-board",
+      "official:lever-postings-api"
+    ],
+    "notes": [
+      "Official public GET contracts verified before designing two listing adapters."
+    ]
+  },
+  "delegation": {
+    "subagent_limit": "runtime",
+    "parallel_write_isolation": "dedicated-worktree",
+    "writers": []
+  },
+  "planning": {
+    "status": "ready",
+    "grilling_status": "confirmed",
+    "unresolved_decisions": [],
+    "decisions": [],
+    "acceptance_criteria": [
+      "Full Python/UI verification and independent Standards/Spec reviews pass.",
+      "Greenhouse and Lever public job payloads normalize, filter, deduplicate, and score through one bounded interface.",
+      "No application submission, credentials, persistence, scheduling, public proxy, or unsupported ATS adapter is introduced.",
+      "The local UI retrieves one supported site at a time and renders scored jobs with empty, error, retry, and locked running states.",
+      "The loopback-only HTTP route enforces stable privacy-safe errors, exact local CORS, input/body bounds, and one active collection."
+    ],
+    "spec_ref": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/spec.md",
+    "multi_session": true,
+    "tickets": [
+      {
+        "id": "T1",
+        "title": "Normalize Greenhouse and Lever public jobs",
+        "blocked_by": [],
+        "acceptance_criteria": [
+          "One bounded collection interface resolves exact vendor URLs, fetches official public GET endpoints, normalizes, filters, deduplicates, and scores fixture jobs with safe errors."
+        ]
+      },
+      {
+        "id": "T2",
+        "title": "Expose bounded local job collection route",
+        "blocked_by": [
+          "T1"
+        ],
+        "acceptance_criteria": [
+          "Loopback-only POST route enforces exact CORS, 16 KiB body, validated inputs, one active collection, stable safe errors, and canonical JSON output."
+        ]
+      },
+      {
+        "id": "T3",
+        "title": "Add scored jobs to local ATS UI",
+        "blocked_by": [
+          "T2"
+        ],
+        "acceptance_criteria": [
+          "Supported detected sites can collect and render scored jobs with limit, keyword, empty/error/retry and locked running states; unsupported vendors remain disabled."
+        ]
+      }
+    ]
+  },
+  "budget": {
+    "max_fix_loops": 2,
+    "fix_loops": 2,
+    "verification_attempts": 3
+  },
+  "verification": {
+    "latest": {
+      "result": "PASS",
+      "verification_id": "20260804-153835-183948",
+      "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+      "dirty_fingerprint": "0288116d2c23cd3777f57bcae3611ba9908a2f7d8495c0b4873b44f941436e05",
+      "config_sha256": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3",
+      "planning_sha256": "6026ccbd015a6ee88da3c31b7ba7457442cfdea6318cae043c850d6fcd7d18aa",
+      "evidence": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/verification/20260804-153835-183948.md"
+    }
+  },
+  "history": [
+    {
+      "at": "2026-08-04T06:55:54+00:00",
+      "event": "TASK_STARTED",
+      "details": null
+    },
+    {
+      "at": "2026-08-04T06:58:48+00:00",
+      "event": "TICKET_UPSERTED",
+      "details": {
+        "id": "T1",
+        "title": "Normalize Greenhouse and Lever public jobs",
+        "blocked_by": [],
+        "acceptance_criteria": [
+          "One bounded collection interface resolves exact vendor URLs, fetches official public GET endpoints, normalizes, filters, deduplicates, and scores fixture jobs with safe errors."
+        ]
+      }
+    },
+    {
+      "at": "2026-08-04T06:58:49+00:00",
+      "event": "TICKET_UPSERTED",
+      "details": {
+        "id": "T2",
+        "title": "Expose bounded local job collection route",
+        "blocked_by": [
+          "T1"
+        ],
+        "acceptance_criteria": [
+          "Loopback-only POST route enforces exact CORS, 16 KiB body, validated inputs, one active collection, stable safe errors, and canonical JSON output."
+        ]
+      }
+    },
+    {
+      "at": "2026-08-04T06:58:50+00:00",
+      "event": "TICKET_UPSERTED",
+      "details": {
+        "id": "T3",
+        "title": "Add scored jobs to local ATS UI",
+        "blocked_by": [
+          "T2"
+        ],
+        "acceptance_criteria": [
+          "Supported detected sites can collect and render scored jobs with limit, keyword, empty/error/retry and locked running states; unsupported vendors remain disabled."
+        ]
+      }
+    },
+    {
+      "at": "2026-08-04T06:59:04+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": "discovering",
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "Full Python/UI verification and independent Standards/Spec reviews pass.",
+          "Greenhouse and Lever public job payloads normalize, filter, deduplicate, and score through one bounded interface.",
+          "No application submission, credentials, persistence, scheduling, public proxy, or unsupported ATS adapter is introduced.",
+          "The local UI retrieves one supported site at a time and renders scored jobs with empty, error, retry, and locked running states.",
+          "The loopback-only HTTP route enforces stable privacy-safe errors, exact local CORS, input/body bounds, and one active collection."
+        ],
+        "spec_ref": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/spec.md",
+        "multi_session": true,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T07:00:28+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": "ready",
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [],
+        "spec_ref": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/spec.md",
+        "multi_session": true,
+        "grilling_status": "confirmed"
+      }
+    },
+    {
+      "at": "2026-08-04T07:00:30+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "EXECUTE",
+        "note": null
+      }
+    },
+    {
+      "at": "2026-08-04T07:26:03+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "VERIFY",
+        "note": "T1-T3 implemented; Python, UI, live API, and browser checks completed"
+      }
+    },
+    {
+      "at": "2026-08-04T07:26:13+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-145553-963840-collect-and-score-greenhouse-and-lev\\verification\\20260804-152613-169944.md"
+      }
+    },
+    {
+      "at": "2026-08-04T07:34:09+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "fix",
+        "finding": "Spec review found unsafe malformed payload handling, mutable selection during collection, missing vendor-category/channel logic, and incomplete UI fields; all addressed in one targeted fix round."
+      }
+    },
+    {
+      "at": "2026-08-04T07:34:10+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "VERIFY",
+        "note": "Fix round complete; 138 Python tests, UI build/tests, lint, and diff check pass"
+      }
+    },
+    {
+      "at": "2026-08-04T07:34:15+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-145553-963840-collect-and-score-greenhouse-and-lev\\verification\\20260804-153415-543981.md"
+      }
+    },
+    {
+      "at": "2026-08-04T07:38:23+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "fix",
+        "finding": "Final spec review found required upstream type validation, scoring error mapping, and conservative internship tokenization gaps; fixed with regression tests."
+      }
+    },
+    {
+      "at": "2026-08-04T07:38:24+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "VERIFY",
+        "note": "Second and final fix round complete; 139 Python tests, UI build/tests, lint, diff check pass"
+      }
+    },
+    {
+      "at": "2026-08-04T07:38:35+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-145553-963840-collect-and-score-greenhouse-and-lev\\verification\\20260804-153835-183948.md"
+      }
+    },
+    {
+      "at": "2026-08-04T07:38:48+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "pass",
+        "finding": null
+      }
+    },
+    {
+      "at": "2026-08-04T07:39:03+00:00",
+      "event": "CLOSED",
+      "details": {
+        "summary": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-145553-963840-collect-and-score-greenhouse-and-lev\\summary.md"
+      }
+    }
+  ]
+}

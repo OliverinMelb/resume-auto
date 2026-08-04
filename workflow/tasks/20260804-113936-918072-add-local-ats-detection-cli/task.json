@@ -1,0 +1,274 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "task_id": "20260804-113936-918072-add-local-ats-detection-cli",
+  "title": "Add local ATS detection CLI",
+  "tier": "contract",
+  "workflow_class": "app-change",
+  "state": "CLOSED",
+  "created_at": "2026-08-04T03:39:37+00:00",
+  "updated_at": "2026-08-04T04:03:50+00:00",
+  "workspace": {
+    "kind": "linked-worktree",
+    "branch": "ats-detection",
+    "detached": false,
+    "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+    "dirty_fingerprint": "5fb89c4cc46d98056966dadb320110460d9b9568c4035ab8b4ef932bbe7be8af",
+    "dirty_entries": [
+      {
+        "status": "??",
+        "path": ".scratch/ats-detection/next-session-prompt.md",
+        "hash": "fbe30d4026c549d62e478f718290b2f3e2a9e3850472330aabc2e585eef09e5e"
+      },
+      {
+        "status": "??",
+        "path": "AGENTS.md",
+        "hash": "aa62d5d72906e6f572254de939e2c150d433ef3daf218df17fdef17ab18c3b12"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/domain.md",
+        "hash": "8fcd1a12ea3b928dbc76ed85cbb03f2058a4d98b0e754f33f17534c24cd8cce6"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/issue-tracker.md",
+        "hash": "7c79eccc26290e75c734377176a9ee32f90fca950d3cd42ce5dd4714c94aad41"
+      },
+      {
+        "status": "??",
+        "path": "workflow/config.json",
+        "hash": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3"
+      }
+    ],
+    "base_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f"
+  },
+  "scope": {
+    "owned_paths": [
+      "job_sources/ats/cli.py",
+      "test_ats_detection_cli.py",
+      "workflow/tasks"
+    ]
+  },
+  "cognitive_routing": {
+    "skills": [
+      "codebase-design",
+      "tdd"
+    ],
+    "source_refs": [
+      ".scratch/ats-detection/next-session-prompt.md",
+      "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/spec.md"
+    ],
+    "notes": [
+      "Implement the confirmed command-line behavior through the module-execution seam."
+    ]
+  },
+  "delegation": {
+    "subagent_limit": "runtime",
+    "parallel_write_isolation": "dedicated-worktree",
+    "writers": []
+  },
+  "planning": {
+    "status": "ready",
+    "grilling_status": "confirmed",
+    "unresolved_decisions": [],
+    "decisions": [],
+    "acceptance_criteria": [
+      "Diagnostics and reports do not expose URL, query, token, body, path, or rejected argument values.",
+      "Existing ATS tests pass and the frontend remains unchanged.",
+      "Exit codes are 0 for a produced report including all-blocked, 1 for execution failure, and 2 for arguments or input.",
+      "Explicit UTF-8 file or stdin input produces the existing JSON or JSONL report.",
+      "Input is bounded to 100 URLs, 8192 bytes per line, 128 KiB total, and 1-8 workers."
+    ],
+    "spec_ref": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/spec.md",
+    "multi_session": false,
+    "tickets": []
+  },
+  "budget": {
+    "max_fix_loops": 2,
+    "fix_loops": 1,
+    "verification_attempts": 3
+  },
+  "verification": {
+    "latest": {
+      "result": "PASS",
+      "verification_id": "20260804-120231-972078",
+      "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+      "dirty_fingerprint": "537f9ae952b47c53f6e523b73af5df9062d6161bf4c0d71791d2af0189bc022d",
+      "config_sha256": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3",
+      "planning_sha256": "6dca6a26d130a0dc4fc7c155cf9d015532f6b1655244f1880071b2d2140bbfb6",
+      "evidence": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-120231-972078.md"
+    }
+  },
+  "history": [
+    {
+      "at": "2026-08-04T03:39:37+00:00",
+      "event": "TASK_STARTED",
+      "details": null
+    },
+    {
+      "at": "2026-08-04T03:41:35+00:00",
+      "event": "COGNITIVE_ROUTE",
+      "details": {
+        "skills": [
+          "tdd"
+        ],
+        "source_refs": [
+          "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/spec.md"
+        ],
+        "notes": [
+          "Implement the confirmed command-line behavior through the module-execution seam."
+        ]
+      }
+    },
+    {
+      "at": "2026-08-04T03:41:37+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "Explicit UTF-8 file or stdin input produces the existing JSON or JSONL report."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T03:41:39+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "Input is bounded to 100 URLs, 8192 bytes per line, 128 KiB total, and 1-8 workers."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T03:41:40+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "Diagnostics and reports do not expose URL, query, token, body, path, or rejected argument values."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T03:41:42+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "Exit codes are 0 for a produced report including all-blocked, 1 for execution failure, and 2 for arguments or input."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T03:41:45+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "Existing ATS tests pass and the frontend remains unchanged."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T03:41:46+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": "ready",
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [],
+        "spec_ref": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/spec.md",
+        "multi_session": false,
+        "grilling_status": "confirmed"
+      }
+    },
+    {
+      "at": "2026-08-04T03:41:48+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "EXECUTE",
+        "note": null
+      }
+    },
+    {
+      "at": "2026-08-04T03:50:30+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "FAIL",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-113936-918072-add-local-ats-detection-cli\\verification\\20260804-115030-187934.md"
+      }
+    },
+    {
+      "at": "2026-08-04T03:55:05+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-113936-918072-add-local-ats-detection-cli\\verification\\20260804-115505-942866.md"
+      }
+    },
+    {
+      "at": "2026-08-04T03:59:09+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "fix",
+        "finding": "Record full ATS tests; exercise exit-1 through module execution; emit only symbolic argument errors; reduce duplicated CLI subprocess setup."
+      }
+    },
+    {
+      "at": "2026-08-04T04:02:31+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-113936-918072-add-local-ats-detection-cli\\verification\\20260804-120231-972078.md"
+      }
+    },
+    {
+      "at": "2026-08-04T04:03:48+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "pass",
+        "finding": null
+      }
+    },
+    {
+      "at": "2026-08-04T04:03:50+00:00",
+      "event": "CLOSED",
+      "details": {
+        "summary": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-113936-918072-add-local-ats-detection-cli\\summary.md"
+      }
+    }
+  ]
+}

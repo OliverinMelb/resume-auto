@@ -1,0 +1,59 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "verification_id": "20260804-115030-187934",
+  "task_id": "20260804-113936-918072-add-local-ats-detection-cli",
+  "run_at": "2026-08-04T03:50:30+00:00",
+  "result": "FAIL",
+  "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+  "dirty_fingerprint": "2c0121d2e01b45ed84f7bdd400e77f8a9fc46ddcf0d720d57c65d7c95dae4164",
+  "config_sha256": "84622635c7ad9655d7097b227a105bc76e2886162c7f78f80b03a6f824fbf522",
+  "planning_sha256": "6dca6a26d130a0dc4fc7c155cf9d015532f6b1655244f1880071b2d2140bbfb6",
+  "changed_files": [
+    "job_sources/ats/cli.py",
+    "test_ats_detection_cli.py",
+    "workflow/config.json"
+  ],
+  "unchanged_preexisting_dirty": [
+    ".scratch/ats-detection/next-session-prompt.md",
+    "AGENTS.md",
+    "docs/agents/domain.md",
+    "docs/agents/issue-tracker.md"
+  ],
+  "scope_violations": [
+    "workflow/config.json"
+  ],
+  "checks": [
+    {
+      "name": "compileall",
+      "command": [
+        "C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
+        "-m",
+        "compileall",
+        "-q",
+        "."
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 5.449,
+      "output": ""
+    },
+    {
+      "name": "ats-tests",
+      "command": [
+        "C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
+        "-m",
+        "unittest",
+        "-v",
+        "test_ats_detection.py",
+        "test_ats_detection_cli.py"
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection",
+      "status": "FAIL",
+      "returncode": 1,
+      "duration_seconds": 0.568,
+      "output": "test_ats_detection (unittest.loader._FailedTest.test_ats_detection) ... ERROR\ntest_ats_detection_cli (unittest.loader._FailedTest.test_ats_detection_cli) ... ERROR\n\n======================================================================\nERROR: test_ats_detection (unittest.loader._FailedTest.test_ats_detection)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_ats_detection\nTraceback (most recent call last):\n  File \"C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\unittest\\loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\test_ats_detection.py\", line 10, in <module>\n    from job_sources.ats import (\n    ...<10 lines>...\n    )\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\job_sources\\__init__.py\", line 3, in <module>\n    from .nowcoder import (\n    ...<8 lines>...\n    )\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\job_sources\\nowcoder\\__init__.py\", line 3, in <module>\n    from .source import (\n    ...<12 lines>...\n    )\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\job_sources\\nowcoder\\source.py\", line 24, in <module>\n    from job_sources.evaluation import evaluate_normalized_job\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\job_sources\\evaluation.py\", line 9, in <module>\n    from core import evaluateSingleRouteDelivery\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\core.py\", line 9, in <module>\n    from schema import InterestValue, NeedResume, NeedWorks\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\schema.py\", line 1, in <module>\n    from pydantic import BaseModel, Field\nModuleNotFoundError: No module named 'pydantic'\n\n\n======================================================================\nERROR: test_ats_detection_cli (unittest.loader._FailedTest.test_ats_detection_cli)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_ats_detection_cli\nTraceback (most recent call last):\n  File \"C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\unittest\\loader.py\", line 137, in loadTestsFromName\n    module = __import__(module_name)\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\test_ats_detection_cli.py\", line 11, in <module>\n    from job_sources.ats.cli import main\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\job_sources\\__init__.py\", line 3, in <module>\n    from .nowcoder import (\n    ...<8 lines>...\n    )\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\job_sources\\nowcoder\\__init__.py\", line 3, in <module>\n    from .source import (\n    ...<12 lines>...\n    )\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\job_sources\\nowcoder\\source.py\", line 24, in <module>\n    from job_sources.evaluation import evaluate_normalized_job\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\job_sources\\evaluation.py\", line 9, in <module>\n    from core import evaluateSingleRouteDelivery\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\core.py\", line 9, in <module>\n    from schema import InterestValue, NeedResume, NeedWorks\n  File \"C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\schema.py\", line 1, in <module>\n    from pydantic import BaseModel, Field\nModuleNotFoundError: No module named 'pydantic'\n\n\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nFAILED (errors=2)\n"
+    }
+  ]
+}

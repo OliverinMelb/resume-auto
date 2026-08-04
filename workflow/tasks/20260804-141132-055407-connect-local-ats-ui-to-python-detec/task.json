@@ -1,0 +1,360 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "task_id": "20260804-141132-055407-connect-local-ats-ui-to-python-detec",
+  "title": "Connect local ATS UI to Python detection",
+  "tier": "contract",
+  "workflow_class": "app-change",
+  "state": "CLOSED",
+  "created_at": "2026-08-04T06:11:32+00:00",
+  "updated_at": "2026-08-04T06:46:23+00:00",
+  "workspace": {
+    "kind": "linked-worktree",
+    "branch": "ats-detection",
+    "detached": false,
+    "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+    "dirty_fingerprint": "4eb7a990d046865d6542b0a30c3b9d4a73fe9c2071585ab6753ded3667dfcb7e",
+    "dirty_entries": [
+      {
+        "status": "??",
+        "path": ".scratch/ats-detection/next-session-prompt.md",
+        "hash": "fbe30d4026c549d62e478f718290b2f3e2a9e3850472330aabc2e585eef09e5e"
+      },
+      {
+        "status": "??",
+        "path": "AGENTS.md",
+        "hash": "aa62d5d72906e6f572254de939e2c150d433ef3daf218df17fdef17ab18c3b12"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/domain.md",
+        "hash": "8fcd1a12ea3b928dbc76ed85cbb03f2058a4d98b0e754f33f17534c24cd8cce6"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/issue-tracker.md",
+        "hash": "7c79eccc26290e75c734377176a9ee32f90fca950d3cd42ce5dd4714c94aad41"
+      },
+      {
+        "status": "??",
+        "path": "job_sources/ats/cli.py",
+        "hash": "026eec4f392d87065d1adcef1fda21d89e9fe8e17e425d503a93dbbd9225e7da"
+      },
+      {
+        "status": "??",
+        "path": "test_ats_detection_cli.py",
+        "hash": "ddc01ea3d2e03b1cbe03601d2bcdd931e35c0ad10c1e3220d8999b7789c4172e"
+      },
+      {
+        "status": "??",
+        "path": "workflow/config.json",
+        "hash": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/brief.md",
+        "hash": "1c66975b259e5b8f3ffcdef21ef0ec0c40e4d2e0dc7b424b7dde8ebef84e3c3d"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/planning.md",
+        "hash": "abe94d3a75db69008766539eaf5c00ce833a8f3940f4e7891c5852856f43ef1f"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/spec.md",
+        "hash": "aca603ecc06a04e7064eb4a3e2827724232da29c02a1af60e4d2168b14ef20a1"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/summary.md",
+        "hash": "c5ec7c1490efab7cc168e96e153d5138c8e1b401cfccd14f2a84085da43bcb45"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/task.json",
+        "hash": "2c34a5721a6bde139164c86084584409eb03e744d0ac47480c9d33577144befe"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115030-187934.json",
+        "hash": "a7c97a10cdca68450953cce815faebdb2d8a45df393bb54c6730b2efa6b22ef2"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115030-187934.md",
+        "hash": "13f2162b996c1b8101cab9078f95fe50e15e469c71ee1915fdc30372586e589e"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115505-942866.json",
+        "hash": "feb614b606e9d459da940f0e811c77c0f3258bbb2d4a7fad33764ab427388d7c"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115505-942866.md",
+        "hash": "d0387e195f450405ec62f20576dac8c6c4720fb9ea4704115078b768be437a61"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-120231-972078.json",
+        "hash": "65d4f55d7618a915539d53a0f808d58b7dc1d7d6cd8273c8bc1f2b4d63795864"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-120231-972078.md",
+        "hash": "25f7f982818ec8103df80d03f1e97a9ac5e766ffdccbe5bc6047a2456baf4297"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/manual-ats-tests.md",
+        "hash": "07f6583b2fd0eabb1dc041cd17aadf8615ef384cc2d5e3b1812534735b8b4f0a"
+      }
+    ],
+    "base_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f"
+  },
+  "scope": {
+    "owned_paths": [
+      "job_sources/ats/router.py",
+      "job_sources/ats/ui",
+      "job_sources/router.py",
+      "test_ats_detection_web.py",
+      "workflow/tasks"
+    ]
+  },
+  "cognitive_routing": {
+    "skills": [
+      "codebase-design",
+      "tdd"
+    ],
+    "source_refs": [
+      "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/spec.md",
+      "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/spec.md"
+    ],
+    "notes": [
+      "Implement the confirmed HTTP and built-UI seams with red-green slices."
+    ]
+  },
+  "delegation": {
+    "subagent_limit": "runtime",
+    "parallel_write_isolation": "dedicated-worktree",
+    "writers": []
+  },
+  "planning": {
+    "status": "ready",
+    "grilling_status": "confirmed",
+    "unresolved_decisions": [],
+    "decisions": [],
+    "acceptance_criteria": [
+      "Exact local browser origins can submit 1-20 explicit URLs and receive the canonical privacy-safe report.",
+      "Existing Python and UI tests plus new HTTP/UI contracts pass; lint has no errors.",
+      "No public worker route, persistence, discovery, browser automation, or unrelated FastAPI behavior is added.",
+      "Remote origins, oversized or invalid requests, concurrent runs, and unexpected failures are rejected safely before leaking request data.",
+      "The UI uses real returned detections for display, counts, retry, and exact report export, with no simulation path."
+    ],
+    "spec_ref": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/spec.md",
+    "multi_session": false,
+    "tickets": []
+  },
+  "budget": {
+    "max_fix_loops": 2,
+    "fix_loops": 1,
+    "verification_attempts": 3
+  },
+  "verification": {
+    "latest": {
+      "result": "PASS",
+      "verification_id": "20260804-144554-672497",
+      "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+      "dirty_fingerprint": "337c6e52d2a2f87036746604c066555dacdac39578e85b55f09f248144924c12",
+      "config_sha256": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3",
+      "planning_sha256": "75b8897d0d756157d3f0d921efebeda23a50b97976842ba707a50566ce8b644e",
+      "evidence": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-144554-672497.md"
+    }
+  },
+  "history": [
+    {
+      "at": "2026-08-04T06:11:32+00:00",
+      "event": "TASK_STARTED",
+      "details": null
+    },
+    {
+      "at": "2026-08-04T06:13:27+00:00",
+      "event": "COGNITIVE_ROUTE",
+      "details": {
+        "skills": [
+          "tdd"
+        ],
+        "source_refs": [
+          "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/spec.md"
+        ],
+        "notes": [
+          "Implement the confirmed HTTP and built-UI seams with red-green slices."
+        ]
+      }
+    },
+    {
+      "at": "2026-08-04T06:13:28+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "Exact local browser origins can submit 1-20 explicit URLs and receive the canonical privacy-safe report."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T06:13:30+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "Remote origins, oversized or invalid requests, concurrent runs, and unexpected failures are rejected safely before leaking request data."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T06:13:31+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "The UI uses real returned detections for display, counts, retry, and exact report export, with no simulation path."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T06:13:32+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "Existing Python and UI tests plus new HTTP/UI contracts pass; lint has no errors."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T06:13:33+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [
+          "No public worker route, persistence, discovery, browser automation, or unrelated FastAPI behavior is added."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T06:13:34+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [],
+        "spec_ref": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/spec.md",
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T06:17:18+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": "ready",
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [],
+        "spec_ref": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/spec.md",
+        "multi_session": false,
+        "grilling_status": "confirmed"
+      }
+    },
+    {
+      "at": "2026-08-04T06:17:19+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "EXECUTE",
+        "note": null
+      }
+    },
+    {
+      "at": "2026-08-04T06:37:33+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-141132-055407-connect-local-ats-ui-to-python-detec\\verification\\20260804-143733-582099.md"
+      }
+    },
+    {
+      "at": "2026-08-04T06:44:34+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "fix",
+        "finding": "Spec review found malformed-surrogate 500 and selection mutation during an active request; both are fixed with regression coverage."
+      }
+    },
+    {
+      "at": "2026-08-04T06:44:45+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-141132-055407-connect-local-ats-ui-to-python-detec\\verification\\20260804-144445-584684.md"
+      }
+    },
+    {
+      "at": "2026-08-04T06:45:54+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-141132-055407-connect-local-ats-ui-to-python-detec\\verification\\20260804-144554-672497.md"
+      }
+    },
+    {
+      "at": "2026-08-04T06:46:22+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "pass",
+        "finding": null
+      }
+    },
+    {
+      "at": "2026-08-04T06:46:23+00:00",
+      "event": "CLOSED",
+      "details": {
+        "summary": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-141132-055407-connect-local-ats-ui-to-python-detec\\summary.md"
+      }
+    }
+  ]
+}

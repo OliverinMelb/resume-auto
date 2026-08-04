@@ -1,0 +1,61 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "verification_id": "20260804-144554-672497",
+  "task_id": "20260804-141132-055407-connect-local-ats-ui-to-python-detec",
+  "run_at": "2026-08-04T06:45:54+00:00",
+  "result": "PASS",
+  "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+  "dirty_fingerprint": "337c6e52d2a2f87036746604c066555dacdac39578e85b55f09f248144924c12",
+  "config_sha256": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3",
+  "planning_sha256": "75b8897d0d756157d3f0d921efebeda23a50b97976842ba707a50566ce8b644e",
+  "changed_files": [
+    "job_sources/ats/router.py",
+    "job_sources/ats/ui/README.md",
+    "job_sources/ats/ui/app/globals.css",
+    "job_sources/ats/ui/app/layout.tsx",
+    "job_sources/ats/ui/app/page.tsx",
+    "job_sources/ats/ui/tests/rendered-html.test.mjs",
+    "job_sources/router.py",
+    "test_ats_detection_web.py"
+  ],
+  "unchanged_preexisting_dirty": [
+    ".scratch/ats-detection/next-session-prompt.md",
+    "AGENTS.md",
+    "docs/agents/domain.md",
+    "docs/agents/issue-tracker.md",
+    "job_sources/ats/cli.py",
+    "test_ats_detection_cli.py",
+    "workflow/config.json",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/brief.md",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/planning.md",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/spec.md",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/summary.md",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/task.json",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115030-187934.json",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115030-187934.md",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115505-942866.json",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115505-942866.md",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-120231-972078.json",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-120231-972078.md",
+    "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/manual-ats-tests.md"
+  ],
+  "scope_violations": [],
+  "checks": [
+    {
+      "name": "compileall",
+      "command": [
+        "C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
+        "-m",
+        "compileall",
+        "-q",
+        "."
+      ],
+      "dir": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection",
+      "status": "PASS",
+      "returncode": 0,
+      "duration_seconds": 3.166,
+      "output": ""
+    }
+  ]
+}

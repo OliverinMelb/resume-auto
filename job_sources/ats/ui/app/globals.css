@@ -35,7 +35,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -123,8 +124,13 @@ button:disabled {
 }
 
 .source-panel,
-.result-panel {
+.result-panel,
+.jobs-panel {
   padding: 22px;
+}
+
+.jobs-panel {
+  margin-top: 16px;
 }
 
 .section-heading {
@@ -377,6 +383,19 @@ button:disabled {
   font-size: 14px;
 }
 
+.empty-state.error {
+  border-color: #f2b8b5;
+  background: #fff7f6;
+}
+
+.empty-state.error strong {
+  color: var(--red);
+}
+
+.retry-button {
+  margin-top: 18px;
+}
+
 .progress-bar {
   position: relative;
   display: block;
@@ -524,6 +543,177 @@ td code {
   color: var(--muted);
 }
 
+.automatic-panel {
+  margin-bottom: 16px;
+  border-color: #b8cff7;
+  background: linear-gradient(135deg, #f8fbff 0%, #ffffff 72%);
+}
+
+.automatic-copy {
+  margin: -4px 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.automatic-controls {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) 112px 112px auto auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.automatic-controls label {
+  display: grid;
+  gap: 7px;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.automatic-controls input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #cbd3df;
+  border-radius: 8px;
+  background: white;
+  padding: 0 11px;
+  color: var(--text);
+  outline: none;
+}
+
+.automatic-controls input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgb(37 99 235 / 12%);
+}
+
+.automatic-summary,
+.inline-error {
+  margin-top: 14px;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  padding: 10px 12px;
+  color: #31558c;
+  font-size: 13px;
+}
+
+.inline-error {
+  background: #fff7f6;
+  color: var(--red);
+}
+
+.automatic-summary + .table-wrap,
+.automatic-controls + .job-empty,
+.inline-error + .job-empty {
+  margin-top: 14px;
+}
+
+.job-controls {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.2fr) minmax(180px, 1fr) 120px auto;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.job-controls label {
+  display: grid;
+  gap: 7px;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.job-controls input,
+.job-controls select {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #cbd3df;
+  border-radius: 8px;
+  background: white;
+  padding: 0 11px;
+  color: var(--text);
+  outline: none;
+}
+
+.job-controls input:focus,
+.job-controls select:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgb(37 99 235 / 12%);
+}
+
+.job-empty {
+  display: grid;
+  min-height: 130px;
+  place-items: center;
+  align-content: center;
+  border: 1px dashed #cbd3df;
+  border-radius: 10px;
+  background: #fafbfc;
+  color: var(--muted);
+  text-align: center;
+}
+
+.job-empty strong {
+  color: #344054;
+}
+
+.job-empty p {
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+
+.job-empty.error {
+  border-color: #f2b8b5;
+  background: #fff7f6;
+}
+
+.job-empty.error strong {
+  color: var(--red);
+}
+
+.score-pill {
+  display: inline-flex;
+  min-width: 46px;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--gray-soft);
+  padding: 5px 8px;
+  color: #475467;
+  font-weight: 750;
+}
+
+.score-pill.qualified {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.job-link {
+  color: var(--blue);
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.job-link:hover {
+  text-decoration: underline;
+}
+
+.table-action {
+  min-height: 32px;
+  border: 1px solid #bfd5fb;
+  border-radius: 7px;
+  background: var(--blue-soft);
+  padding: 0 10px;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.table-action:hover:not(:disabled) {
+  border-color: var(--blue);
+}
+
 .safety-note {
   display: flex;
   flex-wrap: wrap;
@@ -569,6 +759,14 @@ td code {
   .summary-grid {
     grid-template-columns: repeat(2, 1fr);
   }
+
+  .job-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .automatic-controls {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 560px) {
@@ -603,8 +801,18 @@ td code {
   }
 
   .source-panel,
-  .result-panel {
+  .result-panel,
+  .jobs-panel,
+  .automatic-panel {
     padding: 16px;
+  }
+
+  .job-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .automatic-controls {
+    grid-template-columns: 1fr;
   }
 }
 

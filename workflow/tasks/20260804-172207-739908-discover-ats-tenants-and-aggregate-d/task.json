@@ -1,0 +1,612 @@
+{
+  "schema_version": 2,
+  "engine_version": "1.4.0",
+  "task_id": "20260804-172207-739908-discover-ats-tenants-and-aggregate-d",
+  "title": "Discover ATS tenants and aggregate direct job APIs",
+  "tier": "contract",
+  "workflow_class": "app-change",
+  "state": "CLOSED",
+  "created_at": "2026-08-04T09:22:07+00:00",
+  "updated_at": "2026-08-04T10:46:37+00:00",
+  "workspace": {
+    "kind": "linked-worktree",
+    "branch": "ats-detection",
+    "detached": false,
+    "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+    "dirty_fingerprint": "8c3d2db65942a39468060959be0de46fbdfa5dc82aaa64eba2469c4a516c40c5",
+    "dirty_entries": [
+      {
+        "status": "??",
+        "path": ".scratch/ats-detection/next-session-prompt.md",
+        "hash": "fbe30d4026c549d62e478f718290b2f3e2a9e3850472330aabc2e585eef09e5e"
+      },
+      {
+        "status": "??",
+        "path": "AGENTS.md",
+        "hash": "aa62d5d72906e6f572254de939e2c150d433ef3daf218df17fdef17ab18c3b12"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/domain.md",
+        "hash": "8fcd1a12ea3b928dbc76ed85cbb03f2058a4d98b0e754f33f17534c24cd8cce6"
+      },
+      {
+        "status": "??",
+        "path": "docs/agents/issue-tracker.md",
+        "hash": "7c79eccc26290e75c734377176a9ee32f90fca950d3cd42ce5dd4714c94aad41"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/__init__.py",
+        "hash": "55c3721a66e5fb4777cf1225dde45758c893d8be996454d6a00824de2c4e247e"
+      },
+      {
+        "status": "??",
+        "path": "job_sources/ats/cli.py",
+        "hash": "026eec4f392d87065d1adcef1fda21d89e9fe8e17e425d503a93dbbd9225e7da"
+      },
+      {
+        "status": "??",
+        "path": "job_sources/ats/listings/__init__.py",
+        "hash": "fa36ea46356c72d1b601b075ee63e3a81e54437de9fc42fae4e5327f0604b91e"
+      },
+      {
+        "status": "??",
+        "path": "job_sources/ats/listings/beisen.py",
+        "hash": "74b7f0704ac910412558b40784cfe8358980ab34c9aba153fe91a8115e4db07d"
+      },
+      {
+        "status": "??",
+        "path": "job_sources/ats/router.py",
+        "hash": "a23fc3740d10b6fac2fced9d563bf1bb5976fa5ffa08ccffa0574dcb91534a99"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/README.md",
+        "hash": "0188baec882ab851f36d093110fe8294e5ca4a0cbfc85d3e470d868969c28b69"
+      },
+      {
+        "status": "??",
+        "path": "job_sources/ats/ui/app/collectable-sites.ts",
+        "hash": "60ce3f990df1a257b04d66e3a48733d71261233cb950d7f486eb83d9213ecc1e"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/app/globals.css",
+        "hash": "1867d04acc4372671ee49ee8e3f8b9c530498d5ca96c9c534b4cae9a3c65310c"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/app/layout.tsx",
+        "hash": "2c7e7190350f0250686f0d059f27d7df9d4f4b175d7fc5055148791718b90b15"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/app/page.tsx",
+        "hash": "66fc4ad95885919ee8a21129f23aa9eac8c4bf621d63e9f86317c7ce5461b553"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/ats/ui/tests/rendered-html.test.mjs",
+        "hash": "315c816433d91d291a2eab1bc3f8fd0ba94f712b79e3366dfa351f39ec941744"
+      },
+      {
+        "status": " M",
+        "path": "job_sources/router.py",
+        "hash": "4f72e5e072ec5ca87ebd153c42d014f99cd3af7fe0dc682ec1d620ca26eb4e95"
+      },
+      {
+        "status": "??",
+        "path": "test_ats_detection_cli.py",
+        "hash": "ddc01ea3d2e03b1cbe03601d2bcdd931e35c0ad10c1e3220d8999b7789c4172e"
+      },
+      {
+        "status": "??",
+        "path": "test_ats_detection_web.py",
+        "hash": "5b5fe5eb14c80fc362edea73dc1400a5a5a564696d80cd82dd2c6f5e571b7f4c"
+      },
+      {
+        "status": "??",
+        "path": "test_ats_job_listings.py",
+        "hash": "5d7e46b5a4aaa13c44757c7b84135669b8ca52bc4e5cc4c6b27c7951ebc8da71"
+      },
+      {
+        "status": "??",
+        "path": "workflow/config.json",
+        "hash": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/brief.md",
+        "hash": "1c66975b259e5b8f3ffcdef21ef0ec0c40e4d2e0dc7b424b7dde8ebef84e3c3d"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/planning.md",
+        "hash": "abe94d3a75db69008766539eaf5c00ce833a8f3940f4e7891c5852856f43ef1f"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/spec.md",
+        "hash": "aca603ecc06a04e7064eb4a3e2827724232da29c02a1af60e4d2168b14ef20a1"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/summary.md",
+        "hash": "c5ec7c1490efab7cc168e96e153d5138c8e1b401cfccd14f2a84085da43bcb45"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/task.json",
+        "hash": "2c34a5721a6bde139164c86084584409eb03e744d0ac47480c9d33577144befe"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115030-187934.json",
+        "hash": "a7c97a10cdca68450953cce815faebdb2d8a45df393bb54c6730b2efa6b22ef2"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115030-187934.md",
+        "hash": "13f2162b996c1b8101cab9078f95fe50e15e469c71ee1915fdc30372586e589e"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115505-942866.json",
+        "hash": "feb614b606e9d459da940f0e811c77c0f3258bbb2d4a7fad33764ab427388d7c"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-115505-942866.md",
+        "hash": "d0387e195f450405ec62f20576dac8c6c4720fb9ea4704115078b768be437a61"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-120231-972078.json",
+        "hash": "65d4f55d7618a915539d53a0f808d58b7dc1d7d6cd8273c8bc1f2b4d63795864"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/20260804-120231-972078.md",
+        "hash": "25f7f982818ec8103df80d03f1e97a9ac5e766ffdccbe5bc6047a2456baf4297"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-113936-918072-add-local-ats-detection-cli/verification/manual-ats-tests.md",
+        "hash": "07f6583b2fd0eabb1dc041cd17aadf8615ef384cc2d5e3b1812534735b8b4f0a"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/brief.md",
+        "hash": "6a7182648a33dd4700a403b123fc28e9716e3890cd84ba74f38084cac9048210"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/planning.md",
+        "hash": "77757ff8bf4ad59a25ff8a4bcf880d97fac87f447bce9aa2a45527545c33e96d"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/spec.md",
+        "hash": "03583bc86811aa057282f974a2116934b64fdcbae4f792da4c96c8bd0c80a19b"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/summary.md",
+        "hash": "24f48a5f2d02ea51febff27f60b5f936a5bbcaec81d4a04dbe1c7506f7cee6fb"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/task.json",
+        "hash": "a9a5b425fd1e5692bedee44e546bc7cbe35a4ee64c55f49a7ec42bcf3968d6a5"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-143733-582099.json",
+        "hash": "91bca1edee92b60773f4082595a72c2adc0f4f7482f0bc3d0be8a598fd057edc"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-143733-582099.md",
+        "hash": "def0c60f45ec1c6d2405182f6d68f6ae0798139a8a1f0782073e31b19302c722"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-144445-584684.json",
+        "hash": "cb96ad9513934bb388d8e6fa60e017195eab3eb293b8710f2100423b754bd7ea"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-144445-584684.md",
+        "hash": "3a2297d74cc092f75305451b9436b182d0c78538f6fa796f672e9ab1f1476f6f"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-144554-672497.json",
+        "hash": "695e0d0e3fb35a80358e504a61e9f6e8b2ae200a655d916f07e3e53de7938b18"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/20260804-144554-672497.md",
+        "hash": "8859fb264a2451b2207d94612b02b80e39ab8e4a98bfeef38f8b79845f966e49"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-141132-055407-connect-local-ats-ui-to-python-detec/verification/manual-web-tests.md",
+        "hash": "1a0c1ce651a7047eb2f4ee0d58f0dafe27f3b22615f7a877e4740c287854e411"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/brief.md",
+        "hash": "01114f6ea76dd4ef483bc4854fddfc54fa9e570c082f8d9b892f11d5f796dc55"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/planning.md",
+        "hash": "65ea383351041fbd4b45178e09635f163d80f0a3a8ae9d6479493e546d1553ae"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/spec.md",
+        "hash": "7641d0a3458fcd4eb387315de8f99905ec3e10d704d0d259418451814b3b03f1"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/summary.md",
+        "hash": "07e78fbe6bef13bc79acf4a2840e39ce1bd28c7b0aeb0969e7ec17d7179fd871"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/task.json",
+        "hash": "0fbed4b90ff25b0503d301cb5ff26f93a43bd32a531ee988850657b8127666b2"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/verification/20260804-152613-169944.json",
+        "hash": "2a43c0c7df9b0929278dc008b2ad9fbdc5f2fcf430af21616219b2e202edcb1c"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/verification/20260804-152613-169944.md",
+        "hash": "60031707a3cfba18f7b64787be4fa44cb0a92391df378ebbc2912016d18266e1"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/verification/20260804-153415-543981.json",
+        "hash": "723b0f1db7a217042ffdc84ec45a4ecc47841f582ed4ee9f0b8613ff5a600e7b"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/verification/20260804-153415-543981.md",
+        "hash": "71a5f074711793a58bac7a3330c3dcc8c6186fdafb88df7ca3d37300bb4843f1"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/verification/20260804-153835-183948.json",
+        "hash": "7abf1deddbe2e79df8c07964fc919f55dd65e276eb4ec78e0562c1ce01f62452"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-145553-963840-collect-and-score-greenhouse-and-lev/verification/20260804-153835-183948.md",
+        "hash": "b25c3feab591d4c6ff50eee77ddcab5c045f1aabb9b36c7e18323b89e8920e5a"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/brief.md",
+        "hash": "7c2017c4c01a045d736946d6215a7927533a84bc274d3007dbdcd477fc0b652f"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/planning.md",
+        "hash": "d8815cd930b833b031f7170eba88a09144bf83de1a13a1953e3fbfd7ba8445ff"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/research-beisen.md",
+        "hash": "71fe60fe4f941df4b9e43e4bf198fbb3f5e80edeacd01dd14e1b0bee9fd75346"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/spec.md",
+        "hash": "2b07523cd37c5fe7f1a9ee7480ebc477200eb87049039dd85114a52d52832ba8"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/summary.md",
+        "hash": "57948bbe51526bceed1e21572a6459de50faa561c7e623754e48994e48c8e4bf"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/task.json",
+        "hash": "c018b0a91c7914e3b35ed8fbccac5d8802cd352df1d5080f0dc6f16562ec672d"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/verification/20260804-162545-722233.json",
+        "hash": "ef8a5890b7a1f44ab6505d4917ca291718015cf06e9c21b2637cb25c000f4a6a"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/verification/20260804-162545-722233.md",
+        "hash": "36ec5d167b598e6453af1ee6c08f3b4291b62469e04c59ff86d59e3de8beeca1"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/verification/20260804-163154-724242.json",
+        "hash": "432d75e82affb7b784c48ff6d2ebb8d4d9267d2314b2c0138484928bfa67b4f4"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/verification/20260804-163154-724242.md",
+        "hash": "ecc18de507118263ba4579c10fd2aa89d4f444f9173b94284e34cfded653dd5f"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/verification/20260804-163507-716498.json",
+        "hash": "54cf8918292f6698b6b23c76d4180bd4fa15c7dab43327fb23ffe62f8e5206b9"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/verification/20260804-163507-716498.md",
+        "hash": "fc7f98b2f74175c07ede1ea565c2618eb6e4c8bfc42b819262bbd0b120c38681"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/verification/20260804-163728-925110.json",
+        "hash": "858fc41bad87fc811525b3faa610ee9fc8fa5f0a9c77ddec55ee7de62f1a7a38"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-154654-318001-research-and-add-beisen-public-job-c/verification/20260804-163728-925110.md",
+        "hash": "7233781342c878f159b5e67f2f08c129745ad4fc602c939ab06fe4fa4a8f0102"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-165150-397280-add-batch-ats-career-site-discovery-/brief.md",
+        "hash": "6462c99ad1495bc9054653b7bb59df7d6fe243da8c5154f73b4b0df17fc5fe86"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-165150-397280-add-batch-ats-career-site-discovery-/planning.md",
+        "hash": "599ded209d70f066a71a805ef3b2e11fff1a18243a865439d2616ac0dca6f172"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-165150-397280-add-batch-ats-career-site-discovery-/spec.md",
+        "hash": "f401bbb9712a7d140992d60737e9b9ea4d7c66148c861654696895a516b70459"
+      },
+      {
+        "status": "??",
+        "path": "workflow/tasks/20260804-165150-397280-add-batch-ats-career-site-discovery-/task.json",
+        "hash": "9d160c002e509a2e649a7f41e7af368e85bb1bdb9bebcf3f0f1d08bd8fb335b7"
+      }
+    ],
+    "base_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f"
+  },
+  "scope": {
+    "owned_paths": [
+      "job_sources/ats",
+      "test_ats_detection_web.py",
+      "test_ats_discovery.py"
+    ]
+  },
+  "cognitive_routing": {
+    "skills": [
+      "codebase-design",
+      "tdd"
+    ],
+    "source_refs": [
+      "user-confirmed:2026-08-04"
+    ],
+    "notes": []
+  },
+  "delegation": {
+    "subagent_limit": "runtime",
+    "parallel_write_isolation": "dedicated-worktree",
+    "writers": []
+  },
+  "planning": {
+    "status": "ready",
+    "grilling_status": "confirmed",
+    "unresolved_decisions": [],
+    "decisions": [
+      "Bound one cross-tenant search to 20 boards and four workers with isolated safe failures.",
+      "Expose discovery and cross-tenant search in the existing local HTTP/UI while retaining manual diagnostics.",
+      "Keep collect_ats_jobs as the direct collection seam and add Ashby as a fourth adapter.",
+      "Persist the free discovery catalog under ignored .runtime storage and reuse it for 24 hours unless refresh is requested.",
+      "Use Common Crawl only as a bounded URL index to discover ATS tenants; never fetch WARC or company page bodies."
+    ],
+    "acceptance_criteria": [
+      "Ashby listed public jobs normalize through the existing NormalizedJob contract.",
+      "Batch search directly delegates to existing collectors, deduplicates jobs, and returns stable ranking and aggregate counts.",
+      "Fixed-host discovery is size-limited, cacheable, and tolerant of corrupt cache data.",
+      "The local page supports zero-URL tenant discovery followed by keyword search without regressing manual flows.",
+      "URL-index records produce at most 50 canonical deduplicated Greenhouse, Lever, Ashby, and Beisen boards."
+    ],
+    "spec_ref": "workflow/tasks/20260804-172207-739908-discover-ats-tenants-and-aggregate-d/spec.md",
+    "multi_session": false,
+    "tickets": []
+  },
+  "budget": {
+    "max_fix_loops": 2,
+    "fix_loops": 0,
+    "verification_attempts": 4
+  },
+  "verification": {
+    "latest": {
+      "result": "PASS",
+      "verification_id": "20260804-184621-702272",
+      "head_sha": "311d5e04981992b81a4a3eb3ae8e0723034f351f",
+      "dirty_fingerprint": "c737ff9c68af9a7fc6f9240526c13ea5a6e043bd7aa2e846cb133de580519ad5",
+      "config_sha256": "3484468467e566b596474f4e510e3c87836cd4ba16b61fefc67d787f086bddc3",
+      "planning_sha256": "1c47b164ba281b1871ba2d786d88601324bd65d63fef76c6e6ca972b9d8ae517",
+      "evidence": "workflow/tasks/20260804-172207-739908-discover-ats-tenants-and-aggregate-d/verification/20260804-184621-702272.md"
+    }
+  },
+  "history": [
+    {
+      "at": "2026-08-04T09:22:07+00:00",
+      "event": "TASK_STARTED",
+      "details": null
+    },
+    {
+      "at": "2026-08-04T09:23:25+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [
+          "Use Common Crawl only as a bounded URL index to discover ATS tenants; never fetch WARC or company page bodies."
+        ],
+        "acceptance": [
+          "URL-index records produce at most 50 canonical deduplicated Greenhouse, Lever, Ashby, and Beisen boards."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T09:23:25+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [
+          "Persist the free discovery catalog under ignored .runtime storage and reuse it for 24 hours unless refresh is requested."
+        ],
+        "acceptance": [
+          "Fixed-host discovery is size-limited, cacheable, and tolerant of corrupt cache data."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T09:23:26+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [
+          "Keep collect_ats_jobs as the direct collection seam and add Ashby as a fourth adapter."
+        ],
+        "acceptance": [
+          "Ashby listed public jobs normalize through the existing NormalizedJob contract."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T09:23:27+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [
+          "Bound one cross-tenant search to 20 boards and four workers with isolated safe failures."
+        ],
+        "acceptance": [
+          "Batch search directly delegates to existing collectors, deduplicates jobs, and returns stable ranking and aggregate counts."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T09:23:28+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": null,
+        "opened": [],
+        "resolved": [],
+        "decisions": [
+          "Expose discovery and cross-tenant search in the existing local HTTP/UI while retaining manual diagnostics."
+        ],
+        "acceptance": [
+          "The local page supports zero-URL tenant discovery followed by keyword search without regressing manual flows."
+        ],
+        "spec_ref": null,
+        "multi_session": false,
+        "grilling_status": "pending"
+      }
+    },
+    {
+      "at": "2026-08-04T09:23:29+00:00",
+      "event": "PLAN_UPDATED",
+      "details": {
+        "status": "ready",
+        "opened": [],
+        "resolved": [],
+        "decisions": [],
+        "acceptance": [],
+        "spec_ref": "workflow/tasks/20260804-172207-739908-discover-ats-tenants-and-aggregate-d/spec.md",
+        "multi_session": false,
+        "grilling_status": "confirmed"
+      }
+    },
+    {
+      "at": "2026-08-04T09:23:37+00:00",
+      "event": "TRANSITION",
+      "details": {
+        "to": "EXECUTE",
+        "note": null
+      }
+    },
+    {
+      "at": "2026-08-04T09:47:36+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "FAIL",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-172207-739908-discover-ats-tenants-and-aggregate-d\\verification\\20260804-174736-714527.md"
+      }
+    },
+    {
+      "at": "2026-08-04T09:49:08+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-172207-739908-discover-ats-tenants-and-aggregate-d\\verification\\20260804-174908-536946.md"
+      }
+    },
+    {
+      "at": "2026-08-04T10:40:42+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-172207-739908-discover-ats-tenants-and-aggregate-d\\verification\\20260804-184042-272747.md"
+      }
+    },
+    {
+      "at": "2026-08-04T10:46:21+00:00",
+      "event": "VERIFIED",
+      "details": {
+        "result": "PASS",
+        "evidence": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-172207-739908-discover-ats-tenants-and-aggregate-d\\verification\\20260804-184621-702272.md"
+      }
+    },
+    {
+      "at": "2026-08-04T10:46:35+00:00",
+      "event": "REVIEW",
+      "details": {
+        "verdict": "pass",
+        "finding": null
+      }
+    },
+    {
+      "at": "2026-08-04T10:46:37+00:00",
+      "event": "CLOSED",
+      "details": {
+        "summary": "C:\\Users\\admin\\Desktop\\test\\czc-good-job-ats-detection\\workflow\\tasks\\20260804-172207-739908-discover-ats-tenants-and-aggregate-d\\summary.md"
+      }
+    }
+  ]
+}
