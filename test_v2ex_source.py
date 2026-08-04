@@ -14,6 +14,7 @@ from job_sources.v2ex import (
     MAX_RESPONSE_BYTES,
     V2exCursor,
     V2exJobSource,
+    V2exViewerApp,
 )
 
 
@@ -85,6 +86,16 @@ class RecordingOpener:
     def __call__(self, request, *, timeout: float):
         self.calls.append((request, timeout))
         return self.response
+
+
+class SequenceOpener:
+    def __init__(self, *responses: FakeResponse):
+        self.responses = list(responses)
+        self.calls: list[tuple[object, float]] = []
+
+    def __call__(self, request, *, timeout: float):
+        self.calls.append((request, timeout))
+        return self.responses.pop(0)
 
 
 class V2exJobSourceTests(unittest.TestCase):
@@ -299,6 +310,8 @@ class V2exJobSourceTests(unittest.TestCase):
             "123456789",
             "abcde",
             "123456",
+            "eXRpYW55dW1haWxAMTYzLmNvbQ==",
+            "Um9ybzc0NTY5ODE0MA==",
         )
         malicious = (
             "<script>steal_cookie()</script>"
@@ -310,6 +323,8 @@ class V2exJobSourceTests(unittest.TestCase):
             "<p>邮箱：hr@example.com 手机：13800138000</p>"
             "<p>微信：wx_hr_2026 微信号：abcde QQ：123456789</p>"
             "<p>vx: 123456</p>"
+            "<p>简历发 eXRpYW55dW1haWxAMTYzLmNvbQ==</p>"
+            "<p>wechat (base64)：Um9ybzc0NTY5ODE0MA==</p>"
             f"<p>{'岗位说明' * 6000}</p>"
         )
         malicious_item = item(
@@ -320,7 +335,7 @@ class V2exJobSourceTests(unittest.TestCase):
             ),
             content_html=malicious,
         )
-        malicious_item["id"] = "hr@example.com"
+        malicious_item["id"] = "eXRpYW55dW1haWxAMTYzLmNvbQ=="
         source = V2exJobSource(
             opener=RecordingOpener(
                 FakeResponse(
@@ -804,6 +819,412 @@ class V2exJobSourceTests(unittest.TestCase):
             result = source.fetch()
 
         self.assertEqual(result.status, "complete")
+        file_open.assert_not_called()
+        connect_database.assert_not_called()
+        write_text.assert_not_called()
+        start_thread.assert_not_called()
+        write_log.assert_not_called()
+
+
+def call_viewer(
+    app: V2exViewerApp,
+    *,
+    path: str = "/",
+    query: str = "",
+    method: str = "GET",
+) -> tuple[str, dict[str, str], bytes]:
+    captured: dict[str, object] = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = dict(headers)
+
+    body = b"".join(
+        app(
+            {
+                "REQUEST_METHOD": method,
+                "PATH_INFO": path,
+                "QUERY_STRING": query,
+            },
+            start_response,
+        )
+    )
+    return (
+        str(captured["status"]),
+        dict(captured["headers"]),
+        body,
+    )
+
+
+class V2exViewerTests(unittest.TestCase):
+    def test_homepage_shows_normalized_and_review_items_safely(self):
+        malicious = item(
+            item_id="https://www.v2ex.com/t/8101",
+            title="[招聘] <img src=x onerror=alert(1)> Python 工程师",
+            content_html="<p>公司：示例团队</p><p>地点：上海</p>",
+        )
+        seeking = item(
+            item_id="https://www.v2ex.com/t/8102",
+            title="求职：后端工程师",
+            content_html="<p>个人简历，寻找工作机会。</p>",
+        )
+        app = V2exViewerApp(
+            source=V2exJobSource(
+                opener=RecordingOpener(
+                    FakeResponse(feed(malicious, seeking))
+                )
+            ),
+            now=lambda: 100.0,
+        )
+
+        status, headers, body = call_viewer(app)
+        page = body.decode("utf-8")
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(
+            headers["Content-Type"],
+            "text/html; charset=utf-8",
+        )
+        self.assertIn("V2EX 酷工作", page)
+        self.assertIn("已规范化", page)
+        self.assertIn("待审核", page)
+        self.assertIn("https://www.v2ex.com/t/8101", page)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", page)
+        self.assertNotIn("<img src=x onerror=alert(1)>", page)
+
+    def test_homepage_filters_by_query_classification_and_signals(self):
+        remote_python = item(
+            item_id="https://www.v2ex.com/t/8201",
+            title="[招聘] Python 工程师",
+            content_html=(
+                "<p>公司：远程团队</p>"
+                "<p>地点：远程，招聘 Python 开发工程师。</p>"
+            ),
+        )
+        local_go = item(
+            item_id="https://www.v2ex.com/t/8202",
+            title="[招聘] Go 工程师",
+            content_html=(
+                "<p>公司：本地团队</p>"
+                "<p>地点：北京，招聘 Go 开发工程师。</p>"
+            ),
+        )
+        remote_seeking = item(
+            item_id="https://www.v2ex.com/t/8203",
+            title="求职 Python 工程师",
+            content_html="<p>个人简历，寻找远程工作机会。</p>",
+        )
+        app = V2exViewerApp(
+            source=V2exJobSource(
+                opener=RecordingOpener(
+                    FakeResponse(
+                        feed(remote_python, local_go, remote_seeking)
+                    )
+                )
+            ),
+            now=lambda: 100.0,
+        )
+
+        status, _, body = call_viewer(
+            app,
+            query="q=python&classification=recruitment&remote=1",
+        )
+        page = body.decode("utf-8")
+
+        self.assertEqual(status, "200 OK")
+        self.assertIn("https://www.v2ex.com/t/8201", page)
+        self.assertNotIn("https://www.v2ex.com/t/8202", page)
+        self.assertNotIn("https://www.v2ex.com/t/8203", page)
+        self.assertIn("显示 1 条", page)
+        self.assertIn('name="classification"', page)
+        self.assertIn('name="remote"', page)
+
+    def test_viewer_caches_refreshes_slowly_and_keeps_last_good_snapshot(self):
+        clock = [100.0]
+        opener = SequenceOpener(
+            FakeResponse(
+                feed(
+                    item(
+                        item_id="https://www.v2ex.com/t/8301",
+                        title="[招聘] 第一版 Python 工程师",
+                    )
+                )
+            ),
+            FakeResponse(
+                feed(
+                    item(
+                        item_id="https://www.v2ex.com/t/8302",
+                        title="[招聘] 第二版 Python 工程师",
+                    )
+                )
+            ),
+            FakeResponse(b"rate limited", status=429),
+        )
+        app = V2exViewerApp(
+            source=V2exJobSource(opener=opener),
+            now=lambda: clock[0],
+        )
+
+        _, _, first = call_viewer(app)
+        clock[0] = 120.0
+        _, _, too_soon = call_viewer(app, query="refresh=1")
+        self.assertEqual(len(opener.calls), 1)
+        self.assertIn(b"/t/8301", first)
+        self.assertIn(b"/t/8301", too_soon)
+
+        clock[0] = 161.0
+        _, _, refreshed = call_viewer(app, query="refresh=1")
+        self.assertEqual(len(opener.calls), 2)
+        self.assertIn(b"/t/8302", refreshed)
+        self.assertNotIn(b"/t/8301", refreshed)
+
+        clock[0] = 462.0
+        status, _, stale = call_viewer(app, query="refresh=1")
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(len(opener.calls), 3)
+        self.assertIn(b"/t/8302", stale)
+        self.assertIn(
+            "刷新失败，正在显示上次快照".encode(),
+            stale,
+        )
+        clock[0] = 480.0
+        _, _, backoff = call_viewer(app)
+        self.assertEqual(len(opener.calls), 3)
+        self.assertIn(b"/t/8302", backoff)
+
+    def test_viewer_enforces_read_only_routes_and_security_headers(self):
+        opener = RecordingOpener(FakeResponse(feed(item())))
+        app = V2exViewerApp(
+            source=V2exJobSource(opener=opener),
+            now=lambda: 100.0,
+        )
+
+        missing, _, _ = call_viewer(app, path="/missing")
+        rejected, rejected_headers, _ = call_viewer(
+            app,
+            method="POST",
+        )
+        oversized, _, _ = call_viewer(app, query="q=" + "x" * 2_100)
+
+        self.assertEqual(missing, "404 Not Found")
+        self.assertEqual(rejected, "405 Method Not Allowed")
+        self.assertEqual(rejected_headers["Allow"], "GET, HEAD")
+        self.assertEqual(oversized, "400 Bad Request")
+        self.assertEqual(len(opener.calls), 0)
+
+        ok, headers, body = call_viewer(app)
+        head_status, head_headers, head_body = call_viewer(
+            app,
+            method="HEAD",
+        )
+
+        self.assertEqual(ok, "200 OK")
+        self.assertEqual(head_status, "200 OK")
+        self.assertEqual(head_body, b"")
+        self.assertEqual(
+            head_headers["Content-Length"],
+            str(len(body)),
+        )
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertIn(
+            "default-src 'none'",
+            headers["Content-Security-Policy"],
+        )
+        self.assertEqual(len(opener.calls), 1)
+
+    def test_viewer_filters_review_internships_and_shows_initial_failure(self):
+        normalized_internship = item(
+            item_id="https://www.v2ex.com/t/8401",
+            title="[招聘] Python 实习工程师",
+            content_html=(
+                "<p>公司：示例团队</p>"
+                "<p>地点：上海，招聘实习开发工程师。</p>"
+            ),
+        )
+        review_internship = item(
+            item_id="https://www.v2ex.com/t/8402",
+            title="求职：Python 实习工程师",
+            content_html="<p>个人简历，寻找实习工作机会。</p>",
+        )
+        review_full_time = item(
+            item_id="https://www.v2ex.com/t/8403",
+            title="求职：Go 工程师",
+            content_html="<p>个人简历，寻找全职工作机会。</p>",
+        )
+        app = V2exViewerApp(
+            source=V2exJobSource(
+                opener=RecordingOpener(
+                    FakeResponse(
+                        feed(
+                            normalized_internship,
+                            review_internship,
+                            review_full_time,
+                        )
+                    )
+                )
+            ),
+            now=lambda: 100.0,
+        )
+
+        status, _, body = call_viewer(
+            app,
+            query="disposition=review&internship=1",
+        )
+        page = body.decode("utf-8")
+
+        self.assertEqual(status, "200 OK")
+        self.assertIn("https://www.v2ex.com/t/8402", page)
+        self.assertNotIn("https://www.v2ex.com/t/8401", page)
+        self.assertNotIn("https://www.v2ex.com/t/8403", page)
+        self.assertIn('name="disposition"', page)
+        self.assertIn('name="internship"', page)
+
+        failed_app = V2exViewerApp(
+            source=V2exJobSource(
+                opener=RecordingOpener(
+                    FakeResponse(b"forbidden", status=403)
+                )
+            ),
+            now=lambda: 100.0,
+        )
+        failed_status, _, failed_body = call_viewer(failed_app)
+        failed_page = failed_body.decode("utf-8")
+
+        self.assertEqual(failed_status, "503 Service Unavailable")
+        self.assertIn("暂时无法读取 V2EX Feed", failed_page)
+        self.assertNotIn("forbidden", failed_page)
+
+    def test_cli_binds_only_loopback_without_fetching_or_access_logs(self):
+        import job_sources.v2ex.viewer as viewer_module
+
+        captured: dict[str, object] = {}
+
+        class FakeServer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def serve_forever(self):
+                captured["served"] = True
+
+        def server_factory(
+            host,
+            port,
+            app,
+            *,
+            handler_class,
+        ):
+            captured.update(
+                host=host,
+                port=port,
+                app=app,
+                handler_class=handler_class,
+            )
+            return FakeServer()
+
+        with (
+            patch.object(
+                viewer_module,
+                "make_server",
+                side_effect=server_factory,
+            ),
+            patch("builtins.print") as output,
+        ):
+            exit_code = viewer_module.main(["--port", "9123"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(captured["host"], "127.0.0.1")
+        self.assertEqual(captured["port"], 9123)
+        self.assertTrue(captured["served"])
+        self.assertIsInstance(captured["app"], V2exViewerApp)
+        output.assert_called_once()
+        self.assertEqual(
+            captured["handler_class"].log_message.__qualname__,
+            "_QuietRequestHandler.log_message",
+        )
+
+    def test_homepage_presents_job_details_stats_and_refresh_controls(self):
+        internship = item(
+            item_id="https://www.v2ex.com/t/8501",
+            title="[招聘] Python 实习工程师",
+            content_html=(
+                "<p>公司：国际示例团队</p>"
+                "<p>地点：远程</p>"
+                "<p>薪资：300-500元/天</p>"
+                "<p>国外团队招聘实习开发工程师。</p>"
+            ),
+        )
+        outsourcing = item(
+            item_id="https://www.v2ex.com/t/8502",
+            title="小程序外包需求",
+            content_html="<p>项目需求，预算 2 万，找开发完成。</p>",
+        )
+        app = V2exViewerApp(
+            source=V2exJobSource(
+                opener=RecordingOpener(
+                    FakeResponse(feed(internship, outsourcing))
+                )
+            ),
+            now=lambda: 100.0,
+            wall_now=lambda: datetime(
+                2026,
+                7,
+                31,
+                10,
+                30,
+                tzinfo=timezone.utc,
+            ),
+        )
+
+        _, _, body = call_viewer(app)
+        page = body.decode("utf-8")
+
+        self.assertIn("规范化岗位</span><strong>1</strong>", page)
+        self.assertIn("待审核</span><strong>1</strong>", page)
+        self.assertIn("300-500元/天", page)
+        self.assertIn("远程", page)
+        self.assertIn("实习", page)
+        self.assertIn("国外团队", page)
+        self.assertIn("可能是外包", page)
+        self.assertIn('aria-label="岗位筛选"', page)
+        self.assertIn("刷新数据", page)
+        self.assertIn("缓存更新：07-31 10:30", page)
+        self.assertIn('class="job-grid"', page)
+        self.assertIn("@media (max-width: 720px)", page)
+
+    def test_viewer_import_and_request_have_no_hidden_side_effects(self):
+        import job_sources.v2ex.viewer as viewer_module
+
+        with (
+            patch("urllib.request.urlopen") as network,
+            patch.object(threading.Thread, "start") as start_thread,
+        ):
+            importlib.reload(viewer_module)
+
+        network.assert_not_called()
+        start_thread.assert_not_called()
+
+        app = viewer_module.V2exViewerApp(
+            source=V2exJobSource(
+                opener=RecordingOpener(FakeResponse(feed(item())))
+            ),
+            now=lambda: 100.0,
+        )
+        with (
+            patch("builtins.open") as file_open,
+            patch.object(sqlite3, "connect") as connect_database,
+            patch("pathlib.Path.write_text") as write_text,
+            patch.object(threading.Thread, "start") as start_thread,
+            patch("logging.Logger._log") as write_log,
+        ):
+            status, _, _ = call_viewer(app)
+
+        self.assertEqual(status, "200 OK")
         file_open.assert_not_called()
         connect_database.assert_not_called()
         write_text.assert_not_called()

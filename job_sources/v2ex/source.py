@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 from collections.abc import Callable
@@ -116,6 +118,9 @@ class V2exItemOutcome:
     safe_text: str
     job: NormalizedJob | None
     reason_codes: tuple[str, ...] = ()
+    published_at: str | None = None
+    first_seen_at: str | None = None
+    last_seen_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,10 @@ class V2exFetchResult:
     duplicate_count: int = 0
     seen_count: int = 0
     error_code: str | None = None
+    new_count: int = 0
+    updated_count: int = 0
+    skipped_count: int = 0
+    stale: bool = False
 
 
 class _PlainTextParser(HTMLParser):
@@ -497,6 +506,7 @@ def _normalize_item(
         safe_text=combined,
         job=job,
         reason_codes=tuple(reason_codes),
+        published_at=published_at,
     )
 
 
@@ -575,13 +585,29 @@ def _safe_identity(value: str | None) -> str | None:
         or len(value) > 512
         or any(character.isspace() or ord(character) < 32 for character in value)
         or _redact_contacts(value) != value
+        or _is_encoded_contact(value)
     ):
         return None
     return value
 
 
+def _is_encoded_contact(value: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9+/]{12,}={0,2}", value):
+        return False
+    try:
+        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return False
+    return _redact_contacts(decoded) != decoded
+
+
 def _redact_contacts(text: str) -> str:
     patterns = (
+        (
+            r"(?i)(?:简历|履历|联系(?:方式)?|邮箱|邮件|e-?mail|"
+            r"微信|wechat|wx|vx)[^\n]{0,40}?"
+            r"[A-Z0-9+/]{16,}={0,2}"
+        ),
         r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
         r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)",
         (
