@@ -79,12 +79,32 @@ class Repository:
             "CREATE INDEX IF NOT EXISTS idx_jobs_qualified "
             "ON jobs(candidate_id, qualified)"
         )
+        rewrite_run_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(rewrite_runs)").fetchall()
+        }
+        if "blocking_questions_json" not in rewrite_run_columns:
+            connection.execute(
+                "ALTER TABLE rewrite_runs ADD COLUMN "
+                "blocking_questions_json TEXT NOT NULL DEFAULT '[]'"
+            )
 
     @staticmethod
     def _row(row: sqlite3.Row | None, kind: str, object_id: str) -> dict[str, Any]:
         if row is None:
             raise NotFoundError(f"{kind}不存在: {object_id}")
         return dict(row)
+
+    @staticmethod
+    def _decode_rewrite_run(row: sqlite3.Row | None, run_id: str) -> dict[str, Any]:
+        data = Repository._row(row, "简历改写任务", run_id)
+        data["job_ids"] = json.loads(data.pop("job_ids_json"))
+        data["source_resume_ids"] = json.loads(data.pop("source_resume_ids_json"))
+        data["fact_answers"] = json.loads(data.pop("fact_answers_json"))
+        data["blocking_questions"] = json.loads(
+            data.pop("blocking_questions_json")
+        )
+        return data
 
     def create_candidate(
         self, display_name: str | None, target_roles: list[str], notes: str
@@ -288,6 +308,98 @@ class Repository:
         data["keyword_counts"] = json.loads(data.pop("keyword_counts_json"))
         data["manual_findings"] = json.loads(data.pop("manual_findings_json"))
         return data
+
+    def create_rewrite_run(
+        self, payload: dict[str, Any], artifact_dir: str
+    ) -> dict[str, Any]:
+        return self.create_rewrite_run_with_id(
+            new_id("rewrite_run"), payload, artifact_dir
+        )
+
+    def create_rewrite_run_with_id(
+        self, run_id: str, payload: dict[str, Any], artifact_dir: str
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO rewrite_runs(
+                    id, candidate_id, job_ids_json, source_resume_ids_json,
+                    output_name, status, fact_answers_json, blocking_questions_json,
+                    artifact_dir, attempt_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, '[]', ?, 0, ?, ?)
+                """,
+                (
+                    run_id,
+                    payload["candidate_id"],
+                    json.dumps(payload["job_ids"], ensure_ascii=False),
+                    json.dumps(payload["source_resume_ids"], ensure_ascii=False),
+                    payload["output_name"],
+                    json.dumps(payload.get("fact_answers", []), ensure_ascii=False),
+                    artifact_dir,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_rewrite_run(run_id)
+
+    def get_rewrite_run(self, run_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM rewrite_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return self._decode_rewrite_run(row, run_id)
+
+    def transition_rewrite_run(
+        self,
+        run_id: str,
+        expected_statuses: set[str],
+        new_status: str,
+        *,
+        fact_answers: list[dict[str, Any]] | None = None,
+        blocking_questions: list[dict[str, Any]] | None = None,
+        error_code: str | None = None,
+        error_summary: str = "",
+        increment_attempt: bool = False,
+    ) -> dict[str, Any]:
+        if not expected_statuses:
+            raise ValueError("expected_statuses 不能为空")
+        assignments = ["status = ?", "updated_at = ?", "error_code = ?", "error_summary = ?"]
+        parameters: list[Any] = [new_status, utc_now(), error_code, error_summary]
+        if fact_answers is not None:
+            assignments.append("fact_answers_json = ?")
+            parameters.append(json.dumps(fact_answers, ensure_ascii=False))
+        if blocking_questions is not None:
+            assignments.append("blocking_questions_json = ?")
+            parameters.append(json.dumps(blocking_questions, ensure_ascii=False))
+        if increment_attempt:
+            assignments.append("attempt_count = attempt_count + 1")
+        allowed = sorted(expected_statuses)
+        status_placeholders = ", ".join("?" for _ in allowed)
+        parameters.extend([run_id, *allowed])
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE rewrite_runs SET {', '.join(assignments)} "
+                f"WHERE id = ? AND status IN ({status_placeholders})",
+                parameters,
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("非法的简历改写状态迁移")
+        return self.get_rewrite_run(run_id)
+
+    def recover_interrupted_rewrite_runs(self) -> int:
+        now = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE rewrite_runs
+                SET status='FAILED', error_code='INTERRUPTED',
+                    error_summary='上次进程在运行期间中断', updated_at=?
+                WHERE status='RUNNING'
+                """,
+                (now,),
+            )
+        return cursor.rowcount
 
     def create_delivery_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         candidate_id = payload.get("candidate_id")

@@ -63,3 +63,25 @@ CREATE TABLE IF NOT EXISTS delivery_events (
 CREATE INDEX IF NOT EXISTS idx_delivery_events_time ON delivery_events(event_at);
 CREATE INDEX IF NOT EXISTS idx_delivery_events_candidate ON delivery_events(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_delivery_events_type ON delivery_events(event_type);
+
+CREATE TABLE IF NOT EXISTS rewrite_runs (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+    job_ids_json TEXT NOT NULL,
+    source_resume_ids_json TEXT NOT NULL,
+    output_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('QUEUED', 'RUNNING', 'NEEDS_FACTS', 'READY', 'FAILED')),
+    fact_answers_json TEXT NOT NULL DEFAULT '[]',
+    blocking_questions_json TEXT NOT NULL DEFAULT '[]',
+    artifact_dir TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    error_code TEXT,
+    error_summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rewrite_runs_candidate
+ON rewrite_runs(candidate_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_rewrite_runs_status
+ON rewrite_runs(status, updated_at);
