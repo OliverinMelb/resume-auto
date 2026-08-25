@@ -16,3 +16,4 @@ resume_agent.db-shm
 resume_agent.db-wal
 resume-agent-exports/
 .worktrees/
+analysis/runs/
