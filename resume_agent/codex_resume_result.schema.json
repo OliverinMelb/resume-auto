@@ -1,0 +1,89 @@
+{
+  "$defs": {
+    "ClaimAudit": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {"title": "Claim", "type": "string"},
+        "source_resume_ids": {"items": {"type": "string"}, "title": "Source Resume Ids", "type": "array"},
+        "source_quotes": {"items": {"type": "string"}, "title": "Source Quotes", "type": "array"},
+        "job_ids": {"items": {"type": "string"}, "title": "Job Ids", "type": "array"},
+        "change_type": {"enum": ["unchanged", "compressed", "reordered", "strengthened"], "title": "Change Type", "type": "string"},
+        "fact_status": {"enum": ["source_verified", "user_confirmed", "unverified"], "title": "Fact Status", "type": "string"},
+        "measurement_basis": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Measurement Basis"}
+      },
+      "required": ["claim", "source_resume_ids", "source_quotes", "job_ids", "change_type", "fact_status"],
+      "title": "ClaimAudit",
+      "type": "object"
+    },
+    "MissingInformation": {
+      "additionalProperties": false,
+      "properties": {
+        "question_id": {"title": "Question Id", "type": "string"},
+        "question": {"title": "Question", "type": "string"},
+        "blocking": {"title": "Blocking", "type": "boolean"},
+        "reason": {"title": "Reason", "type": "string"}
+      },
+      "required": ["question_id", "question", "blocking", "reason"],
+      "title": "MissingInformation",
+      "type": "object"
+    },
+    "RewriteReason": {
+      "additionalProperties": false,
+      "properties": {
+        "rewritten_text": {"title": "Rewritten Text", "type": "string"},
+        "reason": {"title": "Reason", "type": "string"},
+        "source_resume_ids": {"items": {"type": "string"}, "title": "Source Resume Ids", "type": "array"},
+        "job_ids": {"items": {"type": "string"}, "title": "Job Ids", "type": "array"}
+      },
+      "required": ["rewritten_text", "reason", "source_resume_ids", "job_ids"],
+      "title": "RewriteReason",
+      "type": "object"
+    },
+    "RiskItem": {
+      "additionalProperties": false,
+      "properties": {
+        "severity": {"enum": ["low", "medium", "high"], "title": "Severity", "type": "string"},
+        "text": {"title": "Text", "type": "string"}
+      },
+      "required": ["severity", "text"],
+      "title": "RiskItem",
+      "type": "object"
+    },
+    "ScoreItem": {
+      "additionalProperties": false,
+      "properties": {
+        "dimension": {"title": "Dimension", "type": "string"},
+        "score": {"maximum": 100.0, "minimum": 0.0, "title": "Score", "type": "number"},
+        "evidence": {"items": {"type": "string"}, "title": "Evidence", "type": "array"}
+      },
+      "required": ["dimension", "score", "evidence"],
+      "title": "ScoreItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {"title": "Verdict", "type": "string"},
+    "scorecard": {"items": {"$ref": "#/$defs/ScoreItem"}, "title": "Scorecard", "type": "array"},
+    "risks": {"items": {"$ref": "#/$defs/RiskItem"}, "title": "Risks", "type": "array"},
+    "missing_information": {"items": {"$ref": "#/$defs/MissingInformation"}, "title": "Missing Information", "type": "array"},
+    "rewritten_resume_markdown": {"title": "Rewritten Resume Markdown", "type": "string"},
+    "rewrite_reasons": {"items": {"$ref": "#/$defs/RewriteReason"}, "title": "Rewrite Reasons", "type": "array"},
+    "depth_recommendations": {"items": {"type": "string"}, "title": "Depth Recommendations", "type": "array"},
+    "interviewer_probes": {"items": {"type": "string"}, "title": "Interviewer Probes", "type": "array"},
+    "claim_audit": {"items": {"$ref": "#/$defs/ClaimAudit"}, "title": "Claim Audit", "type": "array"}
+  },
+  "required": [
+    "verdict",
+    "scorecard",
+    "risks",
+    "missing_information",
+    "rewritten_resume_markdown",
+    "rewrite_reasons",
+    "depth_recommendations",
+    "interviewer_probes",
+    "claim_audit"
+  ],
+  "title": "CodexRewriteResult",
+  "type": "object"
+}
