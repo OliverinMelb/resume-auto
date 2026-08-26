@@ -430,6 +430,66 @@ class RewritePipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.make_pipeline(FakeCodexRunner(result_for(resume["id"], job_one["id"])), FakeRenderer()).run(request)
 
+    def test_obvious_cross_direction_job_titles_block_before_model_and_attempt(self):
+        sales_job = self.repository.create_job({
+            "candidate_id": self.candidate["id"], "source": "manual",
+            "title": "Sales Manager", "detail": "Lead enterprise sales",
+            "company": "Example",
+        })
+        runner = FakeCodexRunner(result_for(self.resume["id"], self.job["id"]))
+        pipeline = self.make_pipeline(runner, FakeRenderer())
+        run = pipeline.run(self.request(job_ids=[self.job["id"], sales_job["id"]]))
+
+        self.assertEqual((run["status"], run["attempt_count"], runner.run_count), ("NEEDS_FACTS", 0, 0))
+        self.assertEqual(len(run["blocking_questions"]), 1)
+        blocker_id = run["blocking_questions"][0]["question_id"]
+        self.assertRegex(blocker_id, r"^gap-[0-9a-f]{12}$")
+        artifact_dir = Path(run["artifact_dir"])
+        snapshot = json.loads((artifact_dir / "input-snapshot.json").read_text("utf-8"))
+        self.assertEqual(snapshot["preflight_blocker_ids"], [blocker_id])
+        for name in ("result.json", "resume.md", "resume.pdf"):
+            self.assertFalse((artifact_dir / name).exists(), name)
+        self.assertEqual(
+            [event["event_code"] for event in self._audit_events(run)],
+            ["RUN_CREATED", "FACTS_REQUIRED"],
+        )
+
+        unchanged = pipeline.resume(
+            run["id"],
+            [FactAnswer(
+                question_id=blocker_id,
+                answer="Keep both jobs",
+                source_note="Candidate requested the same divergent selection",
+            )],
+        )
+        self.assertEqual(
+            (unchanged["status"], unchanged["attempt_count"], runner.run_count),
+            ("NEEDS_FACTS", 0, 0),
+        )
+        self.assertEqual(unchanged["fact_answers"], [])
+
+    def test_coherent_and_unknown_engineering_job_titles_reach_model(self):
+        llm_job = self.repository.create_job({
+            "candidate_id": self.candidate["id"], "source": "manual",
+            "title": "LLM Platform Engineer", "detail": "Build model platform",
+            "company": "Example",
+        })
+        backend_job = self.repository.create_job({
+            "candidate_id": self.candidate["id"], "source": "manual",
+            "title": "Backend Engineer", "detail": "Build platform services",
+            "company": "Example",
+        })
+        for jobs in (
+            [self.job["id"], llm_job["id"]],
+            [self.job["id"], backend_job["id"]],
+        ):
+            with self.subTest(jobs=jobs):
+                runner = FakeCodexRunner(result_for(self.resume["id"], self.job["id"]))
+                run = self.make_pipeline(runner, FakeRenderer()).run(
+                    self.request(job_ids=jobs)
+                )
+                self.assertEqual((run["status"], runner.run_count), ("READY", 1))
+
     def test_runner_error_fails_without_deployable_artifacts_or_private_error(self):
         failure = CodexRunError("CODEX_PROCESS_ERROR", "private secret text")
         run = self.make_pipeline(FakeCodexRunner(failure), FakeRenderer()).run(self.request())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import sqlite3
 import shutil
@@ -23,6 +24,9 @@ from resume_agent.rewrite_prompt import build_codex_task, render_jd_evidence
 from resume_agent.rewrite_schemas import CodexRewriteResult, FactAnswer, RewriteRequest
 
 PIPELINE_SCHEMA_EXECUTION_VERSION = "resume-rewrite-pipeline/v1"
+MULTI_JOB_TITLE_FAMILY_BLOCKER_ID = (
+    "gap-" + hashlib.sha256(b"multi-job-title-family").hexdigest()[:12]
+)
 
 
 class ResumeRewritePipeline:
@@ -91,6 +95,8 @@ class ResumeRewritePipeline:
         run = self.repository.get_rewrite_run(run_id)
         if run["status"] != "NEEDS_FACTS":
             raise ValueError("only NEEDS_FACTS runs can resume")
+        if _has_title_family_blocker(run["blocking_questions"]):
+            return self._decorate_run(run)
         artifacts = self._open_artifacts(run)
         self._validate_submitted_answers(run, fact_answers)
         merged = _merge_fact_answers(run["fact_answers"], fact_answers)
@@ -121,6 +127,8 @@ class ResumeRewritePipeline:
         except (NotFoundError, ValueError):
             self._fail_validation(run, artifacts)
             raise ValueError("rewrite input is invalid") from None
+        if materials["preflight_blockers"]:
+            return self._block_preflight(run, artifacts, materials)
         run = self.repository.transition_rewrite_run(
             run["id"], {"QUEUED"}, "RUNNING", increment_attempt=True,
             owner_token=self._owner_token,
@@ -149,6 +157,7 @@ class ResumeRewritePipeline:
             raise ValueError("all jobs must belong to the candidate")
         if any(resume["candidate_id"] != candidate["id"] for resume in resumes):
             raise ValueError("all source resumes must belong to the candidate")
+        preflight_blockers = _title_family_blockers(jobs)
         target_role = jobs[0]["title"] if len(jobs) == 1 else _target_role(candidate)
         keyword_counts = analyze_jobs(jobs)
         report = self.repository.create_research_report(
@@ -169,6 +178,9 @@ class ResumeRewritePipeline:
                 for resume in resumes
             ],
             "research_report_id": report["id"],
+            "preflight_blocker_ids": [
+                blocker["question_id"] for blocker in preflight_blockers
+            ],
             "fact_answers": [
                 FactAnswer.model_validate(answer).model_dump()
                 for answer in run["fact_answers"]
@@ -176,7 +188,7 @@ class ResumeRewritePipeline:
             "attempt_context": {
                 "attempt_count": (
                     run["attempt_count"] + 1
-                    if run["status"] == "QUEUED"
+                    if run["status"] == "QUEUED" and not preflight_blockers
                     else run["attempt_count"]
                 ),
                 "resumed": run["status"] == "RUNNING",
@@ -185,6 +197,13 @@ class ResumeRewritePipeline:
         artifacts.write_json("input-snapshot.json", snapshot)
         jd_evidence = render_jd_evidence(jobs, keyword_counts)
         artifacts.write_text("jd-evidence.md", jd_evidence)
+        if preflight_blockers:
+            return {
+                "jobs": jobs,
+                "resumes": resumes,
+                "task": None,
+                "preflight_blockers": preflight_blockers,
+            }
         base_prompt = build_external_resume_prompt(candidate, resumes, report, jobs, "")
         task = build_codex_task(
             base_prompt=base_prompt,
@@ -193,7 +212,33 @@ class ResumeRewritePipeline:
             allowed_job_ids=job_ids,
         )
         artifacts.write_text("codex-task.md", task)
-        return {"jobs": jobs, "resumes": resumes, "task": task}
+        return {
+            "jobs": jobs,
+            "resumes": resumes,
+            "task": task,
+            "preflight_blockers": [],
+        }
+
+    def _block_preflight(
+        self, run: dict, artifacts: RunArtifacts, materials: dict[str, Any]
+    ) -> dict:
+        blockers = materials["preflight_blockers"]
+        artifacts.remove_if_exists("result.json")
+        self._remove_deployable_artifacts(artifacts)
+        artifacts.append_audit(
+            run_id=run["id"], status="NEEDS_FACTS", event_code="FACTS_REQUIRED",
+            question_ids=[blocker["question_id"] for blocker in blockers],
+            source_ids=[
+                item["id"] for item in materials["resumes"] + materials["jobs"]
+            ],
+            gate_outcome="BLOCKED",
+            claim_count=0,
+        )
+        updated = self.repository.transition_rewrite_run(
+            run["id"], {"QUEUED"}, "NEEDS_FACTS",
+            blocking_questions=blockers,
+        )
+        return self._decorate_run(updated)
 
     def _run_with_materials(
         self, run: dict, artifacts: RunArtifacts, materials: dict[str, Any]
@@ -357,6 +402,54 @@ def _target_role(candidate: dict) -> str:
     if not roles or not isinstance(roles[0], str) or not roles[0].strip():
         raise ValueError("multi-job rewrites require a candidate target role")
     return roles[0]
+
+
+def _title_family_blockers(jobs: list[dict]) -> list[dict[str, Any]]:
+    if len(jobs) < 2:
+        return []
+    families = {
+        family for job in jobs
+        if (family := _obvious_title_family(str(job.get("title", "")))) is not None
+    }
+    if families != {"AI_AGENT_ENGINEERING", "SALES_BD"}:
+        return []
+    return [{
+        "question_id": MULTI_JOB_TITLE_FAMILY_BLOCKER_ID,
+        "question": "Please reselect jobs from one title family and create a new run.",
+        "blocking": True,
+        "reason": "Selected job titles span AI/Agent engineering and Sales/BD.",
+    }]
+
+
+def _obvious_title_family(title: str) -> str | None:
+    normalized = " ".join(title.casefold().split())
+    sales_bd = (
+        re.search(r"(?:^|[^a-z0-9])(?:sales|bd)(?:[^a-z0-9]|$)", normalized)
+        or "business development" in normalized
+        or "account executive" in normalized
+        or any(marker in normalized for marker in ("销售", "商务拓展", "业务拓展"))
+    )
+    if sales_bd:
+        return "SALES_BD"
+    ai_agent = (
+        re.search(r"(?:^|[^a-z0-9])ai(?:[^a-z0-9]|$)", normalized)
+        or any(marker in normalized for marker in ("agent", "llm", "人工智能", "智能体", "大模型"))
+    )
+    engineering = any(
+        marker in normalized
+        for marker in (
+            "engineer", "developer", "development", "architect",
+            "工程师", "开发", "架构",
+        )
+    )
+    return "AI_AGENT_ENGINEERING" if ai_agent and engineering else None
+
+
+def _has_title_family_blocker(blockers: list[dict]) -> bool:
+    return any(
+        blocker.get("question_id") == MULTI_JOB_TITLE_FAMILY_BLOCKER_ID
+        for blocker in blockers
+    )
 
 
 def _merge_fact_answers(existing: list[dict], answers: list[FactAnswer]) -> list[dict]:
