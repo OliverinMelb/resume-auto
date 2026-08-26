@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import shutil
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from resume_agent.codex_runner import CodexRunError
-from resume_agent.repository import new_id
+from resume_agent.repository import NotFoundError, new_id
 from resume_agent.research import analyze_jobs, build_external_resume_prompt
 from resume_agent.resume_renderer import RenderError
 from resume_agent.rewrite_artifacts import RunArtifacts
@@ -32,36 +33,49 @@ class ResumeRewritePipeline:
         self.renderer = renderer
 
     def run(self, request: RewriteRequest) -> dict:
+        try:
+            self.repository.get_candidate(request.candidate_id)
+        except NotFoundError:
+            raise ValueError("candidate is unavailable") from None
         run_id = new_id("rewrite_run")
         artifacts = RunArtifacts.create(self.runs_root, run_id)
-        run = self.repository.create_rewrite_run_with_id(
-            run_id, request.model_dump(), str(artifacts.directory)
-        )
+        try:
+            run = self.repository.create_rewrite_run_with_id(
+                run_id, request.model_dump(), str(artifacts.directory)
+            )
+        except sqlite3.Error:
+            self._remove_created_artifacts(artifacts)
+            raise ValueError("unable to create rewrite run") from None
         return self._execute(run, artifacts)
 
     def resume(self, run_id: str, fact_answers: list[FactAnswer]) -> dict:
         run = self.repository.get_rewrite_run(run_id)
         if run["status"] != "NEEDS_FACTS":
             raise ValueError("only NEEDS_FACTS runs can resume")
+        artifacts = self._open_artifacts(run)
+        self._validate_submitted_answers(run, fact_answers)
         merged = _merge_fact_answers(run["fact_answers"], fact_answers)
         run = self.repository.transition_rewrite_run(
             run_id, {"NEEDS_FACTS"}, "RUNNING",
             fact_answers=merged, increment_attempt=True,
         )
-        return self._execute_running(run, RunArtifacts.open(self.runs_root, run_id))
+        return self._execute_running(run, artifacts)
 
     def get(self, run_id: str) -> dict:
-        return self._decorate_run(self.repository.get_rewrite_run(run_id))
+        run = self.repository.get_rewrite_run(run_id)
+        self._open_artifacts(run)
+        return self._decorate_run(run)
 
     def available(self) -> bool:
         return self.codex_runner.available() and self.renderer.available()
 
     def _execute(self, run: dict, artifacts: RunArtifacts) -> dict:
         try:
+            artifacts = self._open_artifacts(run)
             materials = self._prepare(run, artifacts)
-        except ValueError:
+        except (NotFoundError, ValueError):
             self._fail_validation(run, artifacts)
-            raise
+            raise ValueError("rewrite input is invalid") from None
         run = self.repository.transition_rewrite_run(
             run["id"], {"QUEUED"}, "RUNNING", increment_attempt=True
         )
@@ -69,10 +83,11 @@ class ResumeRewritePipeline:
 
     def _execute_running(self, run: dict, artifacts: RunArtifacts) -> dict:
         try:
+            artifacts = self._open_artifacts(run)
             materials = self._prepare(run, artifacts)
-        except ValueError:
+        except (NotFoundError, ValueError):
             self._fail_validation(run, artifacts)
-            raise
+            raise ValueError("rewrite input is invalid") from None
         return self._run_with_materials(run, artifacts, materials)
 
     def _prepare(self, run: dict, artifacts: RunArtifacts) -> dict[str, Any]:
@@ -176,9 +191,15 @@ class ResumeRewritePipeline:
             temporary.unlink(missing_ok=True)
 
     def _fail_validation(self, run: dict, artifacts: RunArtifacts) -> None:
-        self._fail(run, artifacts, InvalidModelResult("invalid request state"))
+        self._fail(
+            run, artifacts, InvalidModelResult("invalid request state"),
+            error_code="VALIDATION_ERROR",
+        )
 
-    def _fail(self, run: dict, artifacts: RunArtifacts, error: Exception) -> None:
+    def _fail(
+        self, run: dict, artifacts: RunArtifacts, error: Exception,
+        error_code: str | None = None,
+    ) -> None:
         artifacts.remove_if_exists("resume.md")
         artifacts.remove_if_exists("resume.pdf")
         preview_dir = artifacts.directory / ".preview"
@@ -189,7 +210,7 @@ class ResumeRewritePipeline:
             if resolved_preview.parent != artifacts.directory.resolve():
                 raise ValueError("preview directory escapes run artifacts")
             shutil.rmtree(resolved_preview)
-        code = _safe_error_code(error)
+        code = error_code or _safe_error_code(error)
         artifacts.append_audit(
             run_id=run["id"], status="FAILED", event_code="RUN_FAILED", error_code=code,
             error_safe_hash=_hash_text(code),
@@ -197,6 +218,35 @@ class ResumeRewritePipeline:
         self.repository.transition_rewrite_run(
             run["id"], {"QUEUED", "RUNNING"}, "FAILED", error_code=code
         )
+
+    def _open_artifacts(self, run: dict) -> RunArtifacts:
+        expected = self.runs_root.resolve() / run["id"]
+        stored = Path(run["artifact_dir"]).resolve()
+        if stored != expected:
+            self._fail_artifact_location(run)
+            raise ValueError("rewrite artifacts are invalid")
+        return RunArtifacts.open(self.runs_root, run["id"])
+
+    def _fail_artifact_location(self, run: dict) -> None:
+        self.repository.transition_rewrite_run(
+            run["id"], {run["status"]}, "FAILED", error_code="VALIDATION_ERROR"
+        )
+
+    def _validate_submitted_answers(
+        self, run: dict, fact_answers: list[FactAnswer]
+    ) -> None:
+        question_ids = [answer.question_id for answer in fact_answers]
+        if len(question_ids) != len(set(question_ids)):
+            raise ValueError("duplicate fact answers are not allowed")
+        blockers = {item["question_id"] for item in run["blocking_questions"]}
+        if not set(question_ids) <= blockers:
+            raise ValueError("fact answers must address current blockers")
+
+    def _remove_created_artifacts(self, artifacts: RunArtifacts) -> None:
+        expected = self.runs_root.resolve() / artifacts.directory.name
+        if artifacts.directory.resolve() != expected:
+            raise ValueError("created artifacts are invalid")
+        shutil.rmtree(expected)
 
     @staticmethod
     def _decorate_run(run: dict) -> dict:

@@ -14,11 +14,13 @@ from resume_agent.resume_renderer import RenderError, RenderResult
 class FakeCodexRunner:
     def __init__(self, result):
         self.result = result
+        self.run_count = 0
 
     def available(self):
         return True
 
     def run(self, task, schema_path, output_path, project_root):
+        self.run_count += 1
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -28,6 +30,11 @@ class TempOutputFailureRunner(FakeCodexRunner):
     def run(self, task, schema_path, output_path, project_root):
         output_path.write_text('{"private": "partial output"}', encoding="utf-8")
         raise CodexRunError("CODEX_PROCESS_ERROR", "private runner detail")
+
+
+class InsertionFailingRepository(Repository):
+    def create_rewrite_run_with_id(self, run_id, payload, artifact_dir):
+        raise sqlite3.IntegrityError("private database detail")
 
 
 class FakeRenderer:
@@ -139,7 +146,49 @@ class RewritePipelineTests(unittest.TestCase):
             ).fetchone()
         finally:
             connection.close()
-        self.assertEqual((status, error_code), ("FAILED", "INVALID_MODEL_RESULT"))
+        self.assertEqual((status, error_code), ("FAILED", "VALIDATION_ERROR"))
+
+    def test_unknown_candidate_creates_no_run_or_artifact_directory(self):
+        request = self.request(candidate_id="candidate_" + "f" * 32)
+        with self.assertRaises(ValueError):
+            self.make_pipeline(FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), FakeRenderer()).run(request)
+        connection = sqlite3.connect(self.repository.database_path)
+        try:
+            count = connection.execute("SELECT COUNT(*) FROM rewrite_runs").fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(count, 0)
+        self.assertFalse(self.runs_root.exists())
+
+    def test_unknown_resume_marks_preallocated_run_failed_without_attempt(self):
+        unknown_resume_id = "source_resume_" + "e" * 32
+        with self.assertRaises(ValueError):
+            self.make_pipeline(FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), FakeRenderer()).run(self.request(source_resume_ids=[unknown_resume_id]))
+        run = self._latest_run()
+        self.assertEqual((run["status"], run["error_code"], run["attempt_count"]), ("FAILED", "VALIDATION_ERROR", 0))
+        self._assert_no_deployable_artifacts(run)
+        self.assertNotIn(unknown_resume_id, (Path(run["artifact_dir"]) / "audit.md").read_text("utf-8"))
+
+    def test_unknown_job_marks_preallocated_run_failed_without_attempt(self):
+        unknown_job_id = "job_" + "d" * 32
+        with self.assertRaises(ValueError):
+            self.make_pipeline(FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), FakeRenderer()).run(self.request(job_ids=[unknown_job_id]))
+        run = self._latest_run()
+        self.assertEqual((run["status"], run["error_code"], run["attempt_count"]), ("FAILED", "VALIDATION_ERROR", 0))
+        self._assert_no_deployable_artifacts(run)
+        self.assertNotIn(unknown_job_id, (Path(run["artifact_dir"]) / "audit.md").read_text("utf-8"))
+
+    def test_database_insert_failure_removes_preallocated_artifact_directory(self):
+        root = Path(self.temp_dir.name) / "insert-failure"
+        repository = InsertionFailingRepository(root / "test.db")
+        candidate = repository.create_candidate("Candidate", ["AI Agent"], "")
+        resume = repository.create_source_resume(candidate["id"], "Agent", "Built LangGraph agent workflows")
+        job = repository.create_job({"candidate_id": candidate["id"], "source": "manual", "title": "AI Agent", "detail": "Build workflows", "company": ""})
+        request = RewriteRequest(candidate_id=candidate["id"], job_ids=[job["id"]], source_resume_ids=[resume["id"]], output_name="resume.pdf")
+        with self.assertRaises(ValueError):
+            ResumeRewritePipeline(repository, root / "analysis" / "runs", Path("resume_agent/codex_resume_result.schema.json"), Path.cwd(), FakeCodexRunner(result_for(resume["id"], job["id"])), FakeRenderer()).run(request)
+        runs_root = root / "analysis" / "runs"
+        self.assertEqual(list(runs_root.iterdir()), [])
 
     def test_multi_job_requires_candidate_target_role(self):
         self.repository.get_candidate(self.candidate["id"])
@@ -211,6 +260,72 @@ class RewritePipelineTests(unittest.TestCase):
         run = pipeline.run(self.request())
         with self.assertRaises(ValueError):
             pipeline.resume(run["id"], [])
+
+    def test_resume_rejects_answers_for_questions_not_currently_blocking(self):
+        runner = FakeCodexRunner(metric_result(self.resume["id"], self.job["id"]))
+        pipeline = self.make_pipeline(runner, FakeRenderer())
+        first = pipeline.run(self.request())
+        with self.assertRaises(ValueError):
+            pipeline.resume(first["id"], [FactAnswer(question_id="gap-" + "a" * 12, answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")])
+        unchanged = pipeline.get(first["id"])
+        self.assertEqual((unchanged["status"], unchanged["attempt_count"], unchanged["fact_answers"]), ("NEEDS_FACTS", 1, []))
+        self.assertEqual(runner.run_count, 1)
+
+    def test_resume_rejects_duplicate_blocker_answers(self):
+        pipeline = self.make_pipeline(FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])), FakeRenderer())
+        first = pipeline.run(self.request())
+        answer = FactAnswer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")
+        with self.assertRaises(ValueError):
+            pipeline.resume(first["id"], [answer, answer])
+        unchanged = pipeline.get(first["id"])
+        self.assertEqual((unchanged["status"], unchanged["attempt_count"], unchanged["fact_answers"]), ("NEEDS_FACTS", 1, []))
+
+    def test_tampered_artifact_dir_fails_resume_without_writing_forged_path(self):
+        pipeline = self.make_pipeline(FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])), FakeRenderer())
+        first = pipeline.run(self.request())
+        forged = Path(self.temp_dir.name) / "forged"
+        forged.mkdir()
+        sentinel = forged / "sentinel.txt"
+        sentinel.write_text("unchanged", encoding="utf-8")
+        connection = sqlite3.connect(self.repository.database_path)
+        try:
+            connection.execute("UPDATE rewrite_runs SET artifact_dir = ? WHERE id = ?", (str(forged), first["id"]))
+            connection.commit()
+        finally:
+            connection.close()
+        answer = FactAnswer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")
+        with self.assertRaises(ValueError):
+            pipeline.resume(first["id"], [answer])
+        self.assertEqual(sentinel.read_text("utf-8"), "unchanged")
+        self.assertEqual(self._latest_run()["status"], "FAILED")
+
+    def test_symlinked_run_directory_fails_resume_without_escaping_runs_root(self):
+        pipeline = self.make_pipeline(FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])), FakeRenderer())
+        first = pipeline.run(self.request())
+        artifact_dir = Path(first["artifact_dir"])
+        escaped = Path(self.temp_dir.name) / "escaped-run"
+        artifact_dir.rename(escaped)
+        artifact_dir.symlink_to(escaped, target_is_directory=True)
+        before = (escaped / "audit.md").read_text("utf-8")
+        answer = FactAnswer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")
+        with self.assertRaises(ValueError):
+            pipeline.resume(first["id"], [answer])
+        self.assertEqual((escaped / "audit.md").read_text("utf-8"), before)
+        self.assertEqual(self._latest_run()["status"], "FAILED")
+
+    def _latest_run(self):
+        connection = sqlite3.connect(self.repository.database_path)
+        try:
+            run_id = connection.execute("SELECT id FROM rewrite_runs ORDER BY created_at DESC LIMIT 1").fetchone()[0]
+        finally:
+            connection.close()
+        return self.repository.get_rewrite_run(run_id)
+
+    def _assert_no_deployable_artifacts(self, run):
+        directory = Path(run["artifact_dir"])
+        for name in ("resume.md", "resume.pdf"):
+            with self.subTest(name=name):
+                self.assertFalse((directory / name).exists())
 
     def test_duplicate_ids_are_processed_once_in_request_order(self):
         pipeline = self.make_pipeline(FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), FakeRenderer())
