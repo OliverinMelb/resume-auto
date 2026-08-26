@@ -9,14 +9,21 @@ from resume_agent.rewrite_prompt import build_codex_task, render_jd_evidence
 from resume_agent.rewrite_schemas import FactAnswer
 
 
+RUN_ID = "rewrite_run_" + "a" * 32
+OTHER_RUN_ID = "rewrite_run_" + "b" * 32
+SOURCE_RESUME_ID = "source_resume_" + "c" * 32
+JOB_ID = "job_" + "d" * 32
+QUESTION_ID = "metric-" + "e" * 12
+
+
 class RewriteSupportTests(unittest.TestCase):
     def test_artifacts_stay_under_runs_root_and_write_utf8_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            artifacts = RunArtifacts.create(root, "rewrite_run_abc")
+            artifacts = RunArtifacts.create(root, RUN_ID)
             artifacts.write_json("input-snapshot.json", {"name": "曹申傲"})
             artifacts.append_audit(
-                run_id="rewrite_run_abc",
+                run_id=RUN_ID,
                 status="RUNNING",
                 event_code="RUN_STARTED",
             )
@@ -29,7 +36,7 @@ class RewriteSupportTests(unittest.TestCase):
             self.assertEqual(
                 json.loads((artifacts.directory / "audit.md").read_text("utf-8")),
                 {
-                    "run_id": "rewrite_run_abc",
+                    "run_id": RUN_ID,
                     "status": "RUNNING",
                     "event_code": "RUN_STARTED",
                 },
@@ -43,17 +50,21 @@ class RewriteSupportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 RunArtifacts.create(root, "../outside")
 
-            artifacts = RunArtifacts.create(root, "rewrite_run_abc")
+            with self.assertRaises(ValueError):
+                RunArtifacts.create(root, "run_" + "a" * 32)
+
+            artifacts = RunArtifacts.create(root, RUN_ID)
+            self.assertEqual(RunArtifacts.open(root, RUN_ID), artifacts)
             artifacts.append_audit(
-                run_id="rewrite_run_abc",
+                run_id=RUN_ID,
                 status="FAILED",
-                event_code="FACT_GATE_BLOCKED",
+                event_code="FACTS_REQUIRED",
                 duration_ms=42,
                 content_hash="a" * 64,
                 error_safe_hash="b" * 64,
-                error_code="FACTS_REQUIRED",
-                question_ids=["metric_1"],
-                source_ids=["source_resume_1", "job_1"],
+                error_code="VALIDATION_ERROR",
+                question_ids=[QUESTION_ID],
+                source_ids=[SOURCE_RESUME_ID, JOB_ID],
             )
             event = json.loads((artifacts.directory / "audit.md").read_text("utf-8"))
             self.assertEqual(
@@ -73,28 +84,54 @@ class RewriteSupportTests(unittest.TestCase):
             self.assertNotIn("曹申傲", json.dumps(event, ensure_ascii=False))
             with self.assertRaises(TypeError):
                 artifacts.append_audit(
-                    run_id="rewrite_run_abc",
+                    run_id=RUN_ID,
                     status="FAILED",
-                    event_code="FAILED",
+                    event_code="RUN_FAILED",
                     message="完整简历和 JD 原文",
                 )
             with self.assertRaises(ValueError):
                 artifacts.append_audit(
-                    run_id="rewrite_run_abc",
+                    run_id=RUN_ID,
                     status="FAILED",
                     event_code="contains free text",
                 )
             with self.assertRaises(ValueError):
                 artifacts.append_audit(
-                    run_id="rewrite_run_other",
+                    run_id=OTHER_RUN_ID,
                     status="FAILED",
-                    event_code="FACT_GATE_BLOCKED",
+                    event_code="FACTS_REQUIRED",
                 )
+            with self.assertRaises(ValueError):
+                artifacts.append_audit(
+                    run_id=RUN_ID,
+                    status="FAILED",
+                    event_code="UNKNOWN_EVENT",
+                )
+            with self.assertRaises(ValueError):
+                artifacts.append_audit(
+                    run_id=RUN_ID,
+                    status="FAILED",
+                    event_code="RUN_FAILED",
+                    error_code="UNKNOWN_ERROR",
+                )
+            for field, value in (
+                ("question_ids", ["metric_123abc"]),
+                ("source_ids", ["13812345678"]),
+                ("source_ids", ["candidate_abcdef"]),
+            ):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValueError):
+                        artifacts.append_audit(
+                            run_id=RUN_ID,
+                            status="FAILED",
+                            event_code="RUN_FAILED",
+                            **{field: value},
+                        )
             artifacts.remove_if_exists("resume.pdf")
 
     def test_text_and_json_writers_reject_binary_and_audit_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
-            artifacts = RunArtifacts.create(Path(directory), "rewrite_run_abc")
+            artifacts = RunArtifacts.create(Path(directory), RUN_ID)
             with self.assertRaises(ValueError):
                 artifacts.write_text("resume.pdf", "not a PDF")
             with self.assertRaises(ValueError):

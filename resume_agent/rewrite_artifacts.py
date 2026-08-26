@@ -15,11 +15,32 @@ ALLOWED_ARTIFACTS = {
     "resume.md",
     "resume.pdf",
 }
-RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-AUDIT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
-AUDIT_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+RUN_ID_PATTERN = re.compile(r"^rewrite_run_[0-9a-f]{32}$")
+SOURCE_ID_PATTERN = re.compile(r"^(?:source_resume|job)_[0-9a-f]{32}$")
+QUESTION_ID_PATTERN = re.compile(r"^(?:metric|gap|conflict)-[0-9a-f]{12}$")
 SHA256_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
 AUDIT_STATUSES = {"QUEUED", "RUNNING", "NEEDS_FACTS", "READY", "FAILED"}
+EVENT_CODES = {
+    "RUN_CREATED",
+    "RUN_STARTED",
+    "MODEL_COMPLETED",
+    "FACTS_REQUIRED",
+    "FACTS_ACCEPTED",
+    "RENDER_COMPLETED",
+    "RUN_READY",
+    "RUN_FAILED",
+    "RUN_RECOVERED",
+}
+ERROR_CODES = {
+    "CODEX_UNAVAILABLE",
+    "CODEX_TIMEOUT",
+    "CODEX_PROCESS_ERROR",
+    "INVALID_MODEL_RESULT",
+    "RENDER_ERROR",
+    "RENDER_VALIDATION_ERROR",
+    "INTERRUPTED",
+    "VALIDATION_ERROR",
+}
 TEXT_ARTIFACTS = ALLOWED_ARTIFACTS - {"audit.md", "resume.pdf"}
 
 
@@ -102,20 +123,21 @@ class RunArtifacts:
         question_ids: Sequence[str] | None = None,
         source_ids: Sequence[str] | None = None,
     ) -> None:
-        self._validate_audit_id(run_id, "run_id")
+        self._validate_run_id(run_id)
         if run_id != self.directory.name:
             raise ValueError("run_id 与运行目录不匹配")
         if status not in AUDIT_STATUSES:
             raise ValueError("不允许的审计状态")
-        self._validate_audit_code(event_code, "event_code")
+        if event_code not in EVENT_CODES:
+            raise ValueError("不允许的审计事件")
         if duration_ms is not None and (
             type(duration_ms) is not int or duration_ms < 0
         ):
             raise ValueError("duration_ms 必须是非负整数")
         self._validate_hash(content_hash, "content_hash")
         self._validate_hash(error_safe_hash, "error_safe_hash")
-        if error_code is not None:
-            self._validate_audit_code(error_code, "error_code")
+        if error_code is not None and error_code not in ERROR_CODES:
+            raise ValueError("不允许的审计错误码")
 
         event: dict[str, Any] = {
             "run_id": run_id,
@@ -131,12 +153,12 @@ class RunArtifacts:
         if error_code is not None:
             event["error_code"] = error_code
         if question_ids is not None:
-            event["question_ids"] = self._validate_audit_ids(
-                question_ids, "question_ids"
+            event["question_ids"] = self._validate_ids(
+                question_ids, QUESTION_ID_PATTERN, "question_ids"
             )
         if source_ids is not None:
-            event["source_ids"] = self._validate_audit_ids(
-                source_ids, "source_ids"
+            event["source_ids"] = self._validate_ids(
+                source_ids, SOURCE_ID_PATTERN, "source_ids"
             )
         path = self.path("audit.md")
         existing = path.read_text("utf-8") if path.exists() else ""
@@ -145,14 +167,9 @@ class RunArtifacts:
         )
 
     @staticmethod
-    def _validate_audit_id(value: str, field_name: str) -> None:
-        if not isinstance(value, str) or not AUDIT_ID_PATTERN.fullmatch(value):
-            raise ValueError(f"{field_name} 不合法")
-
-    @staticmethod
-    def _validate_audit_code(value: str, field_name: str) -> None:
-        if not isinstance(value, str) or not AUDIT_CODE_PATTERN.fullmatch(value):
-            raise ValueError(f"{field_name} 不合法")
+    def _validate_run_id(value: str) -> None:
+        if not isinstance(value, str) or not RUN_ID_PATTERN.fullmatch(value):
+            raise ValueError("run_id 不合法")
 
     @staticmethod
     def _validate_hash(value: str | None, field_name: str) -> None:
@@ -162,14 +179,18 @@ class RunArtifacts:
             raise ValueError(f"{field_name} 必须是 SHA-256 十六进制哈希")
 
     @classmethod
-    def _validate_audit_ids(
-        cls, values: Sequence[str], field_name: str
+    def _validate_ids(
+        cls,
+        values: Sequence[str],
+        pattern: re.Pattern[str],
+        field_name: str,
     ) -> list[str]:
         if isinstance(values, (str, bytes)):
             raise ValueError(f"{field_name} 必须是 ID 序列")
         normalized = list(values)
         for value in normalized:
-            cls._validate_audit_id(value, field_name)
+            if not isinstance(value, str) or not pattern.fullmatch(value):
+                raise ValueError(f"{field_name} 包含不合法 ID")
         return normalized
 
     def remove_if_exists(self, name: str) -> None:
