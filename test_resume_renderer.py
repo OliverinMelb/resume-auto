@@ -177,6 +177,65 @@ class ResumeRendererTests(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_bytes(), b"old-pdf")
 
+    def test_committed_publish_survives_preview_backup_cleanup_failure(self):
+        destination = self.root / "resume.pdf"
+        preview = self.root / "preview"
+        destination.write_bytes(b"old-pdf")
+        preview.mkdir()
+        (preview / "page-1.png").write_bytes(b"old-preview")
+        original_remove = resume_renderer._remove_path
+        pdf_backup_deleted = False
+        preview_cleanup_failed = False
+
+        def fail_after_pdf_backup_cleanup(path):
+            nonlocal pdf_backup_deleted, preview_cleanup_failed
+            candidate = Path(path)
+            if ".pdf-backup-" in candidate.name:
+                original_remove(candidate)
+                pdf_backup_deleted = True
+                return
+            if pdf_backup_deleted and ".preview-backup-" in candidate.name:
+                preview_cleanup_failed = True
+                raise PermissionError(f"private cleanup path: {self.root}")
+            original_remove(candidate)
+
+        with patch(
+            "resume_agent.resume_renderer._remove_path",
+            side_effect=fail_after_pdf_backup_cleanup,
+        ):
+            try:
+                result = self.renderer.render(
+                    "# Resume\n- Current evidence", destination, preview
+                )
+            except RenderError as error:
+                self.fail(f"committed cleanup failure rolled publication back: {error.code}")
+
+        self.assertTrue(pdf_backup_deleted)
+        self.assertTrue(preview_cleanup_failed)
+        self.assertEqual(result.page_count, 1)
+        self.assertTrue(destination.exists())
+        self.assertNotEqual(destination.read_bytes(), b"old-pdf")
+        self.assertTrue((preview / "page-1.png").exists())
+        self.assertEqual(list(self.root.glob(".resume.pdf.pdf-backup-*")), [])
+        preview_backups = list(self.root.glob(".preview.preview-backup-*"))
+        self.assertEqual(len(preview_backups), 1)
+        self.assertEqual(
+            (preview_backups[0] / "page-1.png").read_bytes(), b"old-preview"
+        )
+
+    def test_successful_republish_removes_all_transaction_backups(self):
+        destination = self.root / "resume.pdf"
+        preview = self.root / "preview"
+        destination.write_bytes(b"old-pdf")
+        preview.mkdir()
+        (preview / "page-1.png").write_bytes(b"old-preview")
+
+        self.renderer.render("# Resume\n- Current evidence", destination, preview)
+
+        self.assertEqual(
+            [path for path in self.root.iterdir() if "backup" in path.name], []
+        )
+
     def test_real_document_width_keeps_a_bullet_that_fits_on_one_page_together(self):
         preset = PRESETS[0]
         real_width = A4[0] - 2 * preset.margin_mm * mm

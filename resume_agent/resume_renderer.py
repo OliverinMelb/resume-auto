@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 from xml.sax.saxutils import escape
 
 import pymupdf
@@ -58,6 +58,23 @@ class RenderResult:
     page_count: int
     extracted_text: str
     preview_paths: list[Path]
+
+
+@dataclass
+class PublicationTransaction:
+    pdf_path: Path
+    preview_dir: Path
+    pdf_stage: Path
+    preview_stage: Path
+    pdf_backup: Path
+    preview_backup: Path
+    pdf_was_present: bool
+    preview_was_present: bool
+    pdf_backed_up: bool = False
+    preview_backed_up: bool = False
+    published_pdf: bool = False
+    published_preview: bool = False
+    phase: Literal["STAGING", "PUBLISHING", "COMMITTED", "CLEANING"] = "STAGING"
 
 
 class RenderError(Exception):
@@ -145,12 +162,16 @@ class ReportLabAdapter:
         preview_backup = (
             preview_dir.parent / f".{preview_dir.name}.preview-backup-{transaction_id}"
         )
-        pdf_was_present = pdf_path.exists()
-        preview_was_present = preview_dir.exists()
-        pdf_backed_up = False
-        preview_backed_up = False
-        published_pdf = False
-        published_preview = False
+        transaction = PublicationTransaction(
+            pdf_path=pdf_path,
+            preview_dir=preview_dir,
+            pdf_stage=pdf_stage,
+            preview_stage=preview_stage,
+            pdf_backup=pdf_backup,
+            preview_backup=preview_backup,
+            pdf_was_present=pdf_path.exists(),
+            preview_was_present=preview_dir.exists(),
+        )
 
         try:
             shutil.copyfile(selected_pdf, pdf_stage)
@@ -158,32 +179,21 @@ class ReportLabAdapter:
             for preview_file in preview_files:
                 shutil.copyfile(preview_file, preview_stage / preview_file.name)
 
-            if pdf_was_present:
+            transaction.phase = "PUBLISHING"
+            if transaction.pdf_was_present:
                 os.replace(pdf_path, pdf_backup)
-                pdf_backed_up = True
+                transaction.pdf_backed_up = True
 
             os.replace(pdf_stage, pdf_path)
-            published_pdf = True
-            if preview_was_present:
+            transaction.published_pdf = True
+            if transaction.preview_was_present:
                 os.replace(preview_dir, preview_backup)
-                preview_backed_up = True
+                transaction.preview_backed_up = True
             os.replace(preview_stage, preview_dir)
-            published_preview = True
-            _remove_transaction_paths((pdf_backup, preview_backup))
-            return [preview_dir / preview_file.name for preview_file in preview_files]
+            transaction.published_preview = True
+            transaction.phase = "COMMITTED"
         except OSError:
-            rollback_complete = self._rollback_publication(
-                pdf_path,
-                preview_dir,
-                pdf_backup,
-                preview_backup,
-                pdf_was_present,
-                preview_was_present,
-                pdf_backed_up,
-                preview_backed_up,
-                published_pdf,
-                published_preview,
-            )
+            rollback_complete = self._rollback_publication(transaction)
             if rollback_complete and _try_remove_transaction_paths(
                 (pdf_stage, preview_stage, pdf_backup, preview_backup)
             ):
@@ -193,44 +203,44 @@ class ReportLabAdapter:
                 "Rendering could not be safely recovered; manual recovery is required.",
             ) from None
 
+        transaction.phase = "CLEANING"
+        try:
+            _remove_transaction_paths((pdf_backup, preview_backup))
+        except OSError:
+            # Publication is committed. Retain the new targets and any backup that
+            # cleanup could not remove; a post-commit cleanup error is not rollback.
+            pass
+        return [preview_dir / preview_file.name for preview_file in preview_files]
+
     @staticmethod
-    def _rollback_publication(
-        pdf_path: Path,
-        preview_dir: Path,
-        pdf_backup: Path,
-        preview_backup: Path,
-        pdf_was_present: bool,
-        preview_was_present: bool,
-        pdf_backed_up: bool,
-        preview_backed_up: bool,
-        published_pdf: bool,
-        published_preview: bool,
-    ) -> bool:
+    def _rollback_publication(transaction: PublicationTransaction) -> bool:
+        if transaction.phase in {"COMMITTED", "CLEANING"}:
+            raise RuntimeError("committed publication cannot be rolled back")
         rollback_complete = True
-        if published_pdf or not pdf_was_present:
+        if transaction.published_pdf or not transaction.pdf_was_present:
             try:
-                _remove_path(pdf_path)
+                _remove_path(transaction.pdf_path)
             except OSError:
                 rollback_complete = False
-        if published_preview or not preview_was_present:
+        if transaction.published_preview or not transaction.preview_was_present:
             try:
-                _remove_path(preview_dir)
+                _remove_path(transaction.preview_dir)
             except OSError:
                 rollback_complete = False
-        if pdf_backed_up:
+        if transaction.pdf_backed_up:
             try:
-                if not pdf_backup.exists():
+                if not transaction.pdf_backup.exists():
                     rollback_complete = False
                 else:
-                    os.replace(pdf_backup, pdf_path)
+                    os.replace(transaction.pdf_backup, transaction.pdf_path)
             except OSError:
                 rollback_complete = False
-        if preview_backed_up:
+        if transaction.preview_backed_up:
             try:
-                if not preview_backup.exists():
+                if not transaction.preview_backup.exists():
                     rollback_complete = False
                 else:
-                    os.replace(preview_backup, preview_dir)
+                    os.replace(transaction.preview_backup, transaction.preview_dir)
             except OSError:
                 rollback_complete = False
         return rollback_complete
