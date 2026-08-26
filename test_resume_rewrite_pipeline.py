@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from resume_agent.codex_runner import CodexRunError
 from resume_agent.repository import Repository
@@ -64,6 +65,26 @@ class BlockingCodexRunner(FakeCodexRunner):
 class InsertionFailingRepository(Repository):
     def create_rewrite_run_with_id(self, run_id, payload, artifact_dir):
         raise sqlite3.IntegrityError("private database detail")
+
+
+class ReadyBeforeRecoveryClaimRepository(Repository):
+    def __init__(self, database_path, artifacts):
+        super().__init__(database_path)
+        self.artifacts = artifacts
+
+    def claim_interrupted_rewrite_run(self, run_id, **claim):
+        self.transition_rewrite_run(
+            run_id,
+            {"RUNNING"},
+            "READY",
+            expected_owner_token=claim["expected_owner_token"],
+        )
+        self.artifacts.append_audit(
+            run_id=run_id,
+            status="READY",
+            event_code="RUN_READY",
+        )
+        return super().claim_interrupted_rewrite_run(run_id, **claim)
 
 
 class FakeRenderer:
@@ -276,6 +297,88 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual((final["status"], final["error_code"]), ("FAILED", "INTERRUPTED"))
         self._assert_no_deployable_artifacts(final)
         self.assertFalse((Path(final["artifact_dir"]) / ".preview").exists())
+
+    def test_ready_winner_before_recovery_claim_keeps_artifacts_and_audit(self):
+        run_id = "rewrite_run_" + "c" * 32
+        artifacts = RunArtifacts.create(self.runs_root, run_id)
+        run = self.repository.create_rewrite_run_with_id(
+            run_id, self.request().model_dump(), str(artifacts.directory)
+        )
+        self.repository.transition_rewrite_run(
+            run["id"], {"QUEUED"}, "RUNNING", increment_attempt=True,
+            owner_token="finishing-owner",
+            lease_expires_at="2000-01-01T00:00:00+00:00",
+        )
+        artifacts.path("resume.md").write_text("ready resume", "utf-8")
+        artifacts.path("resume.pdf").write_bytes(b"%PDF-ready")
+        preview = artifacts.directory / ".preview"
+        preview.mkdir()
+        (preview / "page-1.png").write_bytes(b"ready-preview")
+
+        racing_repository = ReadyBeforeRecoveryClaimRepository(
+            self.repository.database_path, artifacts
+        )
+        recovering = ResumeRewritePipeline(
+            racing_repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner({}),
+            FakeRenderer(),
+        )
+
+        self.assertEqual(recovering.recover_interrupted_runs(), 0)
+        final = racing_repository.get_rewrite_run(run_id)
+        self.assertEqual(final["status"], "READY")
+        self.assertEqual(artifacts.path("resume.md").read_text("utf-8"), "ready resume")
+        self.assertEqual(artifacts.path("resume.pdf").read_bytes(), b"%PDF-ready")
+        self.assertEqual((preview / "page-1.png").read_bytes(), b"ready-preview")
+        event_codes = [event["event_code"] for event in self._audit_events(final)]
+        self.assertIn("RUN_READY", event_codes)
+        self.assertNotIn("RUN_RECOVERED", event_codes)
+
+    def test_recovery_cleanup_failure_requeues_claim_before_failed_state(self):
+        run_id = "rewrite_run_" + "d" * 32
+        artifacts = RunArtifacts.create(self.runs_root, run_id)
+        run = self.repository.create_rewrite_run_with_id(
+            run_id, self.request().model_dump(), str(artifacts.directory)
+        )
+        expired_lease = "2000-01-01T00:00:00+00:00"
+        self.repository.transition_rewrite_run(
+            run["id"], {"QUEUED"}, "RUNNING", increment_attempt=True,
+            owner_token="stale-owner", lease_expires_at=expired_lease,
+        )
+        artifacts.path("resume.pdf").write_bytes(b"%PDF-stale")
+        preview = artifacts.directory / ".preview"
+        preview.mkdir()
+        (preview / "page-1.png").write_bytes(b"stale-preview")
+        recovering = self.make_pipeline(FakeCodexRunner({}), FakeRenderer())
+
+        with patch(
+            "resume_agent.rewrite_pipeline.shutil.rmtree",
+            side_effect=OSError("preview is locked"),
+        ):
+            try:
+                recovered_count = recovering.recover_interrupted_runs()
+            except OSError as error:
+                self.fail(f"cleanup failure escaped recovery: {error}")
+
+        self.assertEqual(recovered_count, 0)
+        retryable = self.repository.get_rewrite_run(run_id)
+        self.assertEqual(retryable["status"], "RUNNING")
+        self.assertNotEqual(retryable["owner_token"], "stale-owner")
+        self.assertEqual(retryable["lease_expires_at"], expired_lease)
+        self.assertTrue(preview.exists())
+        self.assertNotIn(
+            "RUN_RECOVERED",
+            [event["event_code"] for event in self._audit_events(retryable)],
+        )
+
+        self.assertEqual(recovering.recover_interrupted_runs(), 1)
+        final = self.repository.get_rewrite_run(run_id)
+        self.assertEqual((final["status"], final["error_code"]), ("FAILED", "INTERRUPTED"))
+        self._assert_no_deployable_artifacts(final)
+        self.assertFalse(preview.exists())
 
     def test_recovery_does_not_fail_run_with_unvalidated_artifact_directory(self):
         run_id = "rewrite_run_" + "b" * 32

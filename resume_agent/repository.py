@@ -426,6 +426,34 @@ class Repository:
             ).fetchall()
         return [self._decode_rewrite_run(row, row["id"]) for row in rows]
 
+    def claim_interrupted_rewrite_run(
+        self,
+        run_id: str,
+        *,
+        expected_owner_token: str | None,
+        expected_lease_expires_at: str | None,
+        recovery_owner_token: str,
+        recovery_lease_expires_at: str,
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE rewrite_runs
+                SET owner_token=?, lease_expires_at=?, updated_at=?
+                WHERE id=? AND status='RUNNING'
+                  AND owner_token IS ? AND lease_expires_at IS ?
+                """,
+                (
+                    recovery_owner_token,
+                    recovery_lease_expires_at,
+                    utc_now(),
+                    run_id,
+                    expected_owner_token,
+                    expected_lease_expires_at,
+                ),
+            )
+        return cursor.rowcount == 1
+
     def recover_interrupted_rewrite_run(
         self,
         run_id: str,

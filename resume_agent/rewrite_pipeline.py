@@ -57,19 +57,34 @@ class ResumeRewritePipeline:
                 artifacts = self._open_recovery_artifacts(run)
             except ValueError:
                 continue
-            self._remove_deployable_artifacts(artifacts)
-            artifacts.append_audit(
-                run_id=run["id"], status="FAILED", event_code="RUN_RECOVERED",
-                error_code="INTERRUPTED",
-            )
-            changed = self.repository.recover_interrupted_rewrite_run(
+            claimed = self.repository.claim_interrupted_rewrite_run(
                 run["id"],
                 expected_owner_token=run["owner_token"],
                 expected_lease_expires_at=run["lease_expires_at"],
+                recovery_owner_token=self._owner_token,
+                recovery_lease_expires_at=self._new_lease_expiration(),
             )
-            if changed:
+            if not claimed:
+                continue
+            try:
                 self._remove_deployable_artifacts(artifacts)
-                recovered += 1
+                artifacts.append_audit(
+                    run_id=run["id"], status="FAILED", event_code="RUN_RECOVERED",
+                    error_code="INTERRUPTED",
+                )
+            except (OSError, ValueError):
+                self.repository.transition_rewrite_run(
+                    run["id"], {"RUNNING"}, "RUNNING",
+                    owner_token=self._owner_token,
+                    lease_expires_at=run["lease_expires_at"],
+                    expected_owner_token=self._owner_token,
+                )
+                continue
+            self.repository.transition_rewrite_run(
+                run["id"], {"RUNNING"}, "FAILED", error_code="INTERRUPTED",
+                expected_owner_token=self._owner_token,
+            )
+            recovered += 1
         return recovered
 
     def run(self, request: RewriteRequest) -> dict:
