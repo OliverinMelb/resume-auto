@@ -117,6 +117,7 @@ class RunArtifacts:
         status: str,
         event_code: str,
         duration_ms: int | None = None,
+        page_count: int | None = None,
         content_hash: str | None = None,
         error_safe_hash: str | None = None,
         error_code: str | None = None,
@@ -134,6 +135,8 @@ class RunArtifacts:
             type(duration_ms) is not int or duration_ms < 0
         ):
             raise ValueError("duration_ms 必须是非负整数")
+        if page_count is not None and (type(page_count) is not int or page_count < 1):
+            raise ValueError("page_count must be a positive integer")
         self._validate_hash(content_hash, "content_hash")
         self._validate_hash(error_safe_hash, "error_safe_hash")
         if error_code is not None and error_code not in ERROR_CODES:
@@ -146,6 +149,8 @@ class RunArtifacts:
         }
         if duration_ms is not None:
             event["duration_ms"] = duration_ms
+        if page_count is not None:
+            event["page_count"] = page_count
         if content_hash is not None:
             event["content_hash"] = content_hash
         if error_safe_hash is not None:
