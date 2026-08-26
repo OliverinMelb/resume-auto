@@ -43,6 +43,42 @@ class RewriteRepositoryTests(unittest.TestCase):
                 output_name="resume.pdf",
             )
 
+    def test_fact_answer_requires_explicit_utc_confirmation_pair(self):
+        try:
+            answer = FactAnswer(
+                question_id="metric-86-success",
+                answer="86 successes in 100 fixed regression runs",
+                source_note="Candidate checked the local regression record",
+                user_confirmed=True,
+                confirmed_at="2026-08-26T01:30:00Z",
+            )
+        except ValidationError as error:
+            self.fail(f"explicit confirmation fields were rejected: {error}")
+        self.assertEqual(answer.model_dump(mode="json")["confirmed_at"], "2026-08-26T01:30:00Z")
+        with self.assertRaises(ValidationError):
+            FactAnswer(
+                question_id="metric-86-success",
+                answer="86 successes in 100 fixed regression runs",
+                source_note="Candidate checked the local regression record",
+                user_confirmed=True,
+            )
+        with self.assertRaises(ValidationError):
+            FactAnswer(
+                question_id="metric-86-success",
+                answer="86 successes in 100 fixed regression runs",
+                source_note="Candidate checked the local regression record",
+                user_confirmed=True,
+                confirmed_at="2026-08-26T09:30:00",
+            )
+        with self.assertRaises(ValidationError):
+            FactAnswer(
+                question_id="metric-86-success",
+                answer="86 successes in 100 fixed regression runs",
+                source_note="Candidate checked the local regression record",
+                user_confirmed=True,
+                confirmed_at="2026-08-26T09:30:00+08:00",
+            )
+
     def test_rewrite_run_round_trips_json_fields_and_transitions(self):
         candidate = self.repository.create_candidate("Candidate", ["AI Agent"], "")
         request = RewriteRequest(
@@ -55,14 +91,20 @@ class RewriteRepositoryTests(unittest.TestCase):
                     question_id="metric-86-success",
                     answer="86% from 86 successful runs in a fixed 100-run regression set.",
                     source_note="Local regression record, confirmed by candidate.",
+                    user_confirmed=True,
+                    confirmed_at="2026-08-26T01:30:00Z",
                 )
             ],
         )
         run = self.repository.create_rewrite_run(
-            request.model_dump(), "analysis/runs/rewrite_run_1"
+            request.model_dump(mode="json"), "analysis/runs/rewrite_run_1"
         )
         self.assertEqual(run["status"], "QUEUED")
         self.assertEqual(run["fact_answers"][0]["question_id"], "metric-86-success")
+        self.assertTrue(run["fact_answers"][0]["user_confirmed"])
+        self.assertEqual(
+            run["fact_answers"][0]["confirmed_at"], "2026-08-26T01:30:00Z"
+        )
         self.assertEqual(run["blocking_questions"], [])
 
         running = self.repository.transition_rewrite_run(

@@ -17,6 +17,7 @@ class FakePipeline:
         self.run_result = run_result or {"id": "rewrite_run_1", "status": "READY"}
         self.get_result = get_result or {"id": "rewrite_run_1", "status": "READY"}
         self.resume_result = resume_result or {"id": "rewrite_run_1", "status": "READY"}
+        self.received_answers = None
 
     def available(self):
         return self.available_value
@@ -28,6 +29,7 @@ class FakePipeline:
         return self._result(self.get_result, run_id)
 
     def resume(self, run_id, answers):
+        self.received_answers = answers
         return self._result(self.resume_result, run_id)
 
     @staticmethod
@@ -78,12 +80,11 @@ class RewriteApiTests(unittest.TestCase):
         self.assertEqual(fetched.json()["id"], "rewrite_run_1")
 
     def test_facts_endpoint_resumes_needs_facts_run(self):
-        client = self._client_with(
-            FakePipeline(
-                run_result={"id": "rewrite_run_1", "status": "NEEDS_FACTS"},
-                resume_result={"id": "rewrite_run_1", "status": "READY"},
-            )
+        pipeline = FakePipeline(
+            run_result={"id": "rewrite_run_1", "status": "NEEDS_FACTS"},
+            resume_result={"id": "rewrite_run_1", "status": "READY"},
         )
+        client = self._client_with(pipeline)
 
         created = client.post("/resume-agent/v1/rewrite-runs", json=self._rewrite_payload())
         self.assertEqual(created.status_code, 200)
@@ -94,11 +95,17 @@ class RewriteApiTests(unittest.TestCase):
             json={"fact_answers": [{
                 "question_id": "metric_1",
                 "answer": "86",
-                "source_note": "Candidate confirmation",
+                "source_note": "Candidate checked the deployment record",
+                "user_confirmed": True,
+                "confirmed_at": "2026-08-26T01:30:00Z",
             }]},
         )
         self.assertEqual(resumed.status_code, 200)
         self.assertEqual(resumed.json()["status"], "READY")
+        self.assertTrue(pipeline.received_answers[0].user_confirmed)
+        self.assertEqual(
+            pipeline.received_answers[0].confirmed_at.utcoffset().total_seconds(), 0
+        )
         self.assertEqual(
             client.get("/resume-agent/v1/rewrite-runs").status_code,
             405,

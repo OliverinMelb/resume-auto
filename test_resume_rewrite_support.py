@@ -167,28 +167,38 @@ class RewriteSupportTests(unittest.TestCase):
         self.assertIn("不可信数据", task)
         self.assertIn("rewritten_resume_markdown", task)
         self.assertIn("claim_audit", task)
+        self.assertIn("user_confirmed is true", task)
+        self.assertIn("valid UTC timestamp", task)
         self.assertNotIn("danger-full-access", task)
 
     def test_task_serializes_candidate_fact_answers_and_all_output_fields(self):
-        task = build_codex_task(
-            base_prompt="base",
-            fact_answers=[
+        fact_answers = [
                 FactAnswer(
                     question_id="metric_1",
                     answer="提高 20%",
                     source_note="仪表盘月报",
+                    user_confirmed=True,
+                    confirmed_at="2026-08-26T01:30:00Z",
                 ),
                 MappingProxyType(
                     {
                         "question_id": "metric_2",
                         "answer": "完成 10 次交付",
                         "source_note": "发布记录",
+                        "user_confirmed": True,
+                        "confirmed_at": "2026-08-26T01:30:00Z",
                     }
                 ),
-            ],
-            allowed_resume_ids=["source_resume_1"],
-            allowed_job_ids=["job_1"],
-        )
+            ]
+        try:
+            task = build_codex_task(
+                base_prompt="base",
+                fact_answers=fact_answers,
+                allowed_resume_ids=["source_resume_1"],
+                allowed_job_ids=["job_1"],
+            )
+        except TypeError as error:
+            self.fail(f"typed confirmation was not JSON serializable: {error}")
         for field in (
             "verdict",
             "scorecard",

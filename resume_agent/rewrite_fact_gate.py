@@ -3,6 +3,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
 from resume_agent.rewrite_schemas import CodexRewriteResult, MissingInformation
@@ -65,7 +66,6 @@ SOURCE_NOTE_TERMS = (
     "代码",
     "截图",
     "测量",
-    "候选人确认",
 )
 QPS_MEASUREMENT_SOURCE_TERMS = ("压测", "监控", "负载测试", "性能测试")
 STATISTICS_WINDOW_TERMS = (
@@ -458,6 +458,7 @@ def _answer_has_evidence(
     if (
         answer is None
         or _clean_text(_field(answer, "question_id")) != expected_question_id
+        or not _has_explicit_confirmation(answer)
     ):
         return False
     answer_text = _clean_text(_field(answer, "answer"))
@@ -476,6 +477,28 @@ def _answer_has_evidence(
     if question is not None:
         return _answer_addresses_question(answer_text, question)
     return True
+
+
+def _has_explicit_confirmation(answer: Any) -> bool:
+    if _optional_field(answer, "user_confirmed") is not True:
+        return False
+    confirmed_at = _optional_field(answer, "confirmed_at")
+    if isinstance(confirmed_at, datetime):
+        parsed = confirmed_at
+    elif isinstance(confirmed_at, str):
+        try:
+            parsed = datetime.fromisoformat(confirmed_at)
+        except ValueError:
+            return False
+    else:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0)
+
+
+def _optional_field(item: Any, name: str) -> Any:
+    if isinstance(item, Mapping):
+        return item.get(name)
+    return getattr(item, name, None)
 
 
 def _contains_basis(container: str, basis: str) -> bool:

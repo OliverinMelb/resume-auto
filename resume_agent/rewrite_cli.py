@@ -415,8 +415,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _read_fact_answers(path: Path) -> list[FactAnswer]:
     raw = json.loads(_readable_file(path).read_text(encoding="utf-8-sig"))
-    facts = FactAnswersRequest.model_validate(
-        {"fact_answers": raw}, strict=True
+    facts = FactAnswersRequest.model_validate_json(
+        json.dumps({"fact_answers": raw}, ensure_ascii=False), strict=True
     ).fact_answers
     if len({item.question_id for item in facts}) != len(facts):
         raise ValueError("duplicate fact answers are not allowed")

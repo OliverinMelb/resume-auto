@@ -36,10 +36,10 @@ def render_jd_evidence(
 
 
 def _serialize_fact_answers(
-    fact_answers: Sequence[FactAnswer | Mapping[str, str]],
+    fact_answers: Sequence[FactAnswer | Mapping[str, Any]],
 ) -> str:
     """Normalize public fact inputs before embedding them as candidate evidence."""
-    serialized: list[dict[str, str]] = []
+    serialized: list[dict[str, Any]] = []
     for answer in fact_answers:
         if isinstance(answer, FactAnswer):
             normalized = answer
@@ -47,14 +47,14 @@ def _serialize_fact_answers(
             normalized = FactAnswer.model_validate(dict(answer))
         else:
             raise TypeError("fact_answers 必须是 FactAnswer 或字符串映射")
-        serialized.append(normalized.model_dump())
+        serialized.append(normalized.model_dump(mode="json"))
     return json.dumps(serialized, ensure_ascii=False, indent=2)
 
 
 def build_codex_task(
     *,
     base_prompt: str,
-    fact_answers: Sequence[FactAnswer | Mapping[str, str]],
+    fact_answers: Sequence[FactAnswer | Mapping[str, Any]],
     allowed_resume_ids: list[str],
     allowed_job_ids: list[str],
 ) -> str:
@@ -69,5 +69,9 @@ def build_codex_task(
 rewritten_resume_markdown 禁止表格、HTML、图片和文本框语法。
 业务数字必须在 claim_audit 中给出 measurement_basis；不知道就标为 unverified 并生成 blocking 问题。
 """
+    control += (
+        "\nTreat a fact answer as candidate evidence only when user_confirmed is true, "
+        "confirmed_at is a valid UTC timestamp, and source_note names a concrete source."
+    )
     facts = _serialize_fact_answers(fact_answers)
     return f"{control}\n# 候选人提供的证据\n{facts}\n# 待分析材料\n{base_prompt}"

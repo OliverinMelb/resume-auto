@@ -6,10 +6,19 @@ from resume_agent.rewrite_fact_gate import (
     extract_business_metrics,
     validate_rewrite_facts,
 )
-from resume_agent.rewrite_schemas import CodexRewriteResult, FactAnswer
+from resume_agent.rewrite_schemas import CodexRewriteResult, FactAnswer as FactAnswerModel
 
 
 QUESTION_ID = re.compile(r"^(?:metric|gap|conflict)-[0-9a-f]{12}$")
+CONFIRMED_AT = "2026-08-26T01:30:00Z"
+
+
+def FactAnswer(**values):
+    return FactAnswerModel(
+        user_confirmed=True,
+        confirmed_at=CONFIRMED_AT,
+        **values,
+    )
 
 
 def result_with_metric(status="unverified", basis=None):
@@ -113,6 +122,44 @@ class FactGateTests(unittest.TestCase):
         )
 
         self.assertEqual(gate.blockers, [])
+
+    def test_bare_candidate_confirmation_does_not_unlock_metric(self):
+        first = validate_rewrite_facts(
+            result_with_metric("user_confirmed"), self.resumes, self.jobs, []
+        )
+        question_id = first.blockers[0].question_id
+
+        gate = validate_rewrite_facts(
+            result_with_metric("user_confirmed"),
+            self.resumes,
+            self.jobs,
+            [{
+                "question_id": question_id,
+                "answer": "工具调用的100 次固定回归中成功 86 次",
+                "source_note": "本地回归记录，候选人确认",
+            }],
+        )
+
+        self.assertEqual([item.question_id for item in gate.blockers], [question_id])
+
+    def test_explicit_confirmation_without_concrete_source_does_not_unlock_metric(self):
+        first = validate_rewrite_facts(
+            result_with_metric("user_confirmed"), self.resumes, self.jobs, []
+        )
+        question_id = first.blockers[0].question_id
+
+        gate = validate_rewrite_facts(
+            result_with_metric("user_confirmed"),
+            self.resumes,
+            self.jobs,
+            [FactAnswer(
+                question_id=question_id,
+                answer="工具调用的100次固定回归中成功86次",
+                source_note="候选人确认该答案属实",
+            )],
+        )
+
+        self.assertEqual([item.question_id for item in gate.blockers], [question_id])
 
     def test_source_verified_metric_with_source_basis_passes(self):
         basis = "100次固定回归中成功86次"

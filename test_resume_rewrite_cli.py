@@ -210,16 +210,47 @@ class RewriteCliTests(unittest.TestCase):
 
     def test_resume_requires_exact_fact_answer_array_and_status_codes(self):
         facts = self.root / "facts.json"
-        facts.write_text(json.dumps([{"question_id": "gap-aaaaaaaaaaaa", "answer": "Verified", "source_note": "Candidate confirmed"}]), "utf-8")
+        facts.write_text(json.dumps([{
+            "question_id": "gap-aaaaaaaaaaaa",
+            "answer": "Verified",
+            "source_note": "Candidate confirmed from a deployment record",
+            "user_confirmed": True,
+            "confirmed_at": "2026-08-26T01:30:00Z",
+        }]), "utf-8")
         pipeline = FakePipeline({"id": "rewrite_run_abcdef", "status": "FAILED", "blocking_questions": []})
         stdout = io.StringIO()
         with patch("resume_agent.rewrite_cli._build_pipeline", return_value=pipeline), redirect_stdout(stdout):
             code = main(["resume", "--run-id", "rewrite_run_abcdef", "--facts-json", str(facts)])
         self.assertEqual(code, 1)
-        self.assertEqual(pipeline.received_answers, [FactAnswer(question_id="gap-aaaaaaaaaaaa", answer="Verified", source_note="Candidate confirmed")])
+        self.assertEqual(pipeline.received_answers, [FactAnswer(
+            question_id="gap-aaaaaaaaaaaa",
+            answer="Verified",
+            source_note="Candidate confirmed from a deployment record",
+            user_confirmed=True,
+            confirmed_at="2026-08-26T01:30:00Z",
+        )])
         facts.write_text(json.dumps({"fact_answers": []}), "utf-8")
         with patch("resume_agent.rewrite_cli._build_pipeline", return_value=pipeline), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertEqual(main(["resume", "--run-id", "rewrite_run_abcdef", "--facts-json", str(facts)]), 1)
+
+    def test_resume_keeps_legacy_fact_input_unconfirmed(self):
+        facts = self.root / "facts.json"
+        facts.write_text(json.dumps([{
+            "question_id": "gap-aaaaaaaaaaaa",
+            "answer": "Verified",
+            "source_note": "Candidate confirmed",
+        }]), "utf-8")
+        pipeline = FakePipeline({
+            "id": "rewrite_run_abcdef",
+            "status": "NEEDS_FACTS",
+            "blocking_questions": [],
+        })
+        with patch("resume_agent.rewrite_cli._build_pipeline", return_value=pipeline), redirect_stdout(io.StringIO()):
+            code = main(["resume", "--run-id", "rewrite_run_abcdef", "--facts-json", str(facts)])
+
+        self.assertEqual(code, 2)
+        self.assertFalse(pipeline.received_answers[0].user_confirmed)
+        self.assertIsNone(pipeline.received_answers[0].confirmed_at)
 
     def test_resume_rejects_empty_oversized_and_duplicate_fact_arrays_before_pipeline(self):
         facts = self.root / "facts.json"

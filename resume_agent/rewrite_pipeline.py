@@ -81,7 +81,7 @@ class ResumeRewritePipeline:
         artifacts = RunArtifacts.create(self.runs_root, run_id)
         try:
             run = self.repository.create_rewrite_run_with_id(
-                run_id, request.model_dump(), str(artifacts.directory)
+                run_id, request.model_dump(mode="json"), str(artifacts.directory)
             )
         except sqlite3.Error:
             self._remove_created_artifacts(artifacts)
@@ -182,7 +182,7 @@ class ResumeRewritePipeline:
                 blocker["question_id"] for blocker in preflight_blockers
             ],
             "fact_answers": [
-                FactAnswer.model_validate(answer).model_dump()
+                FactAnswer.model_validate(answer).model_dump(mode="json")
                 for answer in run["fact_answers"]
             ],
             "attempt_context": {
@@ -350,8 +350,13 @@ class ResumeRewritePipeline:
         return RunArtifacts.open(self.runs_root, run["id"])
 
     def _fail_artifact_location(self, run: dict) -> None:
+        if run["status"] in {"READY", "FAILED"}:
+            return
         self.repository.transition_rewrite_run(
-            run["id"], {run["status"]}, "FAILED", error_code="VALIDATION_ERROR"
+            run["id"], {run["status"]}, "FAILED", error_code="VALIDATION_ERROR",
+            expected_owner_token=(
+                self._owner_token if run["status"] == "RUNNING" else None
+            ),
         )
 
     def _validate_submitted_answers(
@@ -456,7 +461,7 @@ def _merge_fact_answers(existing: list[dict], answers: list[FactAnswer]) -> list
     merged: dict[str, dict] = {}
     for item in [*existing, *answers]:
         answer = FactAnswer.model_validate(item)
-        merged[answer.question_id] = answer.model_dump()
+        merged[answer.question_id] = answer.model_dump(mode="json")
     return list(merged.values())
 
 

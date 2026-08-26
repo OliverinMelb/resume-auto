@@ -1,7 +1,8 @@
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -12,6 +13,22 @@ class FactAnswer(StrictModel):
     question_id: str = Field(min_length=1, max_length=200)
     answer: str = Field(min_length=1, max_length=5000)
     source_note: str = Field(min_length=1, max_length=2000)
+    user_confirmed: bool = Field(default=False, strict=True)
+    confirmed_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_confirmation(self):
+        if self.user_confirmed != (self.confirmed_at is not None):
+            raise ValueError(
+                "user_confirmed and confirmed_at must be supplied together"
+            )
+        if self.confirmed_at is not None:
+            offset = self.confirmed_at.utcoffset()
+            if self.confirmed_at.tzinfo is None or offset is None:
+                raise ValueError("confirmed_at must include a timezone")
+            if offset != timedelta(0):
+                raise ValueError("confirmed_at must be UTC")
+        return self
 
 
 class FactAnswersRequest(StrictModel):

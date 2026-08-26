@@ -129,10 +129,14 @@ $runResult
   {
     "question_id": "returned-stable-question-id",
     "answer": "候选人确认的答案",
-    "source_note": "答案如何得知或如何测量"
+    "source_note": "答案如何得知或如何测量",
+    "user_confirmed": true,
+    "confirmed_at": "2026-08-26T01:30:00Z"
   }
 ]
 ```
+
+`user_confirmed` 必须显式为 `true`，`confirmed_at` 必须是 UTC 时间戳（`Z`），且 `source_note` 必须写明具体记录或测量来源，答案才可作为指标依据。旧版三字段 facts 仍可读取，但会安全地视为“未确认”，不能解锁指标。
 
 仅使用本次命令 JSON 结果返回的 `question_id` 和 `run_id`，不要猜测或改写它们。随后可执行：
 

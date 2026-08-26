@@ -15,6 +15,17 @@ from resume_agent.resume_renderer import RenderError, RenderResult
 from resume_agent.settings import ResumeAgentSettings
 
 
+CONFIRMED_AT = "2026-08-26T01:30:00Z"
+
+
+def confirmed_answer(**values):
+    return FactAnswer(
+        user_confirmed=True,
+        confirmed_at=CONFIRMED_AT,
+        **values,
+    )
+
+
 class FakeCodexRunner:
     def __init__(self, result):
         self.result = result
@@ -297,6 +308,50 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual(sentinel.read_bytes(), b"do-not-touch")
         self.assertEqual(canonical.path("audit.md").read_text("utf-8"), "")
 
+    def test_foreign_pipeline_cannot_fail_owned_running_run(self):
+        runner = BlockingCodexRunner(result_for(self.resume["id"], self.job["id"]))
+        owner = self.make_pipeline(runner, FakeRenderer())
+        worker = threading.Thread(
+            target=lambda: self._capture_pipeline_run(owner, []), daemon=True
+        )
+        worker.start()
+        self.assertTrue(runner.started.wait(timeout=2))
+        running = self._latest_run()
+        canonical_dir = running["artifact_dir"]
+        forged = Path(self.temp_dir.name) / "foreign-forged"
+        forged.mkdir()
+        connection = sqlite3.connect(self.repository.database_path)
+        try:
+            connection.execute(
+                "UPDATE rewrite_runs SET artifact_dir = ? WHERE id = ?",
+                (str(forged), running["id"]),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        foreign = self.make_pipeline(FakeCodexRunner({}), FakeRenderer())
+        try:
+            with self.assertRaises(ValueError):
+                foreign.get(running["id"])
+            self.assertEqual(
+                self.repository.get_rewrite_run(running["id"])["status"], "RUNNING"
+            )
+        finally:
+            connection = sqlite3.connect(self.repository.database_path)
+            try:
+                connection.execute(
+                    "UPDATE rewrite_runs SET artifact_dir = ? WHERE id = ?",
+                    (canonical_dir, running["id"]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            runner.release.set()
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive(), "owned pipeline thread did not stop")
+
     def _capture_pipeline_run(self, pipeline, errors):
         try:
             pipeline.run(self.request())
@@ -308,10 +363,27 @@ class RewritePipelineTests(unittest.TestCase):
         first = pipeline.run(self.request())
         self.assertEqual(first["status"], "NEEDS_FACTS")
         self.assertFalse((Path(first["artifact_dir"]) / "resume.pdf").exists())
-        resumed = pipeline.resume(first["id"], [FactAnswer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")])
+        resumed = pipeline.resume(first["id"], [confirmed_answer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")])
         self.assertEqual(resumed["id"], first["id"])
         self.assertEqual(resumed["status"], "READY")
         self.assertEqual(resumed["attempt_count"], 2)
+
+    def test_legacy_unconfirmed_fact_cannot_unlock_metric(self):
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+        first = pipeline.run(self.request())
+        resumed = pipeline.resume(first["id"], [FactAnswer(
+            question_id=first["blocking_questions"][0]["question_id"],
+            answer="Completed 86 of 100 fixed regression runs; 86/100.",
+            source_note="本地回归记录，候选人确认",
+        )])
+
+        self.assertEqual(resumed["status"], "NEEDS_FACTS")
+        self.assertFalse(resumed["fact_answers"][0]["user_confirmed"])
+        self.assertIsNone(resumed["fact_answers"][0]["confirmed_at"])
+        self.assertFalse((Path(resumed["artifact_dir"]) / "resume.pdf").exists())
 
     def test_needs_facts_resume_snapshot_and_audit_are_reconstructable(self):
         pipeline = self.make_pipeline(
@@ -344,7 +416,7 @@ class RewritePipelineTests(unittest.TestCase):
             facts_required["source_ids"], [self.resume["id"], self.job["id"]]
         )
 
-        answer = FactAnswer(
+        answer = confirmed_answer(
             question_id=first["blocking_questions"][0]["question_id"],
             answer="Completed 86 of 100 fixed regression runs; 86/100.",
             source_note="本地回归记录，候选人确认",
@@ -353,7 +425,11 @@ class RewritePipelineTests(unittest.TestCase):
         resumed_snapshot = json.loads(
             (artifact_dir / "input-snapshot.json").read_text("utf-8")
         )
-        self.assertEqual(resumed_snapshot["fact_answers"], [answer.model_dump()])
+        self.assertEqual(resumed_snapshot["fact_answers"], [answer.model_dump(mode="json")])
+        self.assertTrue(resumed_snapshot["fact_answers"][0]["user_confirmed"])
+        self.assertEqual(
+            resumed_snapshot["fact_answers"][0]["confirmed_at"], CONFIRMED_AT
+        )
         self.assertEqual(resumed_snapshot["attempt_context"]["attempt_count"], 2)
         self.assertEqual(
             [event["event_code"] for event in self._audit_events(resumed)],
@@ -456,7 +532,7 @@ class RewritePipelineTests(unittest.TestCase):
 
         unchanged = pipeline.resume(
             run["id"],
-            [FactAnswer(
+            [confirmed_answer(
                 question_id=blocker_id,
                 answer="Keep both jobs",
                 source_note="Candidate requested the same divergent selection",
@@ -567,7 +643,7 @@ class RewritePipelineTests(unittest.TestCase):
         pipeline = self.make_pipeline(runner, FakeRenderer())
         first = pipeline.run(self.request())
         with self.assertRaises(ValueError):
-            pipeline.resume(first["id"], [FactAnswer(question_id="gap-" + "a" * 12, answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")])
+            pipeline.resume(first["id"], [confirmed_answer(question_id="gap-" + "a" * 12, answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")])
         unchanged = pipeline.get(first["id"])
         self.assertEqual((unchanged["status"], unchanged["attempt_count"], unchanged["fact_answers"]), ("NEEDS_FACTS", 1, []))
         self.assertEqual(runner.run_count, 1)
@@ -575,7 +651,7 @@ class RewritePipelineTests(unittest.TestCase):
     def test_resume_rejects_duplicate_blocker_answers(self):
         pipeline = self.make_pipeline(FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])), FakeRenderer())
         first = pipeline.run(self.request())
-        answer = FactAnswer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")
+        answer = confirmed_answer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")
         with self.assertRaises(ValueError):
             pipeline.resume(first["id"], [answer, answer])
         unchanged = pipeline.get(first["id"])
@@ -594,7 +670,7 @@ class RewritePipelineTests(unittest.TestCase):
             connection.commit()
         finally:
             connection.close()
-        answer = FactAnswer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")
+        answer = confirmed_answer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")
         with self.assertRaises(ValueError):
             pipeline.resume(first["id"], [answer])
         self.assertEqual(sentinel.read_text("utf-8"), "unchanged")
@@ -608,7 +684,7 @@ class RewritePipelineTests(unittest.TestCase):
         artifact_dir.rename(escaped)
         artifact_dir.symlink_to(escaped, target_is_directory=True)
         before = (escaped / "audit.md").read_text("utf-8")
-        answer = FactAnswer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")
+        answer = confirmed_answer(question_id=first["blocking_questions"][0]["question_id"], answer="Completed 86 of 100 fixed regression runs; 86/100.", source_note="本地回归记录，候选人确认")
         with self.assertRaises(ValueError):
             pipeline.resume(first["id"], [answer])
         self.assertEqual((escaped / "audit.md").read_text("utf-8"), before)
