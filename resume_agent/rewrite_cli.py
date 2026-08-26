@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from .importer import parse_raw_job
 from .repository import NotFoundError, Repository
 from .rewrite_factory import create_rewrite_pipeline
-from .rewrite_schemas import FactAnswer, RewriteRequest
+from .rewrite_schemas import FactAnswer, FactAnswersRequest, RewriteRequest
 from .settings import get_settings
 
 
@@ -43,6 +43,13 @@ class _InputAction(argparse.Action):
         setattr(namespace, self.dest, inputs)
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    """Avoid echoing user-supplied argument values on validation failures."""
+
+    def error(self, message):
+        raise ValueError("invalid command arguments")
+
+
 def bootstrap_request(
     repository: Repository,
     candidate_id: str | None,
@@ -58,6 +65,10 @@ def bootstrap_request(
     job_inputs: Iterable[tuple[str, str | Path]] | None = None,
 ) -> RewriteRequest:
     """Create the canonical, ID-only request while retaining no file paths."""
+    sanitized_explicit_name = None
+    if output_name is not None:
+        _validate_explicit_output_name(output_name)
+        sanitized_explicit_name = _sanitize_output_name(output_name)
     candidate, role = _resolve_candidate(
         repository, candidate_id, candidate_name, target_role
     )
@@ -73,7 +84,7 @@ def bootstrap_request(
     )
     if not resume_ids or not resolved_job_ids:
         raise ValueError("at least one resume and one job are required")
-    generated_name = output_name or _default_output_name(candidate, jobs, role)
+    generated_name = sanitized_explicit_name or _default_output_name(candidate, jobs, role)
     return RewriteRequest(
         candidate_id=candidate["id"],
         source_resume_ids=_ordered_unique(resume_ids),
@@ -89,7 +100,10 @@ def export_ready_pdf(
     run_id: str,
 ) -> Path:
     """Copy a READY artifact below a user-selected directory without overwriting."""
-    source = Path(source_pdf).resolve(strict=True)
+    source_input = Path(source_pdf)
+    if _is_reparse_point(source_input):
+        raise ValueError("ready PDF is unavailable")
+    source = source_input.resolve(strict=True)
     if not source.is_file() or source.suffix.lower() != ".pdf":
         raise ValueError("ready PDF is unavailable")
     name = _validated_export_name(output_name)
@@ -243,15 +257,15 @@ def _job_company(body: str) -> str:
 
 
 def _sanitize_output_name(value: str) -> str:
-    value = _INVALID_FILENAME.sub("-", str(value)).strip().rstrip(". ")
-    if not value:
-        value = "resume"
-    if not value.lower().endswith(".pdf"):
-        value += ".pdf"
-    stem = Path(value).stem.split(".", 1)[0].upper()
-    if stem in _WINDOWS_RESERVED:
-        value = f"resume-{value}"
-    return _validated_export_name(value)
+    value = _INVALID_FILENAME.sub("-", str(value)).strip()
+    stem = value[:-4] if value.lower().endswith(".pdf") else value
+    stem = stem.rstrip(". ")
+    if not stem:
+        stem = "resume"
+    device_stem = stem.split(".", 1)[0].rstrip(". ").upper()
+    if device_stem in _WINDOWS_RESERVED:
+        stem = f"resume-{device_stem}"
+    return _validated_export_name(_cap_output_filename(f"{stem}.pdf"))
 
 
 def _validated_export_name(value: str) -> str:
@@ -261,15 +275,35 @@ def _validated_export_name(value: str) -> str:
         raise ValueError("export filename is unsafe")
     if not value.lower().endswith(".pdf"):
         value += ".pdf"
-    stem = Path(value).stem.split(".", 1)[0].upper()
+    if len(value) > 180:
+        raise ValueError("export filename is unsafe")
+    stem = Path(value).stem.split(".", 1)[0].rstrip(". ").upper()
     if stem in _WINDOWS_RESERVED:
         raise ValueError("export filename is unsafe")
     return value
 
 
+def _validate_explicit_output_name(value: str) -> None:
+    if not isinstance(value, str) or not value or Path(value).name != value:
+        raise ValueError("output filename is unsafe")
+    if "\x00" in value or "/" in value or "\\" in value or value in {".", ".."}:
+        raise ValueError("output filename is unsafe")
+
+
+def _cap_output_filename(value: str) -> str:
+    if len(value) <= 180:
+        return value
+    suffix = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    ending = f"-{suffix}.pdf"
+    stem = Path(value).stem[: 180 - len(ending)].rstrip(". ") or "resume"
+    return f"{stem}{ending}"
+
+
 def _collision_name(root: Path, name: str, suffix: str, attempt: int) -> Path:
     stem = Path(name).stem
     marker = f"-{suffix}" if attempt == 1 else f"-{suffix}-{attempt}"
+    max_stem_length = 180 - len(marker) - len(".pdf")
+    stem = stem[:max_stem_length].rstrip(". ") or "resume"
     return root / f"{stem}{marker}.pdf"
 
 
@@ -282,10 +316,14 @@ def _readable_file(value: Path) -> Path:
 
 def _is_reparse_point(path: Path) -> bool:
     try:
+        is_junction = bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        is_junction = True
+    try:
         attributes = os.lstat(path).st_file_attributes
     except (AttributeError, OSError):
         attributes = 0
-    return path.is_symlink() or bool(attributes & 0x400)
+    return path.is_symlink() or is_junction or bool(attributes & 0x400)
 
 
 def _nonempty(value: object) -> str | None:
@@ -311,8 +349,10 @@ def _combined_inputs(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rewrite_resume")
-    commands = parser.add_subparsers(dest="command", required=True)
+    parser = _SafeArgumentParser(prog="rewrite_resume")
+    commands = parser.add_subparsers(
+        dest="command", required=True, parser_class=_SafeArgumentParser
+    )
     run = commands.add_parser("run")
     run.add_argument("--candidate-id")
     run.add_argument("--candidate-name")
@@ -373,9 +413,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def _read_fact_answers(path: Path) -> list[FactAnswer]:
     raw = json.loads(_readable_file(path).read_text(encoding="utf-8-sig"))
-    if not isinstance(raw, list):
-        raise ValueError("facts JSON must be an array")
-    return [FactAnswer.model_validate(item, strict=True) for item in raw]
+    facts = FactAnswersRequest.model_validate(
+        {"fact_answers": raw}, strict=True
+    ).fact_answers
+    if len({item.question_id for item in facts}) != len(facts):
+        raise ValueError("duplicate fact answers are not allowed")
+    return facts
 
 
 def _export_if_ready(run: dict, output_dir: str | None) -> Path | None:

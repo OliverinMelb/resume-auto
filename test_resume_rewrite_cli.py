@@ -114,6 +114,15 @@ class RewriteCliTests(unittest.TestCase):
         self.assertEqual(original.read_bytes(), b"old")
         self.assertEqual(first_collision.read_bytes(), b"older")
 
+    def test_collision_suffix_keeps_final_export_name_within_windows_limit(self):
+        source = self.root / "resume.pdf"
+        source.write_bytes(b"new")
+        name = f"{'a' * 176}.pdf"
+        (self.root / name).write_bytes(b"old")
+        exported = export_ready_pdf(source, self.root, name, "rewrite_run_abcdef")
+        self.assertLessEqual(len(exported.name), 180)
+        self.assertTrue(exported.name.endswith("-abcdef.pdf"))
+
     def test_company_section_has_priority_in_generated_output_name(self):
         resume = self.root / "resume.md"
         jd = self.root / "jd.md"
@@ -140,6 +149,19 @@ class RewriteCliTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             export_ready_pdf(source, output, "link/escape.pdf", "rewrite_run_abcdef")
 
+    def test_export_rejects_symlinked_source_without_creating_output(self):
+        external = self.root / "external.pdf"
+        external.write_bytes(b"private")
+        linked_source = self.root / "linked.pdf"
+        output = self.root / "output"
+        try:
+            linked_source.symlink_to(external)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        with self.assertRaises(ValueError):
+            export_ready_pdf(linked_source, output, "safe.pdf", "rewrite_run_abcdef")
+        self.assertFalse(output.exists())
+
     def test_run_outputs_compact_json_and_needs_facts_exit_code_without_private_input(self):
         resume = self.root / "resume.md"
         jd = self.root / "jd.md"
@@ -165,6 +187,36 @@ class RewriteCliTests(unittest.TestCase):
         facts.write_text(json.dumps({"fact_answers": []}), "utf-8")
         with patch("resume_agent.rewrite_cli._build_pipeline", return_value=pipeline), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertEqual(main(["resume", "--run-id", "rewrite_run_abcdef", "--facts-json", str(facts)]), 1)
+
+    def test_resume_rejects_empty_oversized_and_duplicate_fact_arrays_before_pipeline(self):
+        facts = self.root / "facts.json"
+        pipeline = FakePipeline({"id": "rewrite_run_abcdef", "status": "READY", "blocking_questions": []})
+        invalid_payloads = [
+            [],
+            [{"question_id": f"gap-{number:012d}", "answer": "Verified", "source_note": "Candidate confirmed"} for number in range(201)],
+            [
+                {"question_id": "gap-aaaaaaaaaaaa", "answer": "Verified", "source_note": "Candidate confirmed"},
+                {"question_id": "gap-aaaaaaaaaaaa", "answer": "Again", "source_note": "Candidate confirmed"},
+            ],
+        ]
+        for payload in invalid_payloads:
+            with self.subTest(payload_size=len(payload)):
+                facts.write_text(json.dumps(payload), "utf-8")
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch("resume_agent.rewrite_cli._build_pipeline", return_value=pipeline), redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(main(["resume", "--run-id", "rewrite_run_abcdef", "--facts-json", str(facts)]), 1)
+                self.assertIsNone(pipeline.received_answers)
+                self.assertEqual(json.loads(stdout.getvalue())["status"], "FAILED")
+                self.assertNotIn("Verified", stdout.getvalue() + stderr.getvalue())
+
+    def test_parse_errors_are_compact_json_and_never_echo_secret_arguments(self):
+        for args in (["resume"], ["run", "--unknown", "PRIVATE_TOKEN_123"]):
+            with self.subTest(args=args[:2]):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(main(args), 1)
+                self.assertEqual(set(json.loads(stdout.getvalue())), {"id", "status", "blocking_questions", "exported_path"})
+                self.assertNotIn("PRIVATE_TOKEN_123", stdout.getvalue() + stderr.getvalue())
 
     def test_run_preserves_interleaved_ids_and_paths_in_request_order(self):
         candidate = self.repository.create_candidate("Candidate", ["Agent"], "")
@@ -195,6 +247,30 @@ class RewriteCliTests(unittest.TestCase):
                 "--source-resume-id", resume["id"], "--job-id", job["id"],
             ])
         self.assertEqual(code, 1)
+
+    def test_device_name_variants_are_normalized_before_request_validation(self):
+        resume = self.root / "resume.md"
+        jd = self.root / "jd.md"
+        resume.write_text("resume", "utf-8")
+        jd.write_text("job", "utf-8")
+        for name in ("CON .pdf", "NUL .pdf", "LPT1... .pdf"):
+            with self.subTest(name=name):
+                request = bootstrap_request(self.repository, None, "Candidate", "Role", [resume], [jd], name)
+                self.assertTrue(request.output_name.startswith("resume-"))
+                self.assertNotIn(" .pdf", request.output_name)
+
+    def test_output_name_is_checked_before_bootstrap_mutates_and_long_names_are_capped(self):
+        resume = self.root / "resume.md"
+        jd = self.root / "jd.md"
+        resume.write_text("resume", "utf-8")
+        jd.write_text("job", "utf-8")
+        with self.assertRaises(ValueError):
+            bootstrap_request(self.repository, None, "Candidate", "Role", [resume], [jd], "../escape.pdf")
+        self.assertFalse(self.repository.database_path.exists())
+        long_name = "Candidate" * 40
+        request = bootstrap_request(self.repository, None, long_name, "Role", [resume], [jd], None)
+        self.assertLessEqual(len(request.output_name), 180)
+        self.assertTrue(request.output_name.endswith(".pdf"))
 
 
 if __name__ == "__main__":
