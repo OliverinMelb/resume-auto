@@ -1,5 +1,6 @@
 import hashlib
 import re
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -9,8 +10,8 @@ from resume_agent.rewrite_schemas import CodexRewriteResult, MissingInformation
 
 PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 DATE = re.compile(
-    r"(?<!\d)(?:19|20)\d{2}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?)?(?!\d)"
-    r"|(?<!\d)(?:19|20)\d{2}年(?:\d{1,2}月(?:\d{1,2}日?)?)?"
+    r"(?<!\d)(?:19|20)\d{2}\s*年(?:\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日?)?)?"
+    r"|(?<!\d)(?:19|20)\d{2}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?)?(?!\d)"
 )
 VERSION = re.compile(
     r"\b(?:Python|Java|Node(?:\.js)?)\s+v?\d+(?:\.\d+){0,3}\b", re.I
@@ -19,13 +20,43 @@ METRIC = re.compile(
     r"(?<![A-Za-z0-9])"
     r"\d+(?:\.\d+)?"
     r"(?:\s*(?:-|–|—|~|～|至|到)\s*\d+(?:\.\d+)?)?"
-    r"\s*(?:%|\+|ms|毫秒|s|秒|分钟|小时|个(?:节点|字段)?|项|轮|维|"
-    r"种(?:状态)?|字段|节点|倍|次)"
+    r"\s*(?:%|\+|qps|tps|rps|ms|毫秒|s|秒|分钟|小时|年|个月|月|天|"
+    r"(?:万|亿)(?:用户|人|家|条|次|个|元)?|人|家|条|"
+    r"个(?:节点|字段)?|项|轮|维|种(?:状态)?|字段|节点|倍|次)"
     r"(?![A-Za-z0-9])",
     re.I,
 )
 QUESTION_ID = re.compile(r"^(?:metric|gap|conflict)-[0-9a-f]{12}$")
 CONFLICT_TERMS = ("冲突", "矛盾", "不一致", "conflict", "inconsistent", "contradict")
+PLACEHOLDER_TERMS = (
+    "不知道",
+    "不清楚",
+    "帮我补",
+    "随便",
+    "不记得",
+    "没有",
+)
+PLACEHOLDER_EXACT = {"无", "不知道", "不清楚", "随便", "没有", "不记得"}
+SOURCE_NOTE_TERMS = (
+    "记录",
+    "日志",
+    "回归",
+    "统计",
+    "报告",
+    "监控",
+    "数据库",
+    "仓库",
+    "代码",
+    "截图",
+    "测量",
+    "候选人确认",
+)
+MIN_ANSWER_LENGTH = 4
+MIN_SOURCE_NOTE_LENGTH = 6
+HEADING = re.compile(r"^\s{0,3}#{1,6}(?:\s+|$)")
+STRUCTURAL_MARKDOWN = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,}|```.*)\s*$")
+LIST_PREFIX = re.compile(r"^\s*(?:(?:[-*+]|\d+[.)])\s+|>\s*)")
+CHECKBOX_PREFIX = re.compile(r"^\[[ xX]\]\s+")
 
 
 @dataclass(frozen=True)
@@ -38,6 +69,12 @@ class InvalidModelResult(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class _DraftLine:
+    claim: str
+    normalized: str
+
+
 def stable_metric_question_id(claim: str, metric: str) -> str:
     normalized = _normalize_for_hash(f"{claim}|{metric}")
     return "metric-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
@@ -45,10 +82,8 @@ def stable_metric_question_id(claim: str, metric: str) -> str:
 
 def extract_business_metrics(markdown: str) -> list[tuple[str, str]]:
     matches: list[tuple[str, str]] = []
-    for raw_line in markdown.splitlines():
-        claim = raw_line.strip().lstrip("-#* ").strip()
-        if not claim:
-            continue
+    for line in _substantive_lines(markdown):
+        claim = line.claim
         scrubbed = PHONE.sub("", claim)
         scrubbed = DATE.sub("", scrubbed)
         scrubbed = VERSION.sub("", scrubbed)
@@ -129,40 +164,141 @@ def validate_rewrite_facts(
     blockers = [
         item
         for item in declared_items
-        if item.blocking and not _answer_has_evidence(answers.get(item.question_id))
+        if item.blocking
+        and not _answer_has_evidence(answers.get(item.question_id), item.question_id)
     ]
 
-    for claim, metric in extract_business_metrics(result.rewritten_resume_markdown):
-        audits = [
-            item
-            for item in result.claim_audit
-            if metric in item.claim and _claims_overlap(claim, item.claim)
+    draft_lines = _substantive_lines(result.rewritten_resume_markdown)
+    audit_claims = [_normalize_claim(item.claim) for item in result.claim_audit]
+    coverage = [
+        [
+            index
+            for index, audit_claim in enumerate(audit_claims)
+            if audit_claim == line.normalized
         ]
-        question_id = stable_metric_question_id(claim, metric)
-        answered = _answer_has_evidence(answers.get(question_id))
-        basis_in_source = (
-            len(audits) == 1
-            and bool(_clean_text(audits[0].measurement_basis))
-            and any(
-                _contains_basis(
-                    allowed_resumes[source_id], audits[0].measurement_basis or ""
-                )
-                for source_id in audits[0].source_resume_ids
-            )
-        )
-        valid_audit = len(audits) == 1 and (
-            (audits[0].fact_status == "source_verified" and basis_in_source)
-            or (audits[0].fact_status == "user_confirmed" and answered)
-        )
-        if not valid_audit and not answered:
+        for line in draft_lines
+    ]
+
+    covered_audits = {index for indexes in coverage for index in indexes}
+    for line, indexes in zip(draft_lines, coverage):
+        if not indexes:
             blockers.append(
-                MissingInformation(
-                    question_id=question_id,
-                    question=f"请说明“{claim}”中 {metric} 的统计口径和可核验来源",
-                    blocking=True,
-                    reason="业务指标缺少唯一 claim_audit 或可核验 measurement_basis",
+                _gap_blocker(
+                    f"请为“{line.claim}”提供唯一 claim_audit",
+                    "成稿实质行缺少 claim_audit",
                 )
             )
+        elif len(indexes) > 1:
+            blockers.append(
+                _gap_blocker(
+                    f"请合并“{line.claim}”的重复 claim_audit",
+                    "成稿实质行存在重复 claim_audit",
+                )
+            )
+
+    for index, audit in enumerate(result.claim_audit):
+        if index not in covered_audits:
+            display = _display_claim(audit.claim) or "(空 claim)"
+            blockers.append(
+                _gap_blocker(
+                    f"请移除或修正未覆盖成稿的 claim_audit：“{display}”",
+                    "claim_audit 未覆盖任何成稿实质行",
+                )
+            )
+
+    metrics_by_claim: dict[str, list[str]] = {}
+    for claim, metric in extract_business_metrics(result.rewritten_resume_markdown):
+        metrics_by_claim.setdefault(_normalize_claim(claim), []).append(metric)
+
+    for line, indexes in zip(draft_lines, coverage):
+        if len(indexes) != 1:
+            continue
+        audit = result.claim_audit[indexes[0]]
+        linked_quotes = [
+            quote
+            for quote in audit.source_quotes
+            if _quote_relates_to_claim(quote, line.claim)
+        ]
+        if audit.source_quotes and not linked_quotes:
+            blockers.append(
+                _gap_blocker(
+                    f"请为“{line.claim}”提供与 claim 确定关联的原文 quote",
+                    "claim_audit quote 与成稿 claim 缺少确定性关联",
+                )
+            )
+
+        if audit.fact_status == "source_verified":
+            if not audit.source_resume_ids or not audit.source_quotes:
+                blockers.append(
+                    _gap_blocker(
+                        f"请为“{line.claim}”补充归属明确的原文证据",
+                        "source_verified claim 缺少 source_resume_ids/source_quotes",
+                    )
+                )
+        elif not audit.source_quotes and not metrics_by_claim.get(line.normalized):
+            question = f"请确认“{line.claim}”并说明可核验来源"
+            reason = "成稿 claim 缺少可核验来源或候选人确认"
+            blocker = _gap_blocker(question, reason)
+            if not _answer_has_evidence(
+                answers.get(blocker.question_id), blocker.question_id
+            ):
+                blockers.append(blocker)
+
+    for line, indexes in zip(draft_lines, coverage):
+        for metric in metrics_by_claim.get(line.normalized, []):
+            question_id = stable_metric_question_id(line.claim, metric)
+            if len(indexes) != 1:
+                blockers.append(
+                    MissingInformation(
+                        question_id=question_id,
+                        question=(
+                            f"请先为“{line.claim}”中的 {metric} 提供唯一 claim_audit"
+                        ),
+                        blocking=True,
+                        reason="业务指标缺少唯一 claim_audit",
+                    )
+                )
+                continue
+
+            audit = result.claim_audit[indexes[0]]
+            answer = answers.get(question_id)
+            answered = _answer_has_evidence(answer, question_id, metric)
+            basis = _clean_text(audit.measurement_basis)
+            answer_supports_basis = answered and (
+                not basis or _answer_contains_basis(answer, basis)
+            )
+            metric_quotes = [
+                quote
+                for quote in audit.source_quotes
+                if _quote_contains_metric(quote, metric)
+            ]
+            source_evidence = bool(metric_quotes) and bool(basis) and any(
+                _contains_basis(quote, basis) for quote in metric_quotes
+            )
+
+            if audit.fact_status == "source_verified":
+                valid_metric = bool(metric_quotes) and (
+                    source_evidence or answer_supports_basis
+                )
+            elif audit.fact_status in {"user_confirmed", "unverified"}:
+                valid_metric = answer_supports_basis
+            else:
+                valid_metric = False
+
+            if not valid_metric:
+                blockers.append(
+                    MissingInformation(
+                        question_id=question_id,
+                        question=(
+                            f"请说明“{line.claim}”中 {metric} 的统计口径和可核验来源"
+                        ),
+                        blocking=True,
+                        reason=(
+                            "业务指标必须绑定唯一 claim_audit、同一 quote 中的值和口径，"
+                            "或当前问题的有效候选人答案"
+                        ),
+                    )
+                )
 
     unique_blockers = deduplicate_questions(blockers)
     return FactGateResult(
@@ -182,7 +318,8 @@ def _clean_text(value: Any) -> str:
 
 
 def _normalize_for_hash(value: str) -> str:
-    return re.sub(r"\s+", " ", value.strip().lower())
+    normalized = unicodedata.normalize("NFKC", value)
+    return re.sub(r"\s+", " ", normalized.strip().lower())
 
 
 def _stable_declared_question_id(item: MissingInformation) -> str:
@@ -211,18 +348,36 @@ def _valid_answers_by_id(fact_answers: Sequence[Any]) -> dict[str, Any]:
     return answers
 
 
-def _answer_has_evidence(answer: Any) -> bool:
-    return bool(
-        answer is not None
-        and _clean_text(_field(answer, "answer"))
-        and _clean_text(_field(answer, "source_note"))
-    )
+def _answer_has_evidence(
+    answer: Any,
+    expected_question_id: str,
+    metric: str | None = None,
+) -> bool:
+    if (
+        answer is None
+        or _clean_text(_field(answer, "question_id")) != expected_question_id
+    ):
+        return False
+    answer_text = _clean_text(_field(answer, "answer"))
+    source_note = _clean_text(_field(answer, "source_note"))
+    if len(answer_text) < MIN_ANSWER_LENGTH or len(source_note) < MIN_SOURCE_NOTE_LENGTH:
+        return False
+    if _is_placeholder(answer_text) or _is_placeholder(source_note):
+        return False
+    normalized_note = _normalize_for_hash(source_note)
+    if not any(term in normalized_note for term in SOURCE_NOTE_TERMS):
+        return False
+    return metric is None or _answer_explains_metric(answer_text, metric)
 
 
 def _contains_basis(container: str, basis: str) -> bool:
-    compact_container = re.sub(r"\s+", "", container)
-    compact_basis = re.sub(r"\s+", "", basis)
-    return bool(compact_basis and compact_basis in compact_container)
+    compact_container = _compact(container)
+    compact_basis = _compact(basis)
+    if not compact_basis:
+        return False
+    prefix = r"(?<![\d.])" if compact_basis[0].isdigit() else ""
+    suffix = r"(?![\d.])" if compact_basis[-1].isdigit() else ""
+    return bool(re.search(prefix + re.escape(compact_basis) + suffix, compact_container))
 
 
 def _basis_has_evidence(
@@ -231,7 +386,10 @@ def _basis_has_evidence(
     if any(_contains_basis(source, basis) for source in source_texts):
         return True
     return any(
-        _answer_has_evidence(answer)
+        _answer_has_evidence(
+            answer,
+            _clean_text(_field(answer, "question_id")),
+        )
         and (
             _contains_basis(_field(answer, "answer"), basis)
             or _contains_basis(_field(answer, "source_note"), basis)
@@ -240,14 +398,98 @@ def _basis_has_evidence(
     )
 
 
-def _claims_overlap(markdown_claim: str, audit_claim: str) -> bool:
-    normalized_markdown = _normalize_for_hash(markdown_claim)
-    normalized_audit = _normalize_for_hash(audit_claim)
+def _display_claim(raw_line: str) -> str:
+    value = unicodedata.normalize("NFKC", raw_line).strip()
+    value = LIST_PREFIX.sub("", value)
+    value = CHECKBOX_PREFIX.sub("", value)
+    value = re.sub(r"[*_`]+", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _normalize_claim(value: str) -> str:
+    return _normalize_for_hash(_display_claim(value))
+
+
+def _substantive_lines(markdown: str) -> list[_DraftLine]:
+    lines: list[_DraftLine] = []
+    for raw_line in markdown.splitlines():
+        if (
+            not raw_line.strip()
+            or HEADING.match(raw_line)
+            or STRUCTURAL_MARKDOWN.match(raw_line)
+        ):
+            continue
+        claim = _display_claim(raw_line)
+        normalized = _normalize_claim(claim)
+        if normalized:
+            lines.append(_DraftLine(claim=claim, normalized=normalized))
+    return lines
+
+
+def _gap_blocker(question: str, reason: str) -> MissingInformation:
+    normalized = _normalize_for_hash(f"{question}|{reason}")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    return MissingInformation(
+        question_id=f"gap-{digest}",
+        question=question,
+        blocking=True,
+        reason=reason,
+    )
+
+
+def _quote_relates_to_claim(quote: str, claim: str) -> bool:
+    normalized_quote = _normalize_claim(quote)
+    normalized_claim = _normalize_claim(claim)
     return bool(
-        normalized_markdown
-        and normalized_audit
+        normalized_quote
+        and normalized_claim
         and (
-            normalized_markdown in normalized_audit
-            or normalized_audit in normalized_markdown
+            normalized_claim in normalized_quote
+            or normalized_quote in normalized_claim
         )
+    )
+
+
+def _compact(value: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value).lower())
+
+
+def _quote_contains_metric(quote: str, metric: str) -> bool:
+    expected = _compact(metric)
+    return any(
+        _compact(candidate) == expected
+        for _, candidate in extract_business_metrics(quote)
+    )
+
+
+def _answer_contains_basis(answer: Any, basis: str) -> bool:
+    return _contains_basis(_field(answer, "answer"), basis) or _contains_basis(
+        _field(answer, "source_note"), basis
+    )
+
+
+def _is_placeholder(value: str) -> bool:
+    normalized = _normalize_for_hash(value)
+    return normalized in PLACEHOLDER_EXACT or any(
+        term in normalized for term in PLACEHOLDER_TERMS
+    )
+
+
+def _answer_explains_metric(answer: str, metric: str) -> bool:
+    expected = _compact(metric)
+    if any(
+        _compact(candidate) == expected
+        for _, candidate in extract_business_metrics(answer)
+    ):
+        return True
+    normalized = unicodedata.normalize("NFKC", answer)
+    numbers = re.findall(r"\d+(?:\.\d+)?", normalized)
+    metric_numbers = re.findall(
+        r"\d+(?:\.\d+)?", unicodedata.normalize("NFKC", metric)
+    )
+    formula_terms = ("成功", "失败", "总计", "其中", "样本", "回归", "统计", "/", "除以")
+    return (
+        len(numbers) >= 2
+        and bool(set(numbers) & set(metric_numbers))
+        and any(term in normalized for term in formula_terms)
     )
