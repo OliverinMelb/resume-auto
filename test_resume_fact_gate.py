@@ -1809,6 +1809,83 @@ class FactGateTests(unittest.TestCase):
         )
         self.assertEqual(accepted.blockers, [])
 
+    def test_percentage_final_event_controls_value_and_state(self):
+        result = result_with_metric("user_confirmed")
+        question_id = validate_rewrite_facts(
+            result, self.resumes, self.jobs, []
+        ).blockers[0].question_id
+        rejected = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="工具调用86/100，最终工具调用86/100为无效数据",
+                    source_note="候选人确认，依据回归记录",
+                )
+            ],
+        )
+        self.assertEqual(
+            [item.question_id for item in rejected.blockers], [question_id]
+        )
+
+        accepted = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="工具调用旧86/100为无效数据，最终工具调用86/100为有效最终结果",
+                    source_note="候选人确认，依据回归记录",
+                )
+            ],
+        )
+        self.assertEqual(accepted.blockers, [])
+
+    def test_qps_final_exact_metric_event_controls_polarity(self):
+        claim = "接口达到500 QPS"
+        result = result_for_claim(claim, status="user_confirmed")
+        question_id = validate_rewrite_facts(
+            result, self.resumes, self.jobs, []
+        ).blockers[0].question_id
+        rejected = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer=(
+                        "接口达到500 QPS但复核后未达到500 QPS，"
+                        "压测窗口持续5分钟"
+                    ),
+                    source_note="候选人确认，依据压测记录",
+                )
+            ],
+        )
+        self.assertEqual(
+            [item.question_id for item in rejected.blockers], [question_id]
+        )
+
+        accepted = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer=(
+                        "接口曾未达到500 QPS，优化后最终达到500 QPS，"
+                        "持续压测5分钟取P95"
+                    ),
+                    source_note="候选人确认，依据压测记录",
+                )
+            ],
+        )
+        self.assertEqual(accepted.blockers, [])
+
 
 if __name__ == "__main__":
     unittest.main()

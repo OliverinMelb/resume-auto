@@ -875,10 +875,15 @@ def _answer_has_asserted_exact_metric(answer: str, metric: str) -> bool:
         return False
     compact_answer = _compact(answer)
     compact_metric = _compact(metric)
-    start = compact_answer.find(compact_metric)
-    return start >= 0 and _span_is_asserted(
-        compact_answer, start, start + len(compact_metric)
+    prefix = r"(?<![\d.])" if compact_metric[0].isdigit() else ""
+    suffix = r"(?![A-Za-z0-9])" if compact_metric[-1].isalnum() else ""
+    events = list(
+        re.finditer(prefix + re.escape(compact_metric) + suffix, compact_answer)
     )
+    if not events:
+        return False
+    final = events[-1]
+    return _span_is_asserted(compact_answer, final.start(), final.end())
 
 
 def _clauses_with_exact_metric(answer: str, metric: str) -> list[str]:
@@ -937,62 +942,79 @@ def _throughput_record_matches(
 ) -> bool:
     for record in _measurement_records(text):
         parts = [part for part in re.split(r"[，,]", record) if part.strip()]
-        for index, part in enumerate(parts):
-            if not _answer_has_asserted_exact_metric(part, metric):
-                continue
-            selected = [part]
-            adjacent = index - 1
-            while adjacent >= 0 and _is_measurement_continuation(parts[adjacent]):
-                selected.insert(0, parts[adjacent])
-                adjacent -= 1
-            adjacent = index + 1
-            while adjacent < len(parts) and _is_measurement_continuation(
-                parts[adjacent]
-            ):
-                selected.append(parts[adjacent])
-                adjacent += 1
-            candidate = "，".join(selected)
-            compact_candidate = _compact(candidate)
-            has_measurement_source = any(
-                term in compact_candidate for term in QPS_MEASUREMENT_SOURCE_TERMS
+        metric_indexes = [
+            index
+            for index, part in enumerate(parts)
+            if _answer_has_exact_metric(part, metric)
+        ]
+        if not metric_indexes or not _answer_has_asserted_exact_metric(record, metric):
+            continue
+        index = metric_indexes[-1]
+        selected = [parts[index]]
+        adjacent = index - 1
+        while adjacent >= 0 and _is_measurement_continuation(parts[adjacent]):
+            selected.insert(0, parts[adjacent])
+            adjacent -= 1
+        adjacent = index + 1
+        while adjacent < len(parts) and _is_measurement_continuation(
+            parts[adjacent]
+        ):
+            selected.append(parts[adjacent])
+            adjacent += 1
+        candidate = "，".join(selected)
+        compact_candidate = _compact(candidate)
+        has_measurement_source = any(
+            term in compact_candidate for term in QPS_MEASUREMENT_SOURCE_TERMS
+        )
+        has_statistics_window = (
+            "窗口" in compact_candidate
+            or any(
+                term in compact_candidate for term in STATISTICS_WINDOW_TERMS
             )
-            has_statistics_window = (
-                "窗口" in compact_candidate
-                or any(
-                    term in compact_candidate for term in STATISTICS_WINDOW_TERMS
-                )
-                or bool(
-                    re.search(
-                        r"持续\d+(?:\.\d+)?(?:秒|分钟|小时)",
-                        compact_candidate,
-                    )
+            or bool(
+                re.search(
+                    r"持续\d+(?:\.\d+)?(?:秒|分钟|小时)",
+                    compact_candidate,
                 )
             )
-            basis_is_local = not basis or _contains_basis(candidate, basis)
-            if (
-                _metric_clause_is_relevant(candidate, claim, metric)
-                and has_measurement_source
-                and has_statistics_window
-                and basis_is_local
-            ):
-                return True
+        )
+        has_foreign_subject = _has_foreign_measurement_subject(record)
+        context_is_relevant = _metric_clause_is_relevant(
+            candidate, claim, metric
+        ) or (
+            not has_foreign_subject
+            and _metric_clause_is_relevant(record, claim, metric)
+        )
+        basis_is_local = not basis or _contains_basis(candidate, basis)
+        if (
+            context_is_relevant
+            and has_measurement_source
+            and has_statistics_window
+            and basis_is_local
+        ):
+            return True
     return False
+
+
+FOREIGN_MEASUREMENT_SUBJECTS = (
+    "另一",
+    "另一个",
+    "其他项目",
+    "其他服务",
+    "其他接口",
+    "平均年龄",
+    "考试",
+)
+
+
+def _has_foreign_measurement_subject(value: str) -> bool:
+    compact_value = _compact(value)
+    return any(term in compact_value for term in FOREIGN_MEASUREMENT_SUBJECTS)
 
 
 def _is_measurement_continuation(value: str) -> bool:
     compact_value = _compact(value)
-    if any(
-        term in compact_value
-        for term in (
-            "另一",
-            "另一个",
-            "其他项目",
-            "其他服务",
-            "其他接口",
-            "平均年龄",
-            "考试",
-        )
-    ):
+    if _has_foreign_measurement_subject(compact_value):
         return False
     return (
         any(term in compact_value for term in QPS_MEASUREMENT_SOURCE_TERMS)
@@ -1096,15 +1118,14 @@ def _percentage_record_matches(
     decimal_places = len(target_text.partition(".")[2])
     tolerance = 0.5 * (10 ** -decimal_places) + 1e-9
 
-    asserted_records = [
-        record
-        for record in _percentage_records(answer)
-        if record.denominator > 0
-        and _span_is_asserted(answer, record.start, record.end)
-    ]
-    if not asserted_records:
+    records = _percentage_records(answer)
+    if not records:
         return False
-    final = asserted_records[-1]
+    final = records[-1]
+    if final.denominator <= 0 or not _span_is_asserted(
+        answer, final.start, final.end
+    ):
+        return False
     measurement_record = _span_measurement_record(answer, final.start, final.end)
     final_clause = _span_clause(answer, final.start, final.end)
     context_is_relevant = (
