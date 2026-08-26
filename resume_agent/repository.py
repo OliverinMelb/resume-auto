@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -7,6 +8,25 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+
+DISCOVERY_RUN_ID = re.compile(r"^discovery_run_[0-9a-f]{32}$")
+DISCOVERY_RUN_STATUSES = {
+    "CREATED",
+    "COLLECTING",
+    "READY_FOR_IMPORT",
+    "PARTIAL",
+    "IMPORTED",
+    "FAILED",
+}
+DISCOVERY_STATUS_TRANSITIONS = {
+    "CREATED": {"COLLECTING", "FAILED"},
+    "COLLECTING": {"COLLECTING", "READY_FOR_IMPORT", "PARTIAL", "FAILED"},
+    "READY_FOR_IMPORT": {"READY_FOR_IMPORT", "PARTIAL", "IMPORTED", "FAILED"},
+    "PARTIAL": {"READY_FOR_IMPORT", "PARTIAL", "IMPORTED", "FAILED"},
+    "IMPORTED": set(),
+    "FAILED": set(),
+}
 
 
 def utc_now() -> str:
@@ -110,6 +130,37 @@ class Repository:
             data.pop("blocking_questions_json")
         )
         return data
+
+    @staticmethod
+    def _decode_discovery_run(
+        row: sqlite3.Row | None, run_id: str
+    ) -> dict[str, Any]:
+        if row is None:
+            raise NotFoundError("discovery run not found")
+        data = dict(row)
+        for name in (
+            "request",
+            "source_checkpoints",
+            "source_statuses",
+            "imported_job_ids",
+        ):
+            data[name] = json.loads(data.pop(f"{name}_json"))
+        return data
+
+    @staticmethod
+    def _validate_discovery_run_id(run_id: str) -> None:
+        if not isinstance(run_id, str) or not DISCOVERY_RUN_ID.fullmatch(run_id):
+            raise ValueError("invalid discovery run id")
+
+    @staticmethod
+    def _encode_discovery_json(value: Any) -> str:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
 
     def create_candidate(
         self, display_name: str | None, target_roles: list[str], notes: str
@@ -313,6 +364,110 @@ class Repository:
         data["keyword_counts"] = json.loads(data.pop("keyword_counts_json"))
         data["manual_findings"] = json.loads(data.pop("manual_findings_json"))
         return data
+
+    def create_discovery_run(
+        self,
+        run_id: str,
+        *,
+        candidate_id: str,
+        request: dict[str, Any],
+        artifact_dir: str,
+    ) -> dict[str, Any]:
+        self._validate_discovery_run_id(run_id)
+        if not isinstance(request, dict):
+            raise ValueError("invalid discovery request")
+        if not isinstance(artifact_dir, str) or not artifact_dir:
+            raise ValueError("invalid discovery artifact directory")
+        self.get_candidate(candidate_id)
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO discovery_runs(
+                    id, candidate_id, request_json, status,
+                    source_checkpoints_json, source_statuses_json,
+                    imported_job_ids_json, artifact_dir, error_code,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, 'CREATED', '{}', '{}', '[]', ?, NULL, ?, ?)
+                """,
+                (
+                    run_id,
+                    candidate_id,
+                    self._encode_discovery_json(request),
+                    artifact_dir,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_discovery_run(run_id)
+
+    def get_discovery_run(self, run_id: str) -> dict[str, Any]:
+        self._validate_discovery_run_id(run_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM discovery_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return self._decode_discovery_run(row, run_id)
+
+    def transition_discovery_run(
+        self,
+        run_id: str,
+        expected_statuses: set[str],
+        new_status: str,
+        *,
+        source_checkpoints: dict[str, Any] | None = None,
+        source_statuses: dict[str, str] | None = None,
+        imported_job_ids: list[str] | None = None,
+        error_code: str | None = None,
+    ) -> dict[str, Any]:
+        self._validate_discovery_run_id(run_id)
+        if (
+            not isinstance(expected_statuses, set)
+            or not expected_statuses
+            or not expected_statuses <= DISCOVERY_RUN_STATUSES
+            or new_status not in DISCOVERY_RUN_STATUSES
+            or not any(
+                new_status in DISCOVERY_STATUS_TRANSITIONS[status]
+                for status in expected_statuses
+            )
+        ):
+            raise ValueError("invalid discovery run status transition")
+        if source_checkpoints is not None and not isinstance(
+            source_checkpoints, dict
+        ):
+            raise ValueError("invalid discovery source checkpoints")
+        if source_statuses is not None and not isinstance(source_statuses, dict):
+            raise ValueError("invalid discovery source statuses")
+        if imported_job_ids is not None and (
+            not isinstance(imported_job_ids, list)
+            or any(not isinstance(job_id, str) for job_id in imported_job_ids)
+        ):
+            raise ValueError("invalid imported job ids")
+        if error_code is not None and not isinstance(error_code, str):
+            raise ValueError("invalid discovery error code")
+
+        assignments = ["status = ?", "updated_at = ?", "error_code = ?"]
+        parameters: list[Any] = [new_status, utc_now(), error_code]
+        for column, value in (
+            ("source_checkpoints_json", source_checkpoints),
+            ("source_statuses_json", source_statuses),
+            ("imported_job_ids_json", imported_job_ids),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                parameters.append(self._encode_discovery_json(value))
+        allowed = sorted(expected_statuses)
+        status_placeholders = ", ".join("?" for _ in allowed)
+        parameters.extend([run_id, *allowed])
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE discovery_runs SET {', '.join(assignments)} "
+                f"WHERE id = ? AND status IN ({status_placeholders})",
+                parameters,
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("invalid discovery run state transition")
+        return self.get_discovery_run(run_id)
 
     def create_rewrite_run(
         self, payload: dict[str, Any], artifact_dir: str

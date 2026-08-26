@@ -87,3 +87,25 @@ CREATE INDEX IF NOT EXISTS idx_rewrite_runs_candidate
 ON rewrite_runs(candidate_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_rewrite_runs_status
 ON rewrite_runs(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS discovery_runs (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+    request_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'CREATED', 'COLLECTING', 'READY_FOR_IMPORT',
+        'PARTIAL', 'IMPORTED', 'FAILED'
+    )),
+    source_checkpoints_json TEXT NOT NULL DEFAULT '{}',
+    source_statuses_json TEXT NOT NULL DEFAULT '{}',
+    imported_job_ids_json TEXT NOT NULL DEFAULT '[]',
+    artifact_dir TEXT NOT NULL,
+    error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_runs_candidate
+ON discovery_runs(candidate_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_runs_status
+ON discovery_runs(status, updated_at);
