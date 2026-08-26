@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Literal, get_args
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import Field, field_validator
@@ -63,6 +64,20 @@ class DiscoveryRequest(StrictModel):
 DiscoveryRunStatus = Literal[
     "CREATED", "COLLECTING", "READY_FOR_IMPORT", "PARTIAL", "IMPORTED", "FAILED"
 ]
+DISCOVERY_RUN_ID_PATTERN = re.compile(r"^discovery_run_[0-9a-f]{32}$")
+DISCOVERY_RUN_STATUSES = frozenset(get_args(DiscoveryRunStatus))
+DISCOVERY_STATUS_TRANSITIONS = {
+    "CREATED": frozenset({"COLLECTING", "FAILED"}),
+    "COLLECTING": frozenset(
+        {"COLLECTING", "READY_FOR_IMPORT", "PARTIAL", "FAILED"}
+    ),
+    "READY_FOR_IMPORT": frozenset(
+        {"READY_FOR_IMPORT", "PARTIAL", "IMPORTED", "FAILED"}
+    ),
+    "PARTIAL": frozenset({"READY_FOR_IMPORT", "PARTIAL", "IMPORTED", "FAILED"}),
+    "IMPORTED": frozenset(),
+    "FAILED": frozenset(),
+}
 
 
 _TRACKING_QUERY_PARAMETERS = {

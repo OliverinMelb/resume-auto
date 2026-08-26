@@ -1,6 +1,5 @@
 import hashlib
 import json
-import re
 import sqlite3
 import threading
 import uuid
@@ -9,24 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from resume_agent.discovery_schemas import (
+    DISCOVERY_RUN_ID_PATTERN,
+    DISCOVERY_RUN_STATUSES,
+    DISCOVERY_STATUS_TRANSITIONS,
+)
 
-DISCOVERY_RUN_ID = re.compile(r"^discovery_run_[0-9a-f]{32}$")
-DISCOVERY_RUN_STATUSES = {
-    "CREATED",
-    "COLLECTING",
-    "READY_FOR_IMPORT",
-    "PARTIAL",
-    "IMPORTED",
-    "FAILED",
-}
-DISCOVERY_STATUS_TRANSITIONS = {
-    "CREATED": {"COLLECTING", "FAILED"},
-    "COLLECTING": {"COLLECTING", "READY_FOR_IMPORT", "PARTIAL", "FAILED"},
-    "READY_FOR_IMPORT": {"READY_FOR_IMPORT", "PARTIAL", "IMPORTED", "FAILED"},
-    "PARTIAL": {"READY_FOR_IMPORT", "PARTIAL", "IMPORTED", "FAILED"},
-    "IMPORTED": set(),
-    "FAILED": set(),
-}
+
+DISCOVERY_RUN_ID = DISCOVERY_RUN_ID_PATTERN
 
 
 def utc_now() -> str:
@@ -426,7 +415,7 @@ class Repository:
             or not expected_statuses
             or not expected_statuses <= DISCOVERY_RUN_STATUSES
             or new_status not in DISCOVERY_RUN_STATUSES
-            or not any(
+            or not all(
                 new_status in DISCOVERY_STATUS_TRANSITIONS[status]
                 for status in expected_statuses
             )

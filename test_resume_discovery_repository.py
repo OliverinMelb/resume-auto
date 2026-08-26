@@ -1,9 +1,11 @@
 import json
+import re
 import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from typing import get_args
 
 from resume_agent.discovery_schemas import DiscoveredJob
 from resume_agent.repository import Repository
@@ -172,6 +174,52 @@ class DiscoveryRepositoryTests(unittest.TestCase):
                         RUN_ID, expected, new_status
                     )
 
+    def test_mixed_expected_statuses_cannot_revive_an_imported_run(self):
+        self._create_run()
+        self.repository.transition_discovery_run(RUN_ID, {"CREATED"}, "COLLECTING")
+        self.repository.transition_discovery_run(
+            RUN_ID, {"COLLECTING"}, "READY_FOR_IMPORT"
+        )
+        self.repository.transition_discovery_run(
+            RUN_ID, {"READY_FOR_IMPORT"}, "IMPORTED"
+        )
+
+        with self.assertRaisesRegex(ValueError, "discovery run"):
+            self.repository.transition_discovery_run(
+                RUN_ID, {"CREATED", "IMPORTED"}, "COLLECTING"
+            )
+        self.assertEqual(
+            self.repository.get_discovery_run(RUN_ID)["status"], "IMPORTED"
+        )
+
+    def test_run_id_status_and_schema_policy_have_one_shared_contract(self):
+        from resume_agent import discovery_artifacts, discovery_schemas, repository
+
+        run_pattern = getattr(discovery_schemas, "DISCOVERY_RUN_ID_PATTERN", None)
+        statuses = getattr(discovery_schemas, "DISCOVERY_RUN_STATUSES", None)
+        transitions = getattr(discovery_schemas, "DISCOVERY_STATUS_TRANSITIONS", None)
+        self.assertIsNotNone(run_pattern, "shared discovery run ID policy is missing")
+        self.assertIsNotNone(statuses, "shared discovery status policy is missing")
+        self.assertIsNotNone(transitions, "shared discovery transition policy is missing")
+        self.assertIs(repository.DISCOVERY_RUN_ID, run_pattern)
+        self.assertIs(repository.DISCOVERY_RUN_STATUSES, statuses)
+        self.assertIs(repository.DISCOVERY_STATUS_TRANSITIONS, transitions)
+        self.assertIs(discovery_artifacts.DISCOVERY_RUN_ID, run_pattern)
+        self.assertIs(discovery_artifacts.AUDIT_STATUSES, statuses)
+        self.assertEqual(set(get_args(discovery_schemas.DiscoveryRunStatus)), statuses)
+
+        schema = (Path(repository.__file__).with_name("schema.sql")).read_text(
+            encoding="utf-8"
+        )
+        definition = re.search(
+            r"CREATE TABLE IF NOT EXISTS discovery_runs .*?"
+            r"status TEXT NOT NULL CHECK\(status IN \((.*?)\)\)",
+            schema,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(definition)
+        self.assertEqual(set(re.findall(r"'([^']+)'", definition.group(1))), statuses)
+
 
 class DiscoveryArtifactTests(unittest.TestCase):
     def setUp(self):
@@ -325,6 +373,67 @@ class DiscoveryArtifactTests(unittest.TestCase):
             artifacts.path("audit.md").read_text(encoding="utf-8"),
             json.dumps(tampered) + "\n",
         )
+
+    def test_append_rejects_duplicate_audit_keys_hiding_forbidden_content(self):
+        DiscoveryArtifacts = _artifacts_class()
+        artifacts = DiscoveryArtifacts.create(self.runs_root, RUN_ID)
+        raw = (
+            '{"run_id":"' + RUN_ID + '","status":"CREATED",'
+            '"event_code":"RUN_CREATED",'
+            '"timestamp_utc":"2026-08-26T00:00:00+00:00",'
+            '"source":"https://jobs.test/?token=secret","source":"boss"}\n'
+        )
+        artifacts.path("audit.md").write_text(raw, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "audit"):
+            artifacts.append_audit(
+                run_id=RUN_ID,
+                status="COLLECTING",
+                event_code="COLLECTION_STARTED",
+            )
+        self.assertEqual(artifacts.path("audit.md").read_text("utf-8"), raw)
+
+    def test_append_rejects_existing_audit_row_for_another_run(self):
+        DiscoveryArtifacts = _artifacts_class()
+        artifacts = DiscoveryArtifacts.create(self.runs_root, RUN_ID)
+        other_run_id = "discovery_run_" + "b" * 32
+        raw = json.dumps(
+            {
+                "run_id": other_run_id,
+                "status": "CREATED",
+                "event_code": "RUN_CREATED",
+                "timestamp_utc": "2026-08-26T00:00:00+00:00",
+            }
+        ) + "\n"
+        artifacts.path("audit.md").write_text(raw, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "audit run id"):
+            artifacts.append_audit(
+                run_id=RUN_ID,
+                status="COLLECTING",
+                event_code="COLLECTION_STARTED",
+            )
+        self.assertEqual(artifacts.path("audit.md").read_text("utf-8"), raw)
+
+    def test_append_canonically_reserializes_valid_existing_rows(self):
+        DiscoveryArtifacts = _artifacts_class()
+        artifacts = DiscoveryArtifacts.create(self.runs_root, RUN_ID)
+        previous = {
+            "timestamp_utc": "2026-08-26T00:00:00+00:00",
+            "event_code": "RUN_CREATED",
+            "status": "CREATED",
+            "run_id": RUN_ID,
+        }
+        raw = json.dumps(previous, separators=(", ", ": ")) + "   \n"
+        artifacts.path("audit.md").write_text(raw, encoding="utf-8")
+        artifacts.append_audit(
+            run_id=RUN_ID,
+            status="COLLECTING",
+            event_code="COLLECTION_STARTED",
+        )
+        lines = artifacts.path("audit.md").read_text("utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertNotEqual(lines[0], raw.rstrip("\n"))
+        for line in lines:
+            self.assertEqual(line, json.dumps(json.loads(line), sort_keys=True))
 
 
 if __name__ == "__main__":

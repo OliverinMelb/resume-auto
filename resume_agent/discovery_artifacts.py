@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from resume_agent.discovery_schemas import DiscoveredJob
+from resume_agent.discovery_schemas import (
+    DISCOVERY_RUN_ID_PATTERN,
+    DISCOVERY_RUN_STATUSES,
+    DiscoveredJob,
+)
 
 
 DISCOVERY_ARTIFACTS = {
@@ -20,17 +23,10 @@ DISCOVERY_ARTIFACTS = {
     "discovery-report.md",
     "audit.md",
 }
-DISCOVERY_RUN_ID = re.compile(r"^discovery_run_[0-9a-f]{32}$")
+DISCOVERY_RUN_ID = DISCOVERY_RUN_ID_PATTERN
 JSON_ARTIFACTS = {"input-snapshot.json", "source-results.json"}
 TEXT_ARTIFACTS = {"discovery-report.md"}
-AUDIT_STATUSES = {
-    "CREATED",
-    "COLLECTING",
-    "READY_FOR_IMPORT",
-    "PARTIAL",
-    "IMPORTED",
-    "FAILED",
-}
+AUDIT_STATUSES = DISCOVERY_RUN_STATUSES
 AUDIT_EVENT_CODES = {
     "RUN_CREATED",
     "COLLECTION_STARTED",
@@ -67,6 +63,15 @@ AUDIT_FIELDS = {
     "count",
     "error_code",
 }
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate discovery audit key")
+        result[key] = value
+    return result
 
 
 @dataclass(frozen=True)
@@ -190,19 +195,20 @@ class DiscoveryArtifacts:
             event["count"] = count
         if error_code is not None:
             event["error_code"] = error_code
-        self._validate_audit_event(event)
+        self._validate_audit_event(event, expected_run_id=self.run_id)
 
         audit_path = self.path("audit.md")
         existing = audit_path.read_text(encoding="utf-8") if audit_path.exists() else ""
+        canonical_lines: list[str] = []
         for line in existing.splitlines():
             try:
-                previous = json.loads(line)
-            except json.JSONDecodeError:
+                previous = json.loads(line, object_pairs_hook=_unique_json_object)
+            except (json.JSONDecodeError, ValueError):
                 raise ValueError("invalid discovery audit file") from None
-            self._validate_audit_event(previous)
-        self._atomic_write(
-            "audit.md", existing + json.dumps(event, sort_keys=True) + "\n"
-        )
+            self._validate_audit_event(previous, expected_run_id=self.run_id)
+            canonical_lines.append(json.dumps(previous, sort_keys=True))
+        canonical_lines.append(json.dumps(event, sort_keys=True))
+        self._atomic_write("audit.md", "\n".join(canonical_lines) + "\n")
 
     def _validate_directory(self) -> Path:
         try:
@@ -257,13 +263,17 @@ class DiscoveryArtifacts:
             raise ValueError("invalid discovery run id")
 
     @classmethod
-    def _validate_audit_event(cls, event: Any) -> None:
+    def _validate_audit_event(
+        cls, event: Any, *, expected_run_id: str | None = None
+    ) -> None:
         if not isinstance(event, dict) or not set(event) <= AUDIT_FIELDS:
             raise ValueError("invalid discovery audit event")
         required = {"run_id", "status", "event_code", "timestamp_utc"}
         if not required <= set(event):
             raise ValueError("invalid discovery audit event")
         cls._validate_run_id(event["run_id"])
+        if expected_run_id is not None and event["run_id"] != expected_run_id:
+            raise ValueError("invalid discovery audit run id")
         if event["status"] not in AUDIT_STATUSES:
             raise ValueError("invalid discovery audit status")
         if event["event_code"] not in AUDIT_EVENT_CODES:
