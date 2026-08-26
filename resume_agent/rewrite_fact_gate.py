@@ -14,18 +14,28 @@ DATE = re.compile(
     r"|(?<!\d)(?:19|20)\d{2}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?)?(?!\d)"
 )
 VERSION = re.compile(
-    r"\b(?:Python|Java|Node(?:\.js)?)\s+v?\d+(?:\.\d+){0,3}\b", re.I
+    r"\b(?:Python|Java|Node(?:\.js)?|React)\s+v?\d+(?:\.\d+){0,3}\+?"
+    r"(?![\w.])",
+    re.I,
+)
+CALENDAR_MONTH = re.compile(
+    r"(?<!\d)(?:0?[1-9]|1[0-2])\s*月(?=\s*(?:毕业|入学|入职|离职))"
 )
 METRIC = re.compile(
     r"(?:"
+    r"(?<![A-Za-z0-9])[$¥]\s*\d+(?:\.\d+)?(?:[KMB])?(?![A-Za-z0-9])"
+    r"|"
     r"(?<![A-Za-z0-9])"
-    r"\d+(?:\.\d+)?"
+    r"(?:约\s*)?\d+(?:\.\d+)?"
     r"(?:\s*(?:-|–|—|~|～|至|到)\s*\d+(?:\.\d+)?)?"
     r"\s*(?:%|\+|qps|tps|rps|ms|毫秒|s|秒|分钟|小时|年|个月|月|天|"
     r"(?:万|亿)(?:用户|人|家|条|次|个|元)?|元|人|家|条|"
-    r"个(?:节点|字段)?|项|轮|维|种(?:状态)?|字段|节点|倍|次)"
+    r"美元|个(?:节点|字段)|(?:余)?(?:用户|人|家|条|项|次|个)|"
+    r"项|轮|维|种(?:状态)?|字段|节点|倍|次)"
+    r"(?:以上|以下|左右)?"
     r"(?![A-Za-z0-9])"
-    r"|(?:上千|百余|数十|近百|约百)(?:用户|人|家|项|次|条)"
+    r"|(?:十余|百余|千余|数十|数百|上千|近百|约百|百万|一亿)"
+    r"(?:用户|人|家|项|次|条|元)"
     r")",
     re.I,
 )
@@ -37,12 +47,6 @@ PLACEHOLDER_TERMS = (
     "帮我补",
     "随便",
     "不记得",
-    "没有",
-    "不是",
-    "并非",
-    "从未",
-    "未曾",
-    "否认",
 )
 PLACEHOLDER_EXACT = {"无", "不知道", "不清楚", "随便", "没有", "不记得"}
 SOURCE_NOTE_TERMS = (
@@ -59,15 +63,28 @@ SOURCE_NOTE_TERMS = (
     "测量",
     "候选人确认",
 )
-QPS_ANSWER_TERMS = (
-    "压测",
-    "吞吐",
-    "每秒",
-    "峰值",
-    "平均",
-    "监控",
+QPS_MEASUREMENT_SOURCE_TERMS = ("压测", "监控", "负载测试", "性能测试")
+STATISTICS_WINDOW_TERMS = (
     "统计窗口",
-    "持续",
+    "监控窗口",
+    "采样",
+    "平均",
+    "p50",
+    "p90",
+    "p95",
+    "p99",
+)
+MEASUREMENT_METHOD_TERMS = (
+    "样本",
+    "回归",
+    "测试",
+    "统计",
+    "监控",
+    "日志",
+    "测量",
+    "压测",
+    "采样",
+    "窗口",
 )
 OTHER_METRIC_ANSWER_TERMS = (
     "统计",
@@ -88,6 +105,8 @@ OTHER_METRIC_ANSWER_TERMS = (
     "窗口",
 )
 SECTION_HEADINGS = {
+    "基本信息",
+    "核心优势",
     "个人信息",
     "教育经历",
     "实习经历",
@@ -138,6 +157,7 @@ def extract_business_metrics(markdown: str) -> list[tuple[str, str]]:
         scrubbed = PHONE.sub("", claim)
         scrubbed = DATE.sub("", scrubbed)
         scrubbed = VERSION.sub("", scrubbed)
+        scrubbed = CALENDAR_MONTH.sub("", scrubbed)
         matches.extend(
             (claim, match.group(0).strip()) for match in METRIC.finditer(scrubbed)
         )
@@ -216,7 +236,11 @@ def validate_rewrite_facts(
         item
         for item in declared_items
         if item.blocking
-        and not _answer_has_evidence(answers.get(item.question_id), item.question_id)
+        and not _answer_has_evidence(
+            answers.get(item.question_id),
+            item.question_id,
+            question=item.question,
+        )
     ]
 
     draft_lines = _substantive_lines(result.rewritten_resume_markdown)
@@ -307,7 +331,12 @@ def validate_rewrite_facts(
             answer = answers.get(question_id)
             answered = (
                 audit.fact_status == "user_confirmed"
-                and _answer_has_evidence(answer, question_id, metric=metric)
+                and _answer_has_evidence(
+                    answer,
+                    question_id,
+                    metric=metric,
+                    claim=line.claim,
+                )
             )
             basis = _clean_text(audit.measurement_basis)
             answer_supports_basis = answered and (
@@ -317,9 +346,12 @@ def validate_rewrite_facts(
                 quote
                 for quote in audit.source_quotes
                 if _quote_contains_metric(quote, metric)
+                and _quote_contains_full_claim(quote, line.claim)
             ]
-            source_evidence = bool(metric_quotes) and bool(basis) and any(
-                _contains_basis(quote, basis) for quote in metric_quotes
+            source_evidence = (
+                bool(metric_quotes)
+                and _basis_is_informative(basis, metric)
+                and any(_contains_basis(quote, basis) for quote in metric_quotes)
             )
 
             if audit.fact_status == "source_verified":
@@ -397,6 +429,7 @@ def _answer_has_evidence(
     expected_question_id: str,
     metric: str | None = None,
     claim: str | None = None,
+    question: str | None = None,
 ) -> bool:
     if (
         answer is None
@@ -413,9 +446,11 @@ def _answer_has_evidence(
     if not any(term in normalized_note for term in SOURCE_NOTE_TERMS):
         return False
     if metric is not None:
-        return _answer_explains_metric(answer_text, metric)
+        return _answer_explains_metric(answer_text, metric, claim)
     if claim is not None:
-        return _normalize_claim(claim) in _normalize_claim(answer_text)
+        return _text_asserts_claim(answer_text, claim)
+    if question is not None:
+        return _answer_addresses_question(answer_text, question)
     return True
 
 
@@ -497,13 +532,129 @@ def _claim_evidence_blocker(claim: str) -> MissingInformation:
 
 
 def _quote_contains_full_claim(quote: str, claim: str) -> bool:
-    normalized_quote = _normalize_claim(quote)
-    normalized_claim = _normalize_claim(claim)
-    return bool(
-        normalized_quote
-        and normalized_claim
-        and normalized_claim in normalized_quote
-    )
+    return _text_asserts_claim(quote, claim)
+
+
+def _text_asserts_claim(container: str, claim: str) -> bool:
+    compact_container = _compact(_display_claim(container))
+    compact_claim = _compact(_display_claim(claim))
+    if not compact_container or not compact_claim:
+        return False
+
+    start = compact_container.find(compact_claim)
+    while start >= 0:
+        clause_start = max(
+            compact_container.rfind(mark, 0, start)
+            for mark in ("。", "，", ",", "；", ";", "！", "？")
+        ) + 1
+        clause_end_candidates = [
+            position
+            for mark in ("。", "，", ",", "；", ";", "！", "？")
+            if (position := compact_container.find(mark, start + len(compact_claim)))
+            >= 0
+        ]
+        clause_end = min(clause_end_candidates, default=len(compact_container))
+        prefix = compact_container[clause_start:start]
+        suffix = compact_container[start + len(compact_claim) : clause_end]
+
+        collective_positions = [
+            prefix.rfind(actor) for actor in ("团队", "我们", "项目组", "部门")
+        ]
+        last_collective = max(collective_positions)
+        personal_positions = [prefix.rfind(actor) for actor in ("本人", "候选人")]
+        personal_positions.extend(
+            match.start() for match in re.finditer(r"我(?!们)", prefix)
+        )
+        last_personal = max(personal_positions)
+        collective_upgrade = last_collective >= 0 and last_personal < last_collective
+        locally_negated = bool(
+            re.search(r"(?:不|未|没有|并非|不是|从未|未曾|否认)$", prefix)
+        ) or bool(re.match(r"(?:不属实|错误|有误|不正确|不对)", suffix))
+
+        if not collective_upgrade and not locally_negated:
+            return True
+        start = compact_container.find(compact_claim, start + 1)
+    return False
+
+
+QUESTION_FACT_GROUPS = (
+    (
+        ("学历", "学位", "教育背景", "学校", "院校", "专业"),
+        ("学历", "学位", "硕士", "本科", "博士", "大专", "学校", "院校", "专业"),
+    ),
+    (
+        ("入职", "离职", "任职日期", "工作日期", "就职时间"),
+        ("入职", "离职", "任职", "工作时间", "就职", "年", "月", "日"),
+    ),
+    (
+        ("日期", "时间", "何时", "哪一年"),
+        ("日期", "时间", "年", "月", "日"),
+    ),
+    (
+        ("部署", "运行环境", "部署环境"),
+        ("部署", "环境", "windows", "linux", "容器", "云", "本地"),
+    ),
+    (
+        ("职责", "负责", "主导", "角色"),
+        ("职责", "负责", "主导", "角色", "参与"),
+    ),
+)
+
+
+def _answer_addresses_question(answer: str, question: str) -> bool:
+    normalized_answer = _compact(answer)
+    normalized_question = _compact(question)
+    matched_groups = [
+        answer_terms
+        for question_terms, answer_terms in QUESTION_FACT_GROUPS
+        if any(term in normalized_question for term in question_terms)
+    ]
+    if matched_groups:
+        return any(
+            any(term in normalized_answer for term in answer_terms)
+            for answer_terms in matched_groups
+        )
+
+    reduced = normalized_question
+    for boilerplate in (
+        "请确认",
+        "请补充",
+        "请说明",
+        "请提供",
+        "是否",
+        "哪一个正确",
+        "存在冲突",
+        "缺少事实依据",
+    ):
+        reduced = reduced.replace(boilerplate, "")
+    anchors = re.findall(r"[a-z][a-z0-9.+#-]{1,}|[\u4e00-\u9fff]{2,}", reduced)
+    return bool(anchors) and any(anchor in normalized_answer for anchor in anchors)
+
+
+def _basis_is_informative(basis: str, metric: str) -> bool:
+    compact_basis = _compact(basis)
+    compact_metric = _compact(metric)
+    if not compact_basis or compact_basis == compact_metric:
+        return False
+
+    normalized_metric = unicodedata.normalize("NFKC", metric).lower()
+    if re.search(r"(?:qps|tps|rps)\s*$", normalized_metric, re.I):
+        has_measurement_source = any(
+            term in compact_basis for term in QPS_MEASUREMENT_SOURCE_TERMS
+        )
+        has_statistics_window = any(
+            term in compact_basis for term in STATISTICS_WINDOW_TERMS
+        )
+        return has_measurement_source and has_statistics_window
+
+    has_method = any(term in compact_basis for term in MEASUREMENT_METHOD_TERMS)
+    if normalized_metric.rstrip().endswith("%"):
+        has_sample_size = bool(
+            re.search(r"\d+(?:\.\d+)?(?:次|个|条|项|例|样本)", compact_basis)
+            or re.search(r"\d+(?:\.\d+)?/\d+(?:\.\d+)?", compact_basis)
+        )
+        return has_method and has_sample_size
+    return has_method
 
 
 def _compact(value: str) -> str:
@@ -531,17 +682,33 @@ def _is_placeholder(value: str) -> bool:
     )
 
 
-def _answer_explains_metric(answer: str, metric: str) -> bool:
+def _answer_explains_metric(
+    answer: str, metric: str, claim: str | None = None
+) -> bool:
     normalized_metric = unicodedata.normalize("NFKC", metric)
     normalized_answer = unicodedata.normalize("NFKC", answer)
     if normalized_metric.rstrip().endswith("%"):
-        return _percentage_answer_matches(normalized_answer, normalized_metric)
-    if re.search(r"(?:qps|tps|rps)\s*$", normalized_metric, re.I):
-        return _answer_has_exact_metric(normalized_answer, normalized_metric) and any(
-            term in normalized_answer.lower() for term in QPS_ANSWER_TERMS
+        return _percentage_answer_matches(
+            normalized_answer, normalized_metric, claim
         )
-    return _answer_has_exact_metric(normalized_answer, normalized_metric) and any(
-        term in normalized_answer.lower() for term in OTHER_METRIC_ANSWER_TERMS
+    if re.search(r"(?:qps|tps|rps)\s*$", normalized_metric, re.I):
+        compact_answer = _compact(normalized_answer)
+        return (
+            any(
+                _metric_clause_is_relevant(clause, claim, normalized_metric)
+                for clause in _clauses_with_exact_metric(
+                    normalized_answer, normalized_metric
+                )
+            )
+            and any(
+                term in compact_answer for term in QPS_MEASUREMENT_SOURCE_TERMS
+            )
+            and any(term in compact_answer for term in STATISTICS_WINDOW_TERMS)
+        )
+    return any(
+        _metric_clause_is_relevant(clause, claim, normalized_metric)
+        and any(term in clause.lower() for term in OTHER_METRIC_ANSWER_TERMS)
+        for clause in _clauses_with_exact_metric(normalized_answer, normalized_metric)
     )
 
 
@@ -553,7 +720,83 @@ def _answer_has_exact_metric(answer: str, metric: str) -> bool:
     )
 
 
-def _percentage_answer_matches(answer: str, metric: str) -> bool:
+def _clauses_with_exact_metric(answer: str, metric: str) -> list[str]:
+    return [
+        clause
+        for clause in re.split(r"[，,。；;！？\n]", answer)
+        if _answer_has_exact_metric(clause, metric)
+    ]
+
+
+def _claim_context_anchors(claim: str | None, metric: str) -> list[str]:
+    if not claim:
+        return []
+    compact_claim = _compact(claim)
+    compact_claim = compact_claim.replace(_compact(metric), " ")
+    for generic in (
+        "成功率",
+        "准确率",
+        "峰值",
+        "达到",
+        "提升",
+        "降低",
+        "增长",
+        "减少",
+        "约为",
+    ):
+        compact_claim = compact_claim.replace(generic, " ")
+    return [
+        token
+        for token in re.findall(
+            r"[a-z][a-z0-9.+#-]{1,}|[\u4e00-\u9fff]{2,}", compact_claim
+        )
+        if token not in {"统计", "项目", "结果"}
+    ]
+
+
+def _metric_clause_is_relevant(
+    clause: str, claim: str | None, metric: str
+) -> bool:
+    compact_clause = _compact(clause)
+    anchors = _claim_context_anchors(claim, metric)
+    if anchors:
+        return all(anchor in compact_clause for anchor in anchors)
+    return any(
+        term in compact_clause
+        for term in ("固定回归", "回归记录", "压测", "监控窗口")
+    )
+
+
+def _span_clause(answer: str, start: int, end: int) -> str:
+    clause_start = max(
+        answer.rfind(mark, 0, start) for mark in ("。", "，", ",", "；", ";", "！", "？")
+    ) + 1
+    clause_end_candidates = [
+        position
+        for mark in ("。", "，", ",", "；", ";", "！", "？")
+        if (position := answer.find(mark, end)) >= 0
+    ]
+    clause_end = min(clause_end_candidates, default=len(answer))
+    return answer[clause_start:clause_end]
+
+
+def _span_is_asserted(answer: str, start: int, end: int) -> bool:
+    clause_start = max(
+        answer.rfind(mark, 0, start) for mark in ("。", "，", ",", "；", ";", "！", "？")
+    ) + 1
+    clause = _span_clause(answer, start, end)
+    prefix = _compact(answer[clause_start:start])
+    suffix = _compact(clause[end - clause_start :])
+    if re.search(r"(?:不|未|没有|并非|不是|从未|未曾|未达到|未达)$", prefix):
+        return False
+    if re.match(r".{0,4}(?:错误|错误值|有误|不正确|不属实|不对)", suffix):
+        return False
+    return True
+
+
+def _percentage_answer_matches(
+    answer: str, metric: str, claim: str | None = None
+) -> bool:
     target_match = re.search(r"\d+(?:\.\d+)?", metric)
     if target_match is None:
         return False
@@ -562,19 +805,33 @@ def _percentage_answer_matches(answer: str, metric: str) -> bool:
     decimal_places = len(target_text.partition(".")[2])
     tolerance = 0.5 * (10 ** -decimal_places) + 1e-9
 
-    ratios: list[tuple[float, float]] = []
+    ratios: list[tuple[float, float, int, int]] = []
     for match in re.finditer(
         r"(?P<num>\d+(?:\.\d+)?)\s*/\s*(?P<den>\d+(?:\.\d+)?)",
         answer,
     ):
-        ratios.append((float(match.group("num")), float(match.group("den"))))
+        ratios.append(
+            (
+                float(match.group("num")),
+                float(match.group("den")),
+                match.start(),
+                match.end(),
+            )
+        )
     for match in re.finditer(
         r"(?P<den>\d+(?:\.\d+)?)\s*(?:次|个|条|项|例|样本)?"
         r".{0,40}?(?:中|内|里).*?(?:成功|完成|命中|通过)\s*"
         r"(?P<num>\d+(?:\.\d+)?)",
         answer,
     ):
-        ratios.append((float(match.group("num")), float(match.group("den"))))
+        ratios.append(
+            (
+                float(match.group("num")),
+                float(match.group("den")),
+                match.start(),
+                match.end(),
+            )
+        )
     for match in re.finditer(
         r"(?P<den>\d+(?:\.\d+)?)\s*(?:次|个|条|项|例|样本)?"
         r".{0,40}?(?:中|内|里).*?(?:有\s*)?"
@@ -582,10 +839,29 @@ def _percentage_answer_matches(answer: str, metric: str) -> bool:
         r"\s*(?:成功|完成|命中|通过)",
         answer,
     ):
-        ratios.append((float(match.group("num")), float(match.group("den"))))
+        ratios.append(
+            (
+                float(match.group("num")),
+                float(match.group("den")),
+                match.start(),
+                match.end(),
+            )
+        )
 
     return any(
         denominator > 0
         and abs(numerator / denominator * 100 - target) <= tolerance
-        for numerator, denominator in ratios
+        and _span_is_asserted(answer, start, end)
+        and (
+            _metric_clause_is_relevant(
+                _span_clause(answer, start, end), claim, metric
+            )
+            or (
+                _compact(_span_clause(answer, start, end)).startswith(
+                    ("而是", "实际", "正确值", "应为")
+                )
+                and _metric_clause_is_relevant(answer, claim, metric)
+            )
+        )
+        for numerator, denominator, start, end in ratios
     )

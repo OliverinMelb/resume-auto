@@ -103,7 +103,7 @@ class FactGateTests(unittest.TestCase):
         answers = [
             FactAnswer(
                 question_id=first.blockers[0].question_id,
-                answer="100 次固定回归中成功 86 次",
+                answer="工具调用的100 次固定回归中成功 86 次",
                 source_note="本地回归记录，候选人确认",
             )
         ]
@@ -166,7 +166,7 @@ class FactGateTests(unittest.TestCase):
         answers = [
             FactAnswer(
                 question_id=initial.blockers[0].question_id,
-                answer="100次固定回归中成功86次，成功率为86%",
+                answer="工具调用100次固定回归中成功86次，成功率为86%",
                 source_note="候选人查阅本地回归记录后确认",
             )
         ]
@@ -749,7 +749,7 @@ class FactGateTests(unittest.TestCase):
             [
                 FactAnswer(
                     question_id=question_id,
-                    answer="统计样本为86/100，即成功率86%",
+                    answer="工具调用统计样本为86/100，即成功率86%",
                     source_note="本地回归记录，候选人确认",
                 )
             ],
@@ -769,7 +769,7 @@ class FactGateTests(unittest.TestCase):
             [
                 FactAnswer(
                     question_id=question_id,
-                    answer="共100次固定回归，其中86次成功",
+                    answer="工具调用共100次固定回归，其中86次成功",
                     source_note="本地回归记录，候选人确认",
                 )
             ],
@@ -834,7 +834,7 @@ class FactGateTests(unittest.TestCase):
             [
                 FactAnswer(
                     question_id=question_id,
-                    answer="压测峰值为500 QPS，持续10分钟",
+                    answer="接口压测峰值为500 QPS，监控窗口持续10分钟",
                     source_note="压测报告和监控日志",
                 )
             ],
@@ -861,7 +861,7 @@ class FactGateTests(unittest.TestCase):
         answers = [
             FactAnswer(
                 question_id=question_id,
-                answer="100次固定回归中成功86次，成功率为86%",
+                answer="工具调用100次固定回归中成功86次，成功率为86%",
                 source_note="本地回归记录，候选人确认",
             )
         ]
@@ -941,6 +941,393 @@ class FactGateTests(unittest.TestCase):
         for claim in negatives:
             with self.subTest(claim=claim):
                 self.assertEqual(extract_business_metrics(claim), [])
+
+    def test_mixed_metric_claim_needs_one_quote_supporting_subject_metric_and_basis(self):
+        claim = "主导 Kubernetes 迁移，成功率86%"
+        quote = "模型准确率86%，口径100次测试"
+        result = result_for_claim(
+            claim,
+            status="source_verified",
+            quote=quote,
+            basis="100次测试",
+        )
+
+        gate = validate_rewrite_facts(
+            result,
+            [{"id": "source_resume_1", "content": quote}],
+            self.jobs,
+            [],
+        )
+
+        self.assertNotEqual(gate.blockers, [])
+
+    def test_collective_actor_cannot_support_individual_role_claim(self):
+        claim = "主导 Kubernetes 集群迁移"
+        quote = "团队主导 Kubernetes 集群迁移"
+        result = result_for_claim(claim, status="source_verified", quote=quote)
+
+        gate = validate_rewrite_facts(
+            result,
+            [{"id": "source_resume_1", "content": quote}],
+            self.jobs,
+            [],
+        )
+
+        self.assertNotEqual(gate.blockers, [])
+
+    def test_candidate_denial_does_not_confirm_nonmetric_claim(self):
+        claim = "负责内部发布流程"
+        result = result_for_claim(claim, status="user_confirmed")
+        initial = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+
+        gate = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=initial.blockers[0].question_id,
+                    answer="候选人不负责内部发布流程",
+                    source_note="候选人确认，依据职责记录",
+                )
+            ],
+        )
+
+        self.assertNotEqual(gate.blockers, [])
+
+    def test_percentage_value_cannot_double_as_measurement_basis(self):
+        claim = "工具调用成功率达到86%"
+        result = result_for_claim(
+            claim,
+            status="source_verified",
+            quote=claim,
+            basis="86%",
+        )
+
+        gate = validate_rewrite_facts(
+            result,
+            [{"id": "source_resume_1", "content": claim}],
+            self.jobs,
+            [],
+        )
+
+        self.assertNotEqual(gate.blockers, [])
+
+    def test_model_blocker_answers_cannot_borrow_another_questions_fact(self):
+        result = empty_result(
+            missing_information=[
+                {
+                    "question_id": "education-id",
+                    "question": "请确认最高学历",
+                    "blocking": True,
+                    "reason": "缺少教育事实",
+                },
+                {
+                    "question_id": "employment-id",
+                    "question": "请确认入职日期",
+                    "blocking": True,
+                    "reason": "缺少任职日期",
+                },
+            ]
+        )
+        initial = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+        education_id, employment_id = [item.question_id for item in initial.blockers]
+
+        gate = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=education_id,
+                    answer="入职日期为2023年3月",
+                    source_note="候选人确认，依据劳动合同记录",
+                ),
+                FactAnswer(
+                    question_id=employment_id,
+                    answer="最高学历为硕士",
+                    source_note="候选人确认，依据毕业证记录",
+                ),
+            ],
+        )
+
+        self.assertEqual(
+            [item.question_id for item in gate.blockers],
+            [education_id, employment_id],
+        )
+
+    def test_source_role_claim_uses_clause_local_actor_and_polarity(self):
+        claim = "主导 Kubernetes 集群迁移"
+        rejected_quotes = [
+            "团队主导 Kubernetes 集群迁移",
+            "我们主导 Kubernetes 集群迁移",
+            "项目组主导 Kubernetes 集群迁移",
+            "部门主导 Kubernetes 集群迁移",
+            "候选人未主导 Kubernetes 集群迁移",
+            "主导 Kubernetes 集群迁移不属实",
+        ]
+        for quote in rejected_quotes:
+            with self.subTest(quote=quote):
+                result = result_for_claim(
+                    claim, status="source_verified", quote=quote
+                )
+                gate = validate_rewrite_facts(
+                    result,
+                    [{"id": "source_resume_1", "content": quote}],
+                    self.jobs,
+                    [],
+                )
+                self.assertNotEqual(gate.blockers, [])
+
+        positive_quote = "我主导 Kubernetes 集群迁移"
+        positive = validate_rewrite_facts(
+            result_for_claim(
+                claim, status="source_verified", quote=positive_quote
+            ),
+            [{"id": "source_resume_1", "content": positive_quote}],
+            self.jobs,
+            [],
+        )
+        self.assertEqual(positive.blockers, [])
+
+    def test_user_confirmed_nonmetric_claim_uses_local_polarity(self):
+        claim = "负责内部发布流程"
+        result = result_for_claim(claim, status="user_confirmed")
+        question_id = validate_rewrite_facts(
+            result, self.resumes, self.jobs, []
+        ).blockers[0].question_id
+
+        for answer in [
+            "候选人不负责内部发布流程",
+            "候选人未负责内部发布流程",
+            "候选人负责内部发布流程不属实",
+        ]:
+            with self.subTest(answer=answer):
+                gate = validate_rewrite_facts(
+                    result,
+                    self.resumes,
+                    self.jobs,
+                    [
+                        FactAnswer(
+                            question_id=question_id,
+                            answer=answer,
+                            source_note="候选人确认，依据职责记录",
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    [item.question_id for item in gate.blockers], [question_id]
+                )
+
+        positive = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="候选人负责内部发布流程",
+                    source_note="候选人确认，依据职责记录",
+                )
+            ],
+        )
+        self.assertEqual(positive.blockers, [])
+
+    def test_percentage_answer_uses_local_correction_and_claim_subject(self):
+        result = result_with_metric("user_confirmed")
+        question_id = validate_rewrite_facts(
+            result, self.resumes, self.jobs, []
+        ).blockers[0].question_id
+        rejected_answers = [
+            "工具调用成功率86/100是错误值，实际85/100",
+            "工具调用成功率未达到86/100",
+            "考试86/100，工具调用成功率没有统计记录",
+        ]
+        for answer in rejected_answers:
+            with self.subTest(answer=answer):
+                gate = validate_rewrite_facts(
+                    result,
+                    self.resumes,
+                    self.jobs,
+                    [
+                        FactAnswer(
+                            question_id=question_id,
+                            answer=answer,
+                            source_note="候选人确认，依据本地回归记录",
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    [item.question_id for item in gate.blockers], [question_id]
+                )
+
+        positive = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="工具调用成功率不是85/100，而是86/100",
+                    source_note="候选人确认，依据本地回归记录",
+                )
+            ],
+        )
+        self.assertEqual(positive.blockers, [])
+
+    def test_source_percentage_basis_is_distinct_and_reproducible(self):
+        claim = "工具调用成功率达到86%"
+        basis = "100次固定回归中成功86次"
+        quote = f"{claim}，{basis}"
+        gate = validate_rewrite_facts(
+            result_for_claim(
+                claim,
+                status="source_verified",
+                quote=quote,
+                basis=basis,
+            ),
+            [{"id": "source_resume_1", "content": quote}],
+            self.jobs,
+            [],
+        )
+        self.assertEqual(gate.blockers, [])
+
+    def test_source_metric_cannot_compose_claim_and_basis_across_quotes(self):
+        claim = "主导 Kubernetes 迁移，成功率86%"
+        result = result_for_claim(
+            claim,
+            status="source_verified",
+            quote=claim,
+            basis="100次测试",
+        )
+        result.claim_audit[0].source_quotes = [claim, "模型准确率86%，100次测试"]
+        content = f"{claim}。模型准确率86%，100次测试"
+
+        gate = validate_rewrite_facts(
+            result,
+            [{"id": "source_resume_1", "content": content}],
+            self.jobs,
+            [],
+        )
+        self.assertNotEqual(gate.blockers, [])
+
+    def test_user_metric_answer_must_confirm_the_mixed_claims_nonmetric_part(self):
+        claim = "主导 Kubernetes 迁移，成功率86%"
+        result = result_for_claim(claim, status="user_confirmed")
+        question_id = validate_rewrite_facts(
+            result, self.resumes, self.jobs, []
+        ).blockers[0].question_id
+
+        weak = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="Kubernetes 的100次测试中成功86次",
+                    source_note="候选人确认，依据测试记录",
+                )
+            ],
+        )
+        self.assertEqual(
+            [item.question_id for item in weak.blockers], [question_id]
+        )
+
+        strong = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="候选人主导 Kubernetes 迁移的100次测试中成功86次",
+                    source_note="候选人确认，依据测试记录",
+                )
+            ],
+        )
+        self.assertEqual(strong.blockers, [])
+
+    def test_qps_basis_requires_measurement_source_and_statistics_window(self):
+        claim = "接口峰值达到500 QPS"
+        weak_basis = "项目记录"
+        weak_quote = f"{claim}，{weak_basis}"
+        weak = validate_rewrite_facts(
+            result_for_claim(
+                claim,
+                status="source_verified",
+                quote=weak_quote,
+                basis=weak_basis,
+            ),
+            [{"id": "source_resume_1", "content": weak_quote}],
+            self.jobs,
+            [],
+        )
+        self.assertNotEqual(weak.blockers, [])
+
+        good_basis = "监控统计窗口持续10分钟"
+        good_quote = f"{claim}，{good_basis}"
+        good = validate_rewrite_facts(
+            result_for_claim(
+                claim,
+                status="source_verified",
+                quote=good_quote,
+                basis=good_basis,
+            ),
+            [{"id": "source_resume_1", "content": good_quote}],
+            self.jobs,
+            [],
+        )
+        self.assertEqual(good.blockers, [])
+
+    def test_extended_metric_extraction_table(self):
+        positives = {
+            "管理十余人": "十余人",
+            "服务百万用户": "百万用户",
+            "覆盖千余家": "千余家",
+            "预算¥500": "¥500",
+            "成本500美元": "500美元",
+            "覆盖100余家": "100余家",
+            "服务数百用户": "数百用户",
+            "营收一亿元": "一亿元",
+            "预算$500K": "$500K",
+            "覆盖约100家": "约100家",
+            "覆盖100家以上": "100家以上",
+            "覆盖100家以下": "100家以下",
+        }
+        for claim, expected in positives.items():
+            with self.subTest(claim=claim):
+                self.assertEqual(
+                    [metric for _, metric in extract_business_metrics(claim)],
+                    [expected],
+                )
+
+        for claim in ["8月毕业", "React 18+"]:
+            with self.subTest(claim=claim):
+                self.assertEqual(extract_business_metrics(claim), [])
+
+    def test_controlled_heading_allowlist_includes_core_advantages_and_basic_info(self):
+        plain = validate_rewrite_facts(
+            empty_result(markdown="# 核心优势\n## 基本信息"),
+            self.resumes,
+            self.jobs,
+            [],
+        )
+        fact_bearing = validate_rewrite_facts(
+            empty_result(markdown="# 核心优势｜8年经验"),
+            self.resumes,
+            self.jobs,
+            [],
+        )
+
+        self.assertEqual(plain.blockers, [])
+        self.assertTrue(
+            any("缺少 claim_audit" in item.reason for item in fact_bearing.blockers)
+        )
+        self.assertEqual(
+            [metric for _, metric in extract_business_metrics("# 核心优势｜8年经验")],
+            ["8年"],
+        )
 
 
 if __name__ == "__main__":
