@@ -145,8 +145,10 @@ class ReportLabAdapter:
         preview_backup = (
             preview_dir.parent / f".{preview_dir.name}.preview-backup-{transaction_id}"
         )
-        had_pdf = False
-        had_preview = False
+        pdf_was_present = pdf_path.exists()
+        preview_was_present = preview_dir.exists()
+        pdf_backed_up = False
+        preview_backed_up = False
         published_pdf = False
         published_preview = False
 
@@ -156,35 +158,40 @@ class ReportLabAdapter:
             for preview_file in preview_files:
                 shutil.copyfile(preview_file, preview_stage / preview_file.name)
 
-            if pdf_path.exists():
+            if pdf_was_present:
                 os.replace(pdf_path, pdf_backup)
-                had_pdf = True
-            if preview_dir.exists():
-                os.replace(preview_dir, preview_backup)
-                had_preview = True
+                pdf_backed_up = True
 
             os.replace(pdf_stage, pdf_path)
             published_pdf = True
+            if preview_was_present:
+                os.replace(preview_dir, preview_backup)
+                preview_backed_up = True
             os.replace(preview_stage, preview_dir)
             published_preview = True
-            _remove_path(pdf_backup)
-            _remove_path(preview_backup)
+            _remove_transaction_paths((pdf_backup, preview_backup))
             return [preview_dir / preview_file.name for preview_file in preview_files]
         except OSError:
-            self._rollback_publication(
+            rollback_complete = self._rollback_publication(
                 pdf_path,
                 preview_dir,
                 pdf_backup,
                 preview_backup,
-                had_pdf,
-                had_preview,
+                pdf_was_present,
+                preview_was_present,
+                pdf_backed_up,
+                preview_backed_up,
                 published_pdf,
                 published_preview,
             )
-            raise
-        finally:
-            _remove_path(pdf_stage)
-            _remove_path(preview_stage)
+            if rollback_complete and _try_remove_transaction_paths(
+                (pdf_stage, preview_stage, pdf_backup, preview_backup)
+            ):
+                raise
+            raise RenderError(
+                "RENDER_RECOVERY_REQUIRED",
+                "Rendering could not be safely recovered; manual recovery is required.",
+            ) from None
 
     @staticmethod
     def _rollback_publication(
@@ -192,25 +199,41 @@ class ReportLabAdapter:
         preview_dir: Path,
         pdf_backup: Path,
         preview_backup: Path,
-        had_pdf: bool,
-        had_preview: bool,
+        pdf_was_present: bool,
+        preview_was_present: bool,
+        pdf_backed_up: bool,
+        preview_backed_up: bool,
         published_pdf: bool,
         published_preview: bool,
-    ) -> None:
-        if published_pdf or not had_pdf:
-            _remove_path(pdf_path)
-        if published_preview or not had_preview:
-            _remove_path(preview_dir)
-        if had_pdf and pdf_backup.exists():
+    ) -> bool:
+        rollback_complete = True
+        if published_pdf or not pdf_was_present:
             try:
-                os.replace(pdf_backup, pdf_path)
+                _remove_path(pdf_path)
             except OSError:
-                pass
-        if had_preview and preview_backup.exists():
+                rollback_complete = False
+        if published_preview or not preview_was_present:
             try:
-                os.replace(preview_backup, preview_dir)
+                _remove_path(preview_dir)
             except OSError:
-                pass
+                rollback_complete = False
+        if pdf_backed_up:
+            try:
+                if not pdf_backup.exists():
+                    rollback_complete = False
+                else:
+                    os.replace(pdf_backup, pdf_path)
+            except OSError:
+                rollback_complete = False
+        if preview_backed_up:
+            try:
+                if not preview_backup.exists():
+                    rollback_complete = False
+                else:
+                    os.replace(preview_backup, preview_dir)
+            except OSError:
+                rollback_complete = False
+        return rollback_complete
 
     def _register_font(self) -> str:
         if FONT_NAME in pdfmetrics.getRegisteredFontNames():
@@ -393,14 +416,24 @@ class ReportLabAdapter:
 
 
 def _remove_path(path: Path) -> None:
-    """Best-effort cleanup for transaction-owned staging and backup targets."""
+    """Remove one transaction-owned file or directory, surfacing I/O failures."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
+def _remove_transaction_paths(paths: tuple[Path, ...]) -> None:
+    for path in paths:
+        _remove_path(path)
+
+
+def _try_remove_transaction_paths(paths: tuple[Path, ...]) -> bool:
     try:
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
-        else:
-            path.unlink(missing_ok=True)
+        _remove_transaction_paths(paths)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _paragraph_markup(text: str) -> str:

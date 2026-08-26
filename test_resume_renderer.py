@@ -135,6 +135,48 @@ class ResumeRendererTests(unittest.TestCase):
         self.assertFalse(preview.exists())
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_rollback_restore_failure_requires_recovery_and_keeps_old_pdf_backup(self):
+        destination = self.root / "resume.pdf"
+        preview = self.root / "preview"
+        destination.write_bytes(b"old-pdf")
+        preview.mkdir()
+        (preview / "page-1.png").write_bytes(b"old-page-one")
+        (preview / "page-2.png").write_bytes(b"old-page-two")
+        original_replace = __import__("os").replace
+        stage_publish_failed = False
+        restore_failed = False
+
+        def fail_publish_then_restore(source, target):
+            nonlocal stage_publish_failed, restore_failed
+            source_path = Path(source)
+            target_path = Path(target)
+            if not stage_publish_failed and target_path == destination:
+                stage_publish_failed = True
+                raise PermissionError(f"private staged path: {self.root}")
+            if (
+                stage_publish_failed
+                and not restore_failed
+                and target_path == destination
+                and ".pdf-backup-" in source_path.name
+            ):
+                restore_failed = True
+                raise PermissionError(f"private backup path: {self.root}")
+            return original_replace(source, target)
+
+        with patch(
+            "resume_agent.resume_renderer.os.replace", side_effect=fail_publish_then_restore
+        ):
+            with self.assertRaises(RenderError) as raised:
+                self.renderer.render("# Resume\n- Current evidence", destination, preview)
+
+        self.assertTrue(stage_publish_failed)
+        self.assertTrue(restore_failed)
+        self.assertEqual(raised.exception.code, "RENDER_RECOVERY_REQUIRED")
+        self.assertNotIn(str(self.root), raised.exception.safe_message)
+        backups = list(self.root.glob(".resume.pdf.pdf-backup-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), b"old-pdf")
+
     def test_real_document_width_keeps_a_bullet_that_fits_on_one_page_together(self):
         preset = PRESETS[0]
         real_width = A4[0] - 2 * preset.margin_mm * mm
