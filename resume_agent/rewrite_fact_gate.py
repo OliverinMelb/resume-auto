@@ -582,6 +582,7 @@ def _suffix_is_typed_measurement(value: str) -> bool:
         return True
     suffix = suffix.removeprefix("的")
     has_metric = bool(extract_business_metrics(suffix))
+    has_percentage_record = bool(_percentage_records(suffix))
     compact_suffix = _compact(suffix)
     has_method = any(
         term in compact_suffix
@@ -595,7 +596,9 @@ def _suffix_is_typed_measurement(value: str) -> bool:
             "通过",
         )
     )
-    return has_metric and has_method
+    return (has_metric or has_percentage_record) and (
+        has_method or has_percentage_record
+    )
 
 
 def _text_asserts_claim(container: str, claim: str) -> bool:
@@ -626,11 +629,52 @@ def _text_asserts_claim(container: str, claim: str) -> bool:
 def _nonmetric_claim_segments(claim: str | None) -> list[str]:
     if not claim:
         return []
-    return [
-        segment.strip()
-        for segment in re.split(r"[，,；;]", _display_claim(claim))
-        if segment.strip() and not extract_business_metrics(segment)
-    ]
+    retained: list[str] = []
+    for segment in re.split(r"[，,；;]", _display_claim(claim)):
+        segment = segment.strip()
+        if not segment:
+            continue
+        metrics = [metric for _, metric in extract_business_metrics(segment)]
+        if not metrics:
+            retained.append(segment)
+            continue
+        has_typed_context = bool(
+            re.search(
+                r"(?:成功率|准确率|覆盖率|命中率|通过率|峰值|吞吐量|达到|降至|提升至)",
+                segment,
+            )
+        )
+        if not has_typed_context:
+            continue
+        remainder = segment
+        for metric in metrics:
+            remainder = remainder.replace(metric, " ")
+        previous = None
+        while previous != remainder:
+            previous = remainder
+            remainder = re.sub(
+                r"(?:成功率|准确率|覆盖率|命中率|通过率|峰值|吞吐量|"
+                r"达到|降至|提升至|约为|为)\s*$",
+                "",
+                remainder,
+            ).strip()
+        if remainder and any(
+            term in remainder
+            for term in (
+                "主导",
+                "负责",
+                "管理",
+                "设计",
+                "开发",
+                "搭建",
+                "实现",
+                "迁移",
+                "带领",
+                "领导",
+            )
+        ):
+            retained.append(remainder)
+    return retained
 
 
 UNRESOLVED_ANSWER_TERMS = (
@@ -672,6 +716,45 @@ def _blocker_slot(question: str) -> _BlockerSlot | None:
     return None
 
 
+def _slot_value_pattern(slot: _BlockerSlot) -> re.Pattern[str]:
+    if slot.kind == "highest_education":
+        return re.compile("|".join(map(re.escape, EDUCATION_VALUES)), re.I)
+    if slot.kind in {"employment_start_date", "project_date_conflict"}:
+        return DATE
+    if slot.kind == "deployment_environment":
+        return re.compile("|".join(map(re.escape, DEPLOYMENT_VALUES)), re.I)
+    return re.compile(r"(?!)")
+
+
+def _slot_final_value_is_asserted(answer: str, slot: _BlockerSlot) -> bool:
+    normalized = unicodedata.normalize("NFKC", answer)
+    pattern = _slot_value_pattern(slot)
+    active = False
+    occurrences: list[tuple[int, int]] = []
+    for clause_match in re.finditer(r"[^，,。；;！？\n]+", normalized):
+        clause = clause_match.group(0)
+        compact_clause = _compact(clause)
+        has_slot_label = any(label in compact_clause for label in slot.labels)
+        is_correction = compact_clause.startswith(
+            ("而是", "实际为", "最终", "正确", "应为")
+        )
+        if has_slot_label:
+            active = True
+        elif not (active and is_correction):
+            continue
+        for value_match in pattern.finditer(clause):
+            occurrences.append(
+                (
+                    clause_match.start() + value_match.start(),
+                    clause_match.start() + value_match.end(),
+                )
+            )
+    if not occurrences:
+        return False
+    start, end = occurrences[-1]
+    return _span_is_asserted(normalized, start, end)
+
+
 def _answer_addresses_question(answer: str, question: str) -> bool:
     normalized_answer = _compact(answer)
     if any(term in normalized_answer for term in UNRESOLVED_ANSWER_TERMS):
@@ -679,21 +762,15 @@ def _answer_addresses_question(answer: str, question: str) -> bool:
     slot = _blocker_slot(question)
     if slot is None or not any(label in normalized_answer for label in slot.labels):
         return False
-    if slot.kind == "highest_education":
-        return any(value in normalized_answer for value in EDUCATION_VALUES)
-    if slot.kind == "employment_start_date":
-        return bool(DATE.search(unicodedata.normalize("NFKC", answer)))
+    if not _slot_final_value_is_asserted(answer, slot):
+        return False
     if slot.kind == "project_date_conflict":
         has_disambiguation = any(
             term in normalized_answer
-            for term in ("以", "为准", "正确日期", "实际日期", "实际项目日期", "确认")
+            for term in ("为准", "正确日期", "实际日期", "实际项目日期", "确认")
         )
-        return has_disambiguation and bool(
-            DATE.search(unicodedata.normalize("NFKC", answer))
-        )
-    if slot.kind == "deployment_environment":
-        return any(value in normalized_answer for value in DEPLOYMENT_VALUES)
-    return False
+        return has_disambiguation
+    return True
 
 
 def _basis_is_informative(basis: str, metric: str) -> bool:
@@ -793,6 +870,17 @@ def _answer_has_exact_metric(answer: str, metric: str) -> bool:
     )
 
 
+def _answer_has_asserted_exact_metric(answer: str, metric: str) -> bool:
+    if not _answer_has_exact_metric(answer, metric):
+        return False
+    compact_answer = _compact(answer)
+    compact_metric = _compact(metric)
+    start = compact_answer.find(compact_metric)
+    return start >= 0 and _span_is_asserted(
+        compact_answer, start, start + len(compact_metric)
+    )
+
+
 def _clauses_with_exact_metric(answer: str, metric: str) -> list[str]:
     return [
         clause
@@ -850,7 +938,7 @@ def _throughput_record_matches(
     for record in _measurement_records(text):
         parts = [part for part in re.split(r"[，,]", record) if part.strip()]
         for index, part in enumerate(parts):
-            if not _answer_has_exact_metric(part, metric):
+            if not _answer_has_asserted_exact_metric(part, metric):
                 continue
             selected = [part]
             adjacent = index - 1
@@ -895,7 +983,15 @@ def _is_measurement_continuation(value: str) -> bool:
     compact_value = _compact(value)
     if any(
         term in compact_value
-        for term in ("另一项目", "其他项目", "另一个项目", "平均年龄", "考试")
+        for term in (
+            "另一",
+            "另一个",
+            "其他项目",
+            "其他服务",
+            "其他接口",
+            "平均年龄",
+            "考试",
+        )
     ):
         return False
     return (
@@ -934,7 +1030,8 @@ def _span_is_asserted(answer: str, start: int, end: int) -> bool:
         return False
     if re.search(
         r"(?:并非真实|不是真实|并非最终|不是最终|不属实|废弃|"
-        r"错误值|明显错误|口径.{0,8}错误|有误|不正确|不对)",
+        r"虚假|伪造|无效|作废|错误值|明显错误|口径.{0,8}错误|"
+        r"有误|不正确|不对)",
         suffix,
     ):
         return False

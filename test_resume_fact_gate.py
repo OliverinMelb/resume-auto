@@ -1644,6 +1644,171 @@ class FactGateTests(unittest.TestCase):
             ["10+"],
         )
 
+    def test_mixed_claim_without_comma_keeps_nonmetric_fact_for_direct_assertion(self):
+        claim = "主导迁移实现成功率86%"
+        result = result_for_claim(claim, status="user_confirmed")
+        question_id = validate_rewrite_facts(
+            result, self.resumes, self.jobs, []
+        ).blockers[0].question_id
+
+        for answer in [
+            "团队主导迁移实现的统计样本为86/100",
+            "未主导迁移实现的统计样本为86/100",
+        ]:
+            with self.subTest(answer=answer):
+                gate = validate_rewrite_facts(
+                    result,
+                    self.resumes,
+                    self.jobs,
+                    [
+                        FactAnswer(
+                            question_id=question_id,
+                            answer=answer,
+                            source_note="候选人确认，依据测试记录",
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    [item.question_id for item in gate.blockers], [question_id]
+                )
+
+        positive = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="候选人主导迁移实现的统计样本为86/100",
+                    source_note="候选人确认，依据测试记录",
+                )
+            ],
+        )
+        self.assertEqual(positive.blockers, [])
+
+    def test_known_slots_require_final_affirmed_value(self):
+        cases = [
+            ("请确认最高学历", "最高学历不是本科", "最高学历不是大专，而是本科"),
+            (
+                "请确认入职日期",
+                "入职日期并非2023年3月",
+                "入职日期并非2023年2月，实际为2023年3月",
+            ),
+            ("请确认部署环境", "部署环境不是Linux", "部署环境确认是Linux"),
+            (
+                "项目日期存在冲突，请确认正确日期",
+                "确认实际项目日期不是2023年3月，以该日期为准",
+                "确认实际项目日期为2023年3月，以该日期为准",
+            ),
+        ]
+        for question, rejected, accepted in cases:
+            with self.subTest(question=question):
+                result = empty_result(
+                    missing_information=[
+                        {
+                            "question_id": "model-id",
+                            "question": question,
+                            "blocking": True,
+                            "reason": "缺少确定事实",
+                        }
+                    ]
+                )
+                question_id = validate_rewrite_facts(
+                    result, self.resumes, self.jobs, []
+                ).blockers[0].question_id
+                rejected_gate = validate_rewrite_facts(
+                    result,
+                    self.resumes,
+                    self.jobs,
+                    [
+                        FactAnswer(
+                            question_id=question_id,
+                            answer=rejected,
+                            source_note="候选人确认，依据证明记录",
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    [item.question_id for item in rejected_gate.blockers],
+                    [question_id],
+                )
+
+                accepted_gate = validate_rewrite_facts(
+                    result,
+                    self.resumes,
+                    self.jobs,
+                    [
+                        FactAnswer(
+                            question_id=question_id,
+                            answer=accepted,
+                            source_note="候选人确认，依据证明记录",
+                        )
+                    ],
+                )
+                self.assertEqual(accepted_gate.blockers, [])
+
+    def test_qps_metric_clause_must_be_affirmed_and_keep_same_subject(self):
+        claim = "接口达到500 QPS"
+        result = result_for_claim(claim, status="user_confirmed")
+        question_id = validate_rewrite_facts(
+            result, self.resumes, self.jobs, []
+        ).blockers[0].question_id
+        for answer in [
+            "接口未达到500 QPS，压测窗口持续5分钟",
+            "接口达到500 QPS，另一服务做过压测，窗口持续5分钟",
+        ]:
+            with self.subTest(answer=answer):
+                gate = validate_rewrite_facts(
+                    result,
+                    self.resumes,
+                    self.jobs,
+                    [
+                        FactAnswer(
+                            question_id=question_id,
+                            answer=answer,
+                            source_note="候选人确认，依据压测记录",
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    [item.question_id for item in gate.blockers], [question_id]
+                )
+
+    def test_percentage_record_rejects_false_or_invalid_ratio(self):
+        result = result_with_metric("user_confirmed")
+        question_id = validate_rewrite_facts(
+            result, self.resumes, self.jobs, []
+        ).blockers[0].question_id
+        rejected = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="工具调用统计样本86/100为虚假数据",
+                    source_note="候选人确认，依据回归记录",
+                )
+            ],
+        )
+        self.assertEqual(
+            [item.question_id for item in rejected.blockers], [question_id]
+        )
+
+        accepted = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="工具调用85/100为无效旧值，最终工具调用86/100",
+                    source_note="候选人确认，依据回归记录",
+                )
+            ],
+        )
+        self.assertEqual(accepted.blockers, [])
+
 
 if __name__ == "__main__":
     unittest.main()
