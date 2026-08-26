@@ -102,6 +102,45 @@ RESUME_AGENT_ALLOW_REMOTE=false
 
 `candidate-profile` 和 `resume-rewrite` 都只返回 Prompt，不调用模型，也不生成或保存修改后的简历。`resume-rewrite` 支持通过 `source_resume_ids` 同时选择多份历史简历。
 
+## 本地 Codex 简历定制
+
+简历定制命令由 `rewrite_resume.bat` 启动，并复用当前机器已登录的 Codex。批处理会将简历和 JD 的 Prompt 内容发送给 Codex 所配置的 OpenAI 模型服务；命令编排、数据库和运行产物则保留在本机。无需新增 OpenAI API Key。
+
+岗位输入必须是已导入的 `job_id`，或真实的 `--jd-path` 文件。`analysis/` 中的报告是项目分析文档，不是 JD，不能把它们作为岗位输入。每次运行的可审计产物仅写入被 Git 忽略的 `analysis/runs/`。
+
+### 首次运行（曹申傲）
+
+先将一份真实目标 JD 保存为 `C:\Users\Administrator\Desktop\caoshenao\target-jd.md`。确认文件存在后，在仓库根目录运行：
+
+```powershell
+$runResult = & .\rewrite_resume.bat run --candidate-name "曹申傲" --target-role "AI Agent开发" --resume-path "C:\Users\Administrator\Desktop\caoshenao\曹申傲-AI-Agent简历-修改版.md" --jd-path "C:\Users\Administrator\Desktop\caoshenao\target-jd.md" --output-dir "C:\Users\Administrator\Desktop\caoshenao\output\pdf" | Out-String | ConvertFrom-Json
+$runResult | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 'analysis\runs\last-cli-result.json'
+$runResult
+```
+
+不要用 `analysis/` 报告替代真实 JD。该流程从不覆盖原始 Markdown 简历或原始 PDF；只有事实门禁和 PDF 验收均通过时，才会在输出目录生成按公司或岗位命名的新定制版 PDF。
+
+### 事实问题与继续运行
+
+如果命令返回 `NEEDS_FACTS`，它只会创建待确认的问题，绝不会生成 PDF。把候选人原样确认的答案保存成 JSON 数组，每项使用以下格式：
+
+```json
+[
+  {
+    "question_id": "returned-stable-question-id",
+    "answer": "候选人确认的答案",
+    "source_note": "答案如何得知或如何测量"
+  }
+]
+```
+
+仅使用本次命令 JSON 结果返回的 `question_id` 和 `run_id`，不要猜测或改写它们。随后可执行：
+
+```powershell
+$runId = (Get-Content -Raw -Encoding UTF8 'analysis\runs\last-cli-result.json' | ConvertFrom-Json).id
+.\rewrite_resume.bat resume --run-id $runId --facts-json "C:\Users\Administrator\Desktop\caoshenao\resume-facts.json" --output-dir "C:\Users\Administrator\Desktop\caoshenao\output\pdf"
+```
+
 ### JD逆向调研与薪资口径
 
 新版浏览器请求只额外携带当前 `searchKeyword`，不改变原有评分请求体、分数、阈值和投递动作。后端的 `job_decisions.jsonl` 额外记录：
