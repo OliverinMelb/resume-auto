@@ -57,6 +57,7 @@ class CodexCliAdapter:
             str(project_root),
             "-",
         ]
+        failure: tuple[str, str] | None = None
         try:
             completed = subprocess.run(
                 command,
@@ -67,23 +68,31 @@ class CodexCliAdapter:
                 shell=False,
                 check=False,
             )
-        except FileNotFoundError as error:
+        except FileNotFoundError:
+            failure = ("CODEX_UNAVAILABLE", "Codex CLI not found")
+        except subprocess.TimeoutExpired:
+            failure = ("CODEX_TIMEOUT", "Codex timed out")
+
+        if failure is not None:
             output_path.unlink(missing_ok=True)
-            raise CodexRunError("CODEX_UNAVAILABLE", "Codex CLI not found") from error
-        except subprocess.TimeoutExpired as error:
-            output_path.unlink(missing_ok=True)
-            raise CodexRunError("CODEX_TIMEOUT", "Codex timed out") from error
+            raise CodexRunError(*failure)
 
         if completed.returncode != 0:
             output_path.unlink(missing_ok=True)
             raise CodexRunError("CODEX_PROCESS_ERROR", "Codex process failed")
 
         try:
-            return CodexRewriteResult.model_validate_json(
+            result = CodexRewriteResult.model_validate_json(
                 output_path.read_text(encoding="utf-8")
             )
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError):
+            failure = (
+                "INVALID_MODEL_RESULT",
+                "Codex output does not match the schema",
+            )
+
+        if failure is not None:
             output_path.unlink(missing_ok=True)
-            raise CodexRunError(
-                "INVALID_MODEL_RESULT", "Codex output does not match the schema"
-            ) from error
+            raise CodexRunError(*failure)
+
+        return result

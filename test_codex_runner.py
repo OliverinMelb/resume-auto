@@ -86,8 +86,7 @@ class CodexRunnerTests(unittest.TestCase):
                 with self.assertRaises(CodexRunError) as raised:
                     adapter.run("secret resume", schema, output, root)
 
-            self.assertEqual(raised.exception.code, "CODEX_TIMEOUT")
-            self.assertNotIn("secret stderr", str(raised.exception))
+            self._assert_safe_error(raised.exception, "CODEX_TIMEOUT", "secret stderr")
             self.assertFalse(output.exists())
 
     def test_missing_executable_has_safe_error_code(self):
@@ -105,8 +104,9 @@ class CodexRunnerTests(unittest.TestCase):
                 with self.assertRaises(CodexRunError) as raised:
                     adapter.run("secret resume", schema, output, root)
 
-            self.assertEqual(raised.exception.code, "CODEX_UNAVAILABLE")
-            self.assertNotIn("secret system path", str(raised.exception))
+            self._assert_safe_error(
+                raised.exception, "CODEX_UNAVAILABLE", "secret system path"
+            )
 
     def test_nonzero_process_error_never_exposes_stderr(self):
         adapter = CodexCliAdapter("codex", 1)
@@ -123,8 +123,9 @@ class CodexRunnerTests(unittest.TestCase):
                 with self.assertRaises(CodexRunError) as raised:
                     adapter.run("secret resume", schema, output, root)
 
-            self.assertEqual(raised.exception.code, "CODEX_PROCESS_ERROR")
-            self.assertNotIn("secret stderr", str(raised.exception))
+            self._assert_safe_error(
+                raised.exception, "CODEX_PROCESS_ERROR", "secret stderr"
+            )
             self.assertFalse(output.exists())
 
     def test_missing_output_has_safe_error_code(self):
@@ -142,7 +143,7 @@ class CodexRunnerTests(unittest.TestCase):
                 with self.assertRaises(CodexRunError) as raised:
                     adapter.run("secret resume", schema, output, root)
 
-            self.assertEqual(raised.exception.code, "INVALID_MODEL_RESULT")
+            self._assert_safe_error(raised.exception, "INVALID_MODEL_RESULT", "secret resume")
 
     def test_extra_model_field_is_rejected_and_output_removed(self):
         adapter = CodexCliAdapter("codex", 1)
@@ -161,7 +162,29 @@ class CodexRunnerTests(unittest.TestCase):
                 with self.assertRaises(CodexRunError) as raised:
                     adapter.run("private task", schema, output, root)
 
-            self.assertEqual(raised.exception.code, "INVALID_MODEL_RESULT")
+            self._assert_safe_error(raised.exception, "INVALID_MODEL_RESULT", "unapproved")
+            self.assertFalse(output.exists())
+
+    def test_malformed_json_is_safely_rejected_and_output_removed(self):
+        adapter = CodexCliAdapter("codex", 1)
+        malformed_json = '{"verdict": "SECRET-MODEL-OUTPUT"'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            schema = root / "schema.json"
+            output = root / "result.json"
+            schema.write_text("{}", encoding="utf-8")
+
+            def fake_run(command, **kwargs):
+                output.write_text(malformed_json, encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("resume_agent.codex_runner.subprocess.run", side_effect=fake_run):
+                with self.assertRaises(CodexRunError) as raised:
+                    adapter.run("private task", schema, output, root)
+
+            self._assert_safe_error(
+                raised.exception, "INVALID_MODEL_RESULT", "SECRET-MODEL-OUTPUT"
+            )
             self.assertFalse(output.exists())
 
     @patch("resume_agent.codex_runner.shutil.which", return_value=None)
@@ -170,6 +193,13 @@ class CodexRunnerTests(unittest.TestCase):
 
         self.assertFalse(adapter.available())
         mocked_which.assert_called_once_with("codex")
+
+    def _assert_safe_error(self, error, code, secret):
+        self.assertEqual(error.code, code)
+        self.assertNotIn(secret, str(error))
+        self.assertNotIn(secret, repr(error))
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
 
 
 class CodexSchemaTests(unittest.TestCase):
@@ -180,6 +210,7 @@ class CodexSchemaTests(unittest.TestCase):
         validated = CodexRewriteResult.model_validate(VALID_RESULT)
 
         self.assertEqual(validated.verdict, "match")
+        self.assertEqual(schema, CodexRewriteResult.model_json_schema())
         self.assertEqual(set(schema["required"]), REQUIRED_RESULT_FIELDS)
         self.assertEqual(set(schema["properties"]), REQUIRED_RESULT_FIELDS)
         self._assert_all_objects_forbid_extra_properties(schema)
