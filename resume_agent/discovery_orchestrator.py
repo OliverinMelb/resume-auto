@@ -75,6 +75,7 @@ class JobDiscoveryOrchestrator:
 
         checkpoints: dict[str, dict] = {}
         statuses: dict[str, str] = {}
+        source_audit_events: list[dict[str, Any]] = []
         for source in request.sources:
             adapter = self.adapters[source]
             try:
@@ -82,38 +83,34 @@ class JobDiscoveryOrchestrator:
                 self._validate_checkpoint(checkpoint, source)
             except Exception as error:
                 statuses[source] = "failed"
-                artifacts.append_audit(
-                    run_id=run_id,
-                    status="CREATED",
-                    event_code="SOURCE_FAILED",
-                    source=source,
-                    error_code=self._safe_start_error_code(error),
+                source_audit_events.append(
+                    {
+                        "event_code": "SOURCE_FAILED",
+                        "source": source,
+                        "error_code": self._safe_start_error_code(error),
+                    }
                 )
                 continue
             checkpoints[source] = checkpoint.to_dict()
             statuses[source] = "collecting"
-            artifacts.append_audit(
-                run_id=run_id,
-                status="CREATED",
-                event_code="SOURCE_STARTED",
-                source=source,
-            )
 
         new_status = (
             "COLLECTING" if any(value == "collecting" for value in statuses.values()) else "FAILED"
         )
-        run = self.repository.transition_discovery_run(
-            run_id,
-            {"CREATED"},
-            new_status,
-            source_checkpoints=checkpoints,
-            source_statuses=statuses,
-            error_code="DISCOVERY_FAILED" if new_status == "FAILED" else None,
+        run = self._persist_started_sources(
+            run_id, new_status, checkpoints, statuses
         )
-        artifacts.append_audit(
+        for event in source_audit_events:
+            self._append_audit_best_effort(
+                artifacts, run_id=run_id, status=new_status, **event
+            )
+        self._append_audit_best_effort(
+            artifacts,
             run_id=run_id,
             status=new_status,
-            event_code=("COLLECTION_STARTED" if new_status == "COLLECTING" else "RUN_FAILED"),
+            event_code=(
+                "COLLECTION_STARTED" if new_status == "COLLECTING" else "RUN_FAILED"
+            ),
             error_code="DISCOVERY_FAILED" if new_status == "FAILED" else None,
         )
         return run
@@ -128,6 +125,7 @@ class JobDiscoveryOrchestrator:
         checkpoints = dict(run["source_checkpoints"])
         statuses = dict(run["source_statuses"])
         requested_sources = self._requested_sources(run)
+        source_audit_events: list[dict[str, Any]] = []
 
         for source in requested_sources:
             previous_status = statuses.get(source)
@@ -136,8 +134,8 @@ class JobDiscoveryOrchestrator:
             raw_checkpoint = checkpoints.get(source)
             if raw_checkpoint is None:
                 statuses[source] = "failed"
-                self._append_source_failure(
-                    artifacts, run_id, run["status"], source, "INVALID_SOURCE_CHECKPOINT"
+                source_audit_events.append(
+                    self._source_failure_event(source, "INVALID_SOURCE_CHECKPOINT")
                 )
                 continue
             try:
@@ -145,16 +143,16 @@ class JobDiscoveryOrchestrator:
                 self._validate_checkpoint(checkpoint, source)
             except (TypeError, ValueError):
                 statuses[source] = "failed"
-                self._append_source_failure(
-                    artifacts, run_id, run["status"], source, "INVALID_SOURCE_CHECKPOINT"
+                source_audit_events.append(
+                    self._source_failure_event(source, "INVALID_SOURCE_CHECKPOINT")
                 )
                 continue
 
             adapter = self.adapters.get(source)
             if adapter is None:
                 statuses[source] = "failed"
-                self._append_source_failure(
-                    artifacts, run_id, run["status"], source, "SOURCE_UNAVAILABLE"
+                source_audit_events.append(
+                    self._source_failure_event(source, "SOURCE_UNAVAILABLE")
                 )
                 continue
 
@@ -163,46 +161,52 @@ class JobDiscoveryOrchestrator:
                 self._validate_poll_result(result, source)
             except SourceInteractionRequiredError:
                 statuses[source] = "interaction_required"
-                artifacts.append_audit(
-                    run_id=run_id,
-                    status=run["status"],
-                    event_code="SOURCE_INTERACTION_REQUIRED",
-                    source=source,
-                    error_code="SOURCE_INTERACTION_REQUIRED",
+                source_audit_events.append(
+                    {
+                        "event_code": "SOURCE_INTERACTION_REQUIRED",
+                        "source": source,
+                        "error_code": "SOURCE_INTERACTION_REQUIRED",
+                    }
                 )
                 continue
             except Exception as error:
                 statuses[source] = "failed"
-                self._append_source_failure(
-                    artifacts,
-                    run_id,
-                    run["status"],
-                    source,
-                    self._safe_poll_error_code(error),
+                source_audit_events.append(
+                    self._source_failure_event(
+                        source, self._safe_poll_error_code(error)
+                    )
+                )
+                continue
+
+            try:
+                self._validate_checkpoint(result.checkpoint, source)
+            except (TypeError, ValueError):
+                statuses[source] = "failed"
+                source_audit_events.append(
+                    self._source_failure_event(source, "INVALID_SOURCE_CHECKPOINT")
                 )
                 continue
 
             checkpoints[source] = result.checkpoint.to_dict()
             statuses[source] = result.status
             jobs.extend(result.jobs)
-            artifacts.append_audit(
-                run_id=run_id,
-                status=run["status"],
-                event_code="SOURCE_POLLED",
-                source=source,
-                count=len(result.jobs),
+            source_audit_events.append(
+                {
+                    "event_code": "SOURCE_POLLED",
+                    "source": source,
+                    "count": len(result.jobs),
+                }
             )
-            self._append_source_result_audit(artifacts, run_id, run["status"], result)
+            result_event = self._source_result_audit_event(result)
+            if result_event is not None:
+                source_audit_events.append(result_event)
 
         unique_jobs = deduplicate_discovered_jobs(jobs)
-        artifacts.write_results(unique_jobs)
+        try:
+            artifacts.write_results(unique_jobs)
+        except Exception:
+            raise ValueError("discovery results could not be saved") from None
         new_status = _resolve_discovery_status(statuses, unique_jobs)
-        artifacts.append_audit(
-            run_id=run_id,
-            status=new_status,
-            event_code="RESULTS_WRITTEN",
-            count=len(unique_jobs),
-        )
         run = self.repository.transition_discovery_run(
             run_id,
             {run["status"]},
@@ -211,7 +215,19 @@ class JobDiscoveryOrchestrator:
             source_statuses=statuses,
             error_code=self._run_error_code(new_status, statuses),
         )
-        artifacts.append_audit(
+        for event in source_audit_events:
+            self._append_audit_best_effort(
+                artifacts, run_id=run_id, status=new_status, **event
+            )
+        self._append_audit_best_effort(
+            artifacts,
+            run_id=run_id,
+            status=new_status,
+            event_code="RESULTS_WRITTEN",
+            count=len(unique_jobs),
+        )
+        self._append_audit_best_effort(
+            artifacts,
             run_id=run_id,
             status=new_status,
             event_code=self._run_event_code(new_status),
@@ -309,28 +325,17 @@ class JobDiscoveryOrchestrator:
         return "SOURCE_UNAVAILABLE"
 
     @staticmethod
-    def _append_source_failure(
-        artifacts: DiscoveryArtifacts,
-        run_id: str,
-        run_status: str,
-        source: str,
-        error_code: str,
-    ) -> None:
-        artifacts.append_audit(
-            run_id=run_id,
-            status=run_status,
-            event_code="SOURCE_FAILED",
-            source=source,
-            error_code=error_code,
-        )
+    def _source_failure_event(source: str, error_code: str) -> dict[str, Any]:
+        return {
+            "event_code": "SOURCE_FAILED",
+            "source": source,
+            "error_code": error_code,
+        }
 
     @staticmethod
-    def _append_source_result_audit(
-        artifacts: DiscoveryArtifacts,
-        run_id: str,
-        run_status: str,
+    def _source_result_audit_event(
         result: SourcePollResult,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if result.status == "completed":
             event_code = "SOURCE_COMPLETED"
             error_code = None
@@ -341,15 +346,15 @@ class JobDiscoveryOrchestrator:
             event_code = "SOURCE_FAILED"
             error_code = result.error_code or "SOURCE_TASK_FAILED"
         else:
-            return
-        artifacts.append_audit(
-            run_id=run_id,
-            status=run_status,
-            event_code=event_code,
-            source=result.source,
-            count=len(result.jobs),
-            error_code=error_code,
-        )
+            return None
+        event: dict[str, Any] = {
+            "event_code": event_code,
+            "source": result.source,
+            "count": len(result.jobs),
+        }
+        if error_code is not None:
+            event["error_code"] = error_code
+        return event
 
     @staticmethod
     def _requested_sources(run: dict[str, Any]) -> list[str]:
@@ -376,6 +381,42 @@ class JobDiscoveryOrchestrator:
             return [DiscoveredJob.model_validate(item) for item in payload]
         except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
             raise ValueError("invalid discovery results artifact") from None
+
+    def _persist_started_sources(
+        self,
+        run_id: str,
+        new_status: str,
+        checkpoints: dict[str, dict],
+        statuses: dict[str, str],
+    ) -> dict:
+        arguments = {
+            "source_checkpoints": checkpoints,
+            "source_statuses": statuses,
+            "error_code": "DISCOVERY_FAILED" if new_status == "FAILED" else None,
+        }
+        try:
+            return self.repository.transition_discovery_run(
+                run_id, {"CREATED"}, new_status, **arguments
+            )
+        except Exception:
+            try:
+                persisted = self.repository.get_discovery_run(run_id)
+                if persisted["status"] != "CREATED":
+                    return persisted
+                return self.repository.transition_discovery_run(
+                    run_id, {"CREATED"}, new_status, **arguments
+                )
+            except Exception:
+                raise ValueError("discovery sources could not be persisted") from None
+
+    @staticmethod
+    def _append_audit_best_effort(
+        artifacts: DiscoveryArtifacts, **event: Any
+    ) -> None:
+        try:
+            artifacts.append_audit(**event)
+        except Exception:
+            pass
 
     @staticmethod
     def _run_error_code(status: str, source_statuses: dict[str, str]) -> str | None:

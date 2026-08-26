@@ -4,7 +4,9 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
+from resume_agent.discovery_artifacts import DiscoveryArtifacts
 from resume_agent.discovery_schemas import DiscoveryRequest, DiscoveredJob
 from resume_agent.discovery_sources import SourceCheckpoint, SourcePollResult
 from resume_agent.repository import Repository
@@ -64,6 +66,8 @@ class FakeSource:
         outcome = self.outcomes[0] if len(self.outcomes) == 1 else self.outcomes.popleft()
         if isinstance(outcome, Exception):
             raise outcome
+        if isinstance(outcome, SourcePollResult):
+            return outcome
         status, jobs, error_code = outcome
         return SourcePollResult(
             self.source, status, tuple(jobs), checkpoint, error_code=error_code
@@ -225,6 +229,86 @@ class JobDiscoveryOrchestratorTests(unittest.TestCase):
         self.assertEqual(started["source_statuses"]["boss"], "failed")
         self.assertNotIn("boss", started["source_checkpoints"])
 
+    def test_non_json_safe_poll_checkpoint_keeps_prior_checkpoint_and_results(self):
+        boss = FakeSource(
+            "boss",
+            [
+                ("collecting", [job("boss", 1)], None),
+                ("completed", [job("boss", 2), job("boss", 3)], None),
+            ],
+        )
+        nowcoder = FakeSource(
+            "nowcoder",
+            [("collecting", [], None)],
+        )
+        orchestrator = self.orchestrator({"boss": boss, "nowcoder": nowcoder})
+        started = orchestrator.start(discovery_request(self.candidate_id))
+        first = orchestrator.poll(started["id"])
+        previous_nowcoder_checkpoint = first["source_checkpoints"]["nowcoder"]
+        nowcoder.outcomes = deque(
+            [
+                SourcePollResult(
+                    "nowcoder",
+                    "completed",
+                    (job("nowcoder", 99),),
+                    SourceCheckpoint(
+                        "nowcoder",
+                        ("nowcoder-advanced",),
+                        {"invalid_number": float("nan")},
+                    ),
+                )
+            ]
+        )
+
+        second = orchestrator.poll(started["id"])
+        results_path = Path(second["artifact_dir"]) / "source-results.json"
+        result_ids = [
+            row["source_job_id"]
+            for row in json.loads(results_path.read_text("utf-8"))
+        ]
+
+        self.assertEqual(second["status"], "PARTIAL")
+        self.assertEqual(second["source_statuses"]["boss"], "completed")
+        self.assertEqual(second["source_statuses"]["nowcoder"], "failed")
+        self.assertEqual(
+            second["source_checkpoints"]["nowcoder"], previous_nowcoder_checkpoint
+        )
+        self.assertEqual(result_ids, ["boss-1", "boss-2", "boss-3"])
+        self.assertNotIn("NaN", results_path.read_text("utf-8"))
+        audit = (Path(second["artifact_dir"]) / "audit.md").read_text("utf-8")
+        self.assertIn('"error_code": "INVALID_SOURCE_CHECKPOINT"', audit)
+        self.assertNotIn("NaN", audit)
+
+        repeated = orchestrator.poll(started["id"])
+        self.assertEqual(repeated["status"], "PARTIAL")
+        self.assertEqual((boss.poll_calls, nowcoder.poll_calls), (2, 2))
+
+    def test_start_audit_io_failure_returns_durable_collecting_checkpoint(self):
+        boss = completed("boss", [])
+        nowcoder = completed("nowcoder", [])
+        orchestrator = self.orchestrator({"boss": boss, "nowcoder": nowcoder})
+        original_append = DiscoveryArtifacts.append_audit
+
+        def fail_after_remote_start(artifacts, **event):
+            if event["event_code"] != "RUN_CREATED":
+                raise OSError("candidate@example.com?token=private")
+            return original_append(artifacts, **event)
+
+        with patch.object(DiscoveryArtifacts, "append_audit", fail_after_remote_start):
+            started = orchestrator.start(discovery_request(self.candidate_id))
+
+        persisted = self.repository.get_discovery_run(started["id"])
+        self.assertEqual(started["status"], "COLLECTING")
+        self.assertEqual(persisted["status"], "COLLECTING")
+        self.assertEqual(set(persisted["source_checkpoints"]), {"boss", "nowcoder"})
+        self.assertEqual(
+            persisted["source_statuses"],
+            {"boss": "collecting", "nowcoder": "collecting"},
+        )
+        audit = (Path(started["artifact_dir"]) / "audit.md").read_text("utf-8")
+        self.assertNotIn("candidate@example.com", audit)
+        self.assertEqual((boss.start_calls, nowcoder.start_calls), (1, 1))
+
     def test_poll_exception_is_safe_and_preserves_previously_written_jobs(self):
         boss = FakeSource(
             "boss",
@@ -267,6 +351,21 @@ class JobDiscoveryOrchestratorTests(unittest.TestCase):
         self.assertEqual((boss.start_calls, nowcoder.start_calls), (1, 1))
         self.assertEqual((boss.poll_calls, nowcoder.poll_calls), (1, 1))
 
+    def test_repeated_partial_poll_is_idempotent_and_does_not_repoll(self):
+        boss = failed("boss")
+        nowcoder = completed(
+            "nowcoder", [job("nowcoder", 1), job("nowcoder", 2), job("nowcoder", 3)]
+        )
+        orchestrator = self.orchestrator({"boss": boss, "nowcoder": nowcoder})
+        started = orchestrator.start(discovery_request(self.candidate_id))
+        first = orchestrator.poll(started["id"])
+
+        repeated = orchestrator.poll(started["id"])
+
+        self.assertEqual(first["status"], "PARTIAL")
+        self.assertEqual(repeated["status"], "PARTIAL")
+        self.assertEqual((boss.poll_calls, nowcoder.poll_calls), (1, 1))
+
     def test_failed_runs_are_not_pollable(self):
         boss = completed("boss", [job("boss", 1)])
         nowcoder = completed("nowcoder", [])
@@ -274,6 +373,21 @@ class JobDiscoveryOrchestratorTests(unittest.TestCase):
             {"boss": boss, "nowcoder": nowcoder}
         )
         self.assertEqual(failed_run["status"], "FAILED")
+
+        with self.assertRaisesRegex(ValueError, "not pollable"):
+            orchestrator.poll(started["id"])
+        self.assertEqual((boss.poll_calls, nowcoder.poll_calls), (1, 1))
+
+    def test_imported_runs_are_not_pollable(self):
+        boss = completed("boss", [job("boss", 1)])
+        nowcoder = completed("nowcoder", [job("nowcoder", 2), job("nowcoder", 3)])
+        orchestrator, started, ready = self.start_and_poll(
+            {"boss": boss, "nowcoder": nowcoder}
+        )
+        imported = self.repository.transition_discovery_run(
+            ready["id"], {"READY_FOR_IMPORT"}, "IMPORTED"
+        )
+        self.assertEqual(imported["status"], "IMPORTED")
 
         with self.assertRaisesRegex(ValueError, "not pollable"):
             orchestrator.poll(started["id"])
