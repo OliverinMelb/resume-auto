@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from types import MappingProxyType
 from pathlib import Path
 
 from resume_agent.rewrite_artifacts import RunArtifacts
@@ -14,20 +15,29 @@ class RewriteSupportTests(unittest.TestCase):
             root = Path(directory)
             artifacts = RunArtifacts.create(root, "rewrite_run_abc")
             artifacts.write_json("input-snapshot.json", {"name": "曹申傲"})
-            artifacts.append_audit("RUNNING", "开始")
+            artifacts.append_audit(
+                run_id="rewrite_run_abc",
+                status="RUNNING",
+                event_code="RUN_STARTED",
+            )
             self.assertEqual(
                 json.loads(
                     (artifacts.directory / "input-snapshot.json").read_text("utf-8")
                 ),
                 {"name": "曹申傲"},
             )
-            self.assertIn(
-                "RUNNING", (artifacts.directory / "audit.md").read_text("utf-8")
+            self.assertEqual(
+                json.loads((artifacts.directory / "audit.md").read_text("utf-8")),
+                {
+                    "run_id": "rewrite_run_abc",
+                    "status": "RUNNING",
+                    "event_code": "RUN_STARTED",
+                },
             )
             with self.assertRaises(ValueError):
                 artifacts.write_text("../escape.txt", "no")
 
-    def test_artifacts_reject_invalid_runs_and_redact_audit_contacts(self):
+    def test_audit_accepts_only_structured_whitelisted_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with self.assertRaises(ValueError):
@@ -35,14 +45,62 @@ class RewriteSupportTests(unittest.TestCase):
 
             artifacts = RunArtifacts.create(root, "rewrite_run_abc")
             artifacts.append_audit(
-                "FAILED", "contact 13812345678 or user@example.com"
+                run_id="rewrite_run_abc",
+                status="FAILED",
+                event_code="FACT_GATE_BLOCKED",
+                duration_ms=42,
+                content_hash="a" * 64,
+                error_safe_hash="b" * 64,
+                error_code="FACTS_REQUIRED",
+                question_ids=["metric_1"],
+                source_ids=["source_resume_1", "job_1"],
             )
-            audit = (artifacts.directory / "audit.md").read_text("utf-8")
-            self.assertIn("[REDACTED_PHONE]", audit)
-            self.assertIn("[REDACTED_EMAIL]", audit)
-            self.assertNotIn("13812345678", audit)
-            self.assertNotIn("user@example.com", audit)
+            event = json.loads((artifacts.directory / "audit.md").read_text("utf-8"))
+            self.assertEqual(
+                set(event),
+                {
+                    "run_id",
+                    "status",
+                    "event_code",
+                    "duration_ms",
+                    "content_hash",
+                    "error_safe_hash",
+                    "error_code",
+                    "question_ids",
+                    "source_ids",
+                },
+            )
+            self.assertNotIn("曹申傲", json.dumps(event, ensure_ascii=False))
+            with self.assertRaises(TypeError):
+                artifacts.append_audit(
+                    run_id="rewrite_run_abc",
+                    status="FAILED",
+                    event_code="FAILED",
+                    message="完整简历和 JD 原文",
+                )
+            with self.assertRaises(ValueError):
+                artifacts.append_audit(
+                    run_id="rewrite_run_abc",
+                    status="FAILED",
+                    event_code="contains free text",
+                )
+            with self.assertRaises(ValueError):
+                artifacts.append_audit(
+                    run_id="rewrite_run_other",
+                    status="FAILED",
+                    event_code="FACT_GATE_BLOCKED",
+                )
             artifacts.remove_if_exists("resume.pdf")
+
+    def test_text_and_json_writers_reject_binary_and_audit_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = RunArtifacts.create(Path(directory), "rewrite_run_abc")
+            with self.assertRaises(ValueError):
+                artifacts.write_text("resume.pdf", "not a PDF")
+            with self.assertRaises(ValueError):
+                artifacts.write_json("resume.pdf", {"not": "a PDF"})
+            with self.assertRaises(ValueError):
+                artifacts.write_text("audit.md", "candidate resume text")
 
     def test_task_marks_resume_and_jd_as_data_and_requires_skill_sections(self):
         task = build_codex_task(
@@ -65,7 +123,14 @@ class RewriteSupportTests(unittest.TestCase):
                     question_id="metric_1",
                     answer="提高 20%",
                     source_note="仪表盘月报",
-                )
+                ),
+                MappingProxyType(
+                    {
+                        "question_id": "metric_2",
+                        "answer": "完成 10 次交付",
+                        "source_note": "发布记录",
+                    }
+                ),
             ],
             allowed_resume_ids=["source_resume_1"],
             allowed_job_ids=["job_1"],
@@ -84,6 +149,7 @@ class RewriteSupportTests(unittest.TestCase):
             self.assertIn(field, task)
         self.assertIn("候选人提供的证据", task)
         self.assertIn("提高 20%", task)
+        self.assertIn("完成 10 次交付", task)
 
     def test_jd_evidence_keeps_explicit_text_separate_from_keyword_inference(self):
         text = render_jd_evidence(

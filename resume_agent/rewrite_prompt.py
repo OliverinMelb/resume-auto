@@ -1,5 +1,8 @@
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
+
+from .rewrite_schemas import FactAnswer
 
 
 def render_jd_evidence(
@@ -32,18 +35,26 @@ def render_jd_evidence(
     return "\n".join(explicit_sections + keyword_sections) + "\n"
 
 
-def _serialize_fact_answers(fact_answers: list[dict[str, str]]) -> str:
-    serialized = []
+def _serialize_fact_answers(
+    fact_answers: Sequence[FactAnswer | Mapping[str, str]],
+) -> str:
+    """Normalize public fact inputs before embedding them as candidate evidence."""
+    serialized: list[dict[str, str]] = []
     for answer in fact_answers:
-        model_dump = getattr(answer, "model_dump", None)
-        serialized.append(model_dump() if model_dump is not None else answer)
+        if isinstance(answer, FactAnswer):
+            normalized = answer
+        elif isinstance(answer, Mapping):
+            normalized = FactAnswer.model_validate(dict(answer))
+        else:
+            raise TypeError("fact_answers 必须是 FactAnswer 或字符串映射")
+        serialized.append(normalized.model_dump())
     return json.dumps(serialized, ensure_ascii=False, indent=2)
 
 
 def build_codex_task(
     *,
     base_prompt: str,
-    fact_answers: list[dict[str, str]],
+    fact_answers: Sequence[FactAnswer | Mapping[str, str]],
     allowed_resume_ids: list[str],
     allowed_job_ids: list[str],
 ) -> str:
