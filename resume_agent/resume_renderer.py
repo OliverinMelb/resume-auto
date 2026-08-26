@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -86,48 +88,129 @@ class ReportLabAdapter:
         preview_dir = Path(preview_dir)
         expected_lines = _normalized_markdown_lines(markdown)
 
-        with tempfile.TemporaryDirectory(prefix="resume-render-") as directory:
-            work_dir = Path(directory)
-            selected: Path | None = None
-            two_page_candidate: Path | None = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="resume-render-") as directory:
+                work_dir = Path(directory)
+                selected: Path | None = None
+                two_page_candidate: Path | None = None
 
-            for index, preset in enumerate(PRESETS):
-                candidate = work_dir / f"preset-{index}.pdf"
-                self._build_pdf(markdown, candidate, preset, font_name)
-                page_count = self._page_count(candidate)
-                if page_count == 1:
-                    selected = candidate
-                    break
-                if page_count == 2 and two_page_candidate is None:
-                    two_page_candidate = candidate
+                for index, preset in enumerate(PRESETS):
+                    candidate = work_dir / f"preset-{index}.pdf"
+                    self._build_pdf(markdown, candidate, preset, font_name)
+                    page_count = self._page_count(candidate)
+                    if page_count == 1:
+                        selected = candidate
+                        break
+                    if page_count == 2 and two_page_candidate is None:
+                        two_page_candidate = candidate
 
-            if selected is None:
-                selected = two_page_candidate
-            if selected is None:
-                raise RenderError(
-                    "PAGE_LIMIT_EXCEEDED",
-                    "The resume cannot fit within two readable pages.",
+                if selected is None:
+                    selected = two_page_candidate
+                if selected is None:
+                    raise RenderError(
+                        "PAGE_LIMIT_EXCEEDED",
+                        "The resume cannot fit within two readable pages.",
+                    )
+
+                extracted_text, preview_files = self._validate_and_preview(
+                    selected, work_dir / "preview", expected_lines
                 )
+                final_previews = self._publish(selected, preview_files, pdf_path, preview_dir)
+                return RenderResult(
+                    page_count=len(final_previews),
+                    extracted_text=extracted_text,
+                    preview_paths=final_previews,
+                )
+        except OSError:
+            raise RenderError(
+                "RENDER_ERROR", "Unable to publish the rendered resume safely."
+            ) from None
 
-            extracted_text, preview_files = self._validate_and_preview(
-                selected, work_dir / "preview", expected_lines
+    def _publish(
+        self,
+        selected_pdf: Path,
+        preview_files: list[Path],
+        pdf_path: Path,
+        preview_dir: Path,
+    ) -> list[Path]:
+        """Publish both output targets as a rollback-capable filesystem transaction."""
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        preview_dir.parent.mkdir(parents=True, exist_ok=True)
+        transaction_id = uuid.uuid4().hex
+        pdf_stage = pdf_path.parent / f".{pdf_path.name}.pdf-stage-{transaction_id}"
+        preview_stage = (
+            preview_dir.parent / f".{preview_dir.name}.preview-stage-{transaction_id}"
+        )
+        pdf_backup = pdf_path.parent / f".{pdf_path.name}.pdf-backup-{transaction_id}"
+        preview_backup = (
+            preview_dir.parent / f".{preview_dir.name}.preview-backup-{transaction_id}"
+        )
+        had_pdf = False
+        had_preview = False
+        published_pdf = False
+        published_preview = False
+
+        try:
+            shutil.copyfile(selected_pdf, pdf_stage)
+            preview_stage.mkdir()
+            for preview_file in preview_files:
+                shutil.copyfile(preview_file, preview_stage / preview_file.name)
+
+            if pdf_path.exists():
+                os.replace(pdf_path, pdf_backup)
+                had_pdf = True
+            if preview_dir.exists():
+                os.replace(preview_dir, preview_backup)
+                had_preview = True
+
+            os.replace(pdf_stage, pdf_path)
+            published_pdf = True
+            os.replace(preview_stage, preview_dir)
+            published_preview = True
+            _remove_path(pdf_backup)
+            _remove_path(preview_backup)
+            return [preview_dir / preview_file.name for preview_file in preview_files]
+        except OSError:
+            self._rollback_publication(
+                pdf_path,
+                preview_dir,
+                pdf_backup,
+                preview_backup,
+                had_pdf,
+                had_preview,
+                published_pdf,
+                published_preview,
             )
-            pdf_path.parent.mkdir(parents=True, exist_ok=True)
-            preview_dir.mkdir(parents=True, exist_ok=True)
-            final_previews: list[Path] = []
-            for temporary_preview in preview_files:
-                final_preview = preview_dir / temporary_preview.name
-                os.replace(temporary_preview, final_preview)
-                final_previews.append(final_preview)
-            stale_preview = preview_dir / "page-2.png"
-            if len(final_previews) == 1 and stale_preview.exists():
-                stale_preview.unlink()
-            os.replace(selected, pdf_path)
-            return RenderResult(
-                page_count=len(final_previews),
-                extracted_text=extracted_text,
-                preview_paths=final_previews,
-            )
+            raise
+        finally:
+            _remove_path(pdf_stage)
+            _remove_path(preview_stage)
+
+    @staticmethod
+    def _rollback_publication(
+        pdf_path: Path,
+        preview_dir: Path,
+        pdf_backup: Path,
+        preview_backup: Path,
+        had_pdf: bool,
+        had_preview: bool,
+        published_pdf: bool,
+        published_preview: bool,
+    ) -> None:
+        if published_pdf or not had_pdf:
+            _remove_path(pdf_path)
+        if published_preview or not had_preview:
+            _remove_path(preview_dir)
+        if had_pdf and pdf_backup.exists():
+            try:
+                os.replace(pdf_backup, pdf_path)
+            except OSError:
+                pass
+        if had_preview and preview_backup.exists():
+            try:
+                os.replace(preview_backup, preview_dir)
+            except OSError:
+                pass
 
     def _register_font(self) -> str:
         if FONT_NAME in pdfmetrics.getRegisteredFontNames():
@@ -169,7 +252,9 @@ class ReportLabAdapter:
             title="Resume",
             author="Resume Agent",
         )
-        story = self._flowables(markdown, preset, font_name, document.height)
+        story = self._flowables(
+            markdown, preset, font_name, document.height, document.width
+        )
         document.build(story)
 
     def _flowables(
@@ -178,6 +263,7 @@ class ReportLabAdapter:
         preset: RenderPreset,
         font_name: str,
         available_height: float,
+        available_width: float | None = None,
     ) -> list[object]:
         body = ParagraphStyle(
             "ResumeBody",
@@ -237,7 +323,10 @@ class ReportLabAdapter:
             if bullet_match:
                 flush_paragraph()
                 flowable = Paragraph("- " + _paragraph_markup(bullet_match.group(1)), bullet)
-                width, height = flowable.wrap(1, available_height)
+                real_width = available_width
+                if real_width is None:
+                    real_width = A4[0] - 2 * preset.margin_mm * mm
+                width, height = flowable.wrap(real_width, available_height)
                 if width and height <= available_height:
                     story.append(KeepTogether([flowable, Spacer(1, preset.section_space / 3)]))
                 else:
@@ -301,6 +390,17 @@ class ReportLabAdapter:
                     "The PDF text does not preserve all resume content.",
                 )
             cursor = position + len(line)
+
+
+def _remove_path(path: Path) -> None:
+    """Best-effort cleanup for transaction-owned staging and backup targets."""
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _paragraph_markup(text: str) -> str:

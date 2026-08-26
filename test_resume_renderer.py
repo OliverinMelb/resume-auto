@@ -1,8 +1,15 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from resume_agent.resume_renderer import ReportLabAdapter, RenderError
+import pymupdf
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.platypus import KeepTogether
+
+from resume_agent import resume_renderer
+from resume_agent.resume_renderer import PRESETS, ReportLabAdapter, RenderError
 
 
 class ResumeRendererTests(unittest.TestCase):
@@ -68,6 +75,167 @@ class ResumeRendererTests(unittest.TestCase):
     def test_empty_content_is_rejected(self):
         with self.assertRaisesRegex(RenderError, "EMPTY_CONTENT"):
             self.renderer.render("  \n\n", self.root / "resume.pdf", self.root / "preview")
+
+    def test_publication_failure_restores_existing_pdf_and_preview_atomically(self):
+        destination = self.root / "resume.pdf"
+        preview = self.root / "preview"
+        destination.write_bytes(b"old-pdf")
+        preview.mkdir()
+        (preview / "page-1.png").write_bytes(b"old-page-one")
+        (preview / "page-2.png").write_bytes(b"old-page-two")
+        original_replace = __import__("os").replace
+        failed = False
+
+        def fail_final_pdf_publish(source, target):
+            nonlocal failed
+            if not failed and Path(target) == destination:
+                failed = True
+                raise PermissionError(f"private renderer path: {self.root}")
+            return original_replace(source, target)
+
+        with patch(
+            "resume_agent.resume_renderer.os.replace", side_effect=fail_final_pdf_publish
+        ):
+            with self.assertRaises(RenderError) as raised:
+                self.renderer.render("# Resume\n- Current evidence", destination, preview)
+
+        self.assertTrue(failed)
+        self.assertEqual(raised.exception.code, "RENDER_ERROR")
+        self.assertNotIn(str(self.root), raised.exception.safe_message)
+        self.assertEqual(destination.read_bytes(), b"old-pdf")
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in preview.iterdir()},
+            {"page-1.png": b"old-page-one", "page-2.png": b"old-page-two"},
+        )
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"resume.pdf", "preview"})
+
+    def test_publication_failure_leaves_absent_targets_absent(self):
+        destination = self.root / "resume.pdf"
+        preview = self.root / "preview"
+        original_replace = __import__("os").replace
+        failed = False
+
+        def fail_final_pdf_publish(source, target):
+            nonlocal failed
+            if not failed and Path(target) == destination:
+                failed = True
+                raise PermissionError(f"private renderer path: {self.root}")
+            return original_replace(source, target)
+
+        with patch(
+            "resume_agent.resume_renderer.os.replace", side_effect=fail_final_pdf_publish
+        ):
+            with self.assertRaises(RenderError) as raised:
+                self.renderer.render("# Resume\n- Current evidence", destination, preview)
+
+        self.assertTrue(failed)
+        self.assertEqual(raised.exception.code, "RENDER_ERROR")
+        self.assertNotIn(str(self.root), raised.exception.safe_message)
+        self.assertFalse(destination.exists())
+        self.assertFalse(preview.exists())
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_real_document_width_keeps_a_bullet_that_fits_on_one_page_together(self):
+        preset = PRESETS[0]
+        real_width = A4[0] - 2 * preset.margin_mm * mm
+        real_height = A4[1] - 2 * preset.margin_mm * mm
+        story = self.renderer._flowables(
+            "- " + "evidence " * 550,
+            preset,
+            self.renderer._register_font(),
+            real_height,
+        )
+        measured = story[0]._content[0] if isinstance(story[0], KeepTogether) else story[0]
+        _, real_height_used = measured.wrap(real_width, real_height)
+        self.assertLess(real_height_used, real_height)
+        self.assertIsInstance(story[0], KeepTogether)
+
+    def test_truly_tall_bullet_is_allowed_to_wrap(self):
+        preset = PRESETS[0]
+        real_height = A4[1] - 2 * preset.margin_mm * mm
+        story = self.renderer._flowables(
+            "- " + "evidence " * 1400,
+            preset,
+            self.renderer._register_font(),
+            real_height,
+        )
+        self.assertNotIsInstance(story[0], KeepTogether)
+
+    def test_two_page_resume_selects_the_readable_two_page_preset(self):
+        markdown = "# Resume\n\n## Experience\n" + "\n".join(
+            f"- Project {index}: built, tested, and operated a reliable Agent workflow."
+            for index in range(58)
+        )
+        result = self.renderer.render(
+            markdown, self.root / "resume.pdf", self.root / "preview"
+        )
+        self.assertEqual(result.page_count, 2)
+        self.assertEqual(
+            [path.name for path in result.preview_paths], ["page-1.png", "page-2.png"]
+        )
+
+    def test_repeated_wrapped_bullet_and_link_text_extract_in_order(self):
+        long_evidence = "wrapped evidence " * 35
+        markdown = (
+            "# Resume\n\n"
+            f"- {long_evidence}[Portfolio](https://example.com/portfolio)\n"
+            "- Repeated evidence\n"
+            "- Repeated evidence"
+        )
+        result = self.renderer.render(
+            markdown, self.root / "resume.pdf", self.root / "preview"
+        )
+        expected = [
+            "Resume",
+            f"{long_evidence.strip()} Portfolio (https://example.com/portfolio)",
+            "Repeated evidence",
+            "Repeated evidence",
+        ]
+        cursor = 0
+        extracted = " ".join(result.extracted_text.split())
+        for line in expected:
+            position = extracted.find(line, cursor)
+            self.assertNotEqual(position, -1)
+            cursor = position + len(line)
+
+    def test_blank_trailing_page_is_rejected_during_pdf_validation(self):
+        valid_pdf = self.root / "valid.pdf"
+        self.renderer.render("# Resume\n- Evidence", valid_pdf, self.root / "valid-preview")
+        invalid_pdf = self.root / "invalid.pdf"
+        with pymupdf.open(valid_pdf) as document:
+            document.new_page()
+            document.save(invalid_pdf)
+        with self.assertRaises(RenderError) as raised:
+            self.renderer._validate_and_preview(
+                invalid_pdf, self.root / "invalid-preview", ["Resume", "Evidence"]
+            )
+        self.assertEqual(raised.exception.code, "RENDER_VALIDATION_FAILED")
+
+    def test_font_falls_back_to_next_usable_configured_font(self):
+        fallback_name = "ResumeFallbackFontForTest"
+        with (
+            patch.object(resume_renderer, "FONT_NAME", fallback_name),
+            patch.object(
+                resume_renderer,
+                "FONT_PATHS",
+                (self.root / "missing-font.ttf", Path(r"C:\Windows\Fonts\simhei.ttf")),
+            ),
+        ):
+            self.assertEqual(self.renderer._register_font(), fallback_name)
+
+    def test_missing_fonts_return_a_safe_error(self):
+        with (
+            patch.object(resume_renderer, "FONT_NAME", "NoFontForTest"),
+            patch.object(
+                resume_renderer,
+                "FONT_PATHS",
+                (self.root / "missing-one.ttf", self.root / "missing-two.ttf"),
+            ),
+        ):
+            with self.assertRaises(RenderError) as raised:
+                self.renderer._register_font()
+        self.assertEqual(raised.exception.code, "FONT_UNAVAILABLE")
+        self.assertNotIn(str(self.root), raised.exception.safe_message)
 
 
 if __name__ == "__main__":
