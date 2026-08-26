@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 from typing import Protocol
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
 class JsonTransport(Protocol):
@@ -23,6 +23,13 @@ class JsonTransport(Protocol):
 class UrllibJsonTransport:
     """Minimal stdlib transport used only after the endpoint passed loopback checks."""
 
+    def __init__(self, *, opener=None):
+        self.proxy_handler = ProxyHandler({})
+        self.redirect_handler = _NoRedirectHandler()
+        self.opener = opener or build_opener(
+            self.proxy_handler, self.redirect_handler
+        )
+
     def request_json(
         self,
         method: str,
@@ -37,7 +44,7 @@ class UrllibJsonTransport:
             method=method,
             headers={"Accept": "application/json", "Content-Type": "application/json"},
         )
-        with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310
+        with self.opener.open(request, timeout=timeout_seconds) as response:
             decoded = json.loads(response.read().decode("utf-8"))
         if not isinstance(decoded, dict):
             raise ValueError("discovery response must be a JSON object")
@@ -71,11 +78,24 @@ class LocalJsonClient:
 
 
 def _is_loopback_host(hostname: str | None) -> bool:
-    if hostname is None:
-        return False
-    if hostname.casefold() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        return False
+    return hostname is not None and (
+        hostname.casefold() == "localhost" or hostname in {"127.0.0.1", "::1"}
+    )
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Reject redirects instead of creating a request to a new destination."""
+
+    def http_error_302(self, request, response, code, message, headers):
+        raise HTTPError(
+            request.full_url,
+            code,
+            "discovery redirects are not allowed",
+            headers,
+            response,
+        )
+
+    http_error_301 = http_error_302
+    http_error_303 = http_error_302
+    http_error_307 = http_error_302
+    http_error_308 = http_error_302

@@ -1,9 +1,12 @@
 from datetime import datetime, timezone
+from email.message import Message
 import json
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
+from urllib.request import ProxyHandler, Request
 import unittest
 
-from resume_agent.discovery_http import LocalJsonClient
+from resume_agent.discovery_http import LocalJsonClient, UrllibJsonTransport
 from resume_agent.discovery_schemas import DiscoveryRequest
 from resume_agent.discovery_sources import (
     BossResearchAdapter,
@@ -28,6 +31,30 @@ class FakeTransport:
         return response
 
 
+class JsonResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *unused):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class RecordingOpener:
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    def open(self, request, timeout):
+        self.calls.append((request, timeout))
+        return JsonResponse(self.payload)
+
+
 def discovery_request(**overrides):
     payload = {
         "candidate_id": "candidate-1",
@@ -50,6 +77,9 @@ class LocalJsonClientTests(unittest.TestCase):
             "http://localhost.evil.example",
             "http://127.0.0.1.nip.io",
             "http://127.0.0.1@jobs.example.com",
+            "http://127.0.0.2:8000",
+            "http://127.12.34.56:8000",
+            "http://[::ffff:127.0.0.1]:8000",
         ):
             with self.subTest(endpoint=endpoint):
                 with self.assertRaisesRegex(ValueError, "loopback"):
@@ -57,6 +87,7 @@ class LocalJsonClientTests(unittest.TestCase):
 
         for endpoint in (
             "http://localhost:8000",
+            "http://LOCALHOST:8000",
             "http://127.0.0.1:8000",
             "http://[::1]:8000",
         ):
@@ -79,6 +110,37 @@ class LocalJsonClientTests(unittest.TestCase):
             with self.subTest(path=path):
                 with self.assertRaisesRegex(ValueError, "absolute and local"):
                     client.request_json("GET", path)
+
+    def test_default_transport_disables_proxies_and_refuses_redirects(self):
+        transport = UrllibJsonTransport()
+        proxy_handlers = [
+            handler for handler in transport.opener.handlers if isinstance(handler, ProxyHandler)
+        ]
+        self.assertEqual(transport.proxy_handler.proxies, {})
+        self.assertFalse(any(handler.proxies for handler in proxy_handlers))
+
+        headers = Message()
+        headers["Location"] = "http://jobs.example.com/redirected"
+        request = Request("http://127.0.0.1:8000/jobs")
+        with self.assertRaises(HTTPError) as raised:
+            transport.redirect_handler.http_error_302(
+                request, None, 302, "Found", headers
+            )
+        self.assertEqual(raised.exception.code, 302)
+        self.assertEqual(raised.exception.url, request.full_url)
+
+    def test_transport_uses_an_injected_opener_without_a_network_call(self):
+        opener = RecordingOpener({"ok": True})
+        transport = UrllibJsonTransport(opener=opener)
+
+        self.assertEqual(
+            transport.request_json("POST", "http://127.0.0.1:8000/jobs", {"id": 7}, 9),
+            {"ok": True},
+        )
+        request, timeout = opener.calls[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8000/jobs")
+        self.assertEqual(request.data, b'{"id": 7}')
+        self.assertEqual(timeout, 9)
 
 
 class SourceCheckpointTests(unittest.TestCase):
