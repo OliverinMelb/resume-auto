@@ -14,28 +14,32 @@ DATE = re.compile(
     r"|(?<!\d)(?:19|20)\d{2}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?)?(?!\d)"
 )
 VERSION = re.compile(
-    r"\b(?:Python|Java|Node(?:\.js)?|React)\s+v?\d+(?:\.\d+){0,3}\+?"
+    r"(?<![A-Za-z0-9])"
+    r"(?:[A-Za-z][A-Za-z0-9]*(?:[._-][A-Za-z0-9]+)*)"
+    r"\s+v?\d+(?:\.\d+){0,3}\+?"
     r"(?![\w.])",
     re.I,
 )
 CALENDAR_MONTH = re.compile(
     r"(?<!\d)(?:0?[1-9]|1[0-2])\s*月(?=\s*(?:毕业|入学|入职|离职))"
+    r"|(?:毕业时间\s*[:：]?|毕业于)\s*(?:0?[1-9]|1[0-2])\s*月"
 )
 METRIC = re.compile(
     r"(?:"
-    r"(?<![A-Za-z0-9])[$¥]\s*\d+(?:\.\d+)?(?:[KMB])?(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9])(?:[$¥]\s*|USD\s+)"
+    r"\d+(?:\.\d+)?(?:[KMB])?(?![A-Za-z0-9])"
     r"|"
     r"(?<![A-Za-z0-9])"
     r"(?:约\s*)?\d+(?:\.\d+)?"
     r"(?:\s*(?:-|–|—|~|～|至|到)\s*\d+(?:\.\d+)?)?"
     r"\s*(?:%|\+|qps|tps|rps|ms|毫秒|s|秒|分钟|小时|年|个月|月|天|"
     r"(?:万|亿)(?:用户|人|家|条|次|个|元)?|元|人|家|条|"
-    r"美元|个(?:节点|字段)|(?:余)?(?:用户|人|家|条|项|次|个)|"
+    r"美元|个(?:节点|字段)|(?:余|多)?(?:用户|人|家|条|项|次|个)|"
     r"项|轮|维|种(?:状态)?|字段|节点|倍|次)"
     r"(?:以上|以下|左右)?"
     r"(?![A-Za-z0-9])"
-    r"|(?:十余|百余|千余|数十|数百|上千|近百|约百|百万|一亿)"
-    r"(?:用户|人|家|项|次|条|元)"
+    r"|(?:十余|百余|千余|数十|数百|数千|上千|近百|约百|百万|一亿)"
+    r"(?:用户|人|家|项|次|条|元|年)"
     r")",
     re.I,
 )
@@ -143,6 +147,20 @@ class InvalidModelResult(ValueError):
 class _DraftLine:
     claim: str
     normalized: str
+
+
+@dataclass(frozen=True)
+class _PercentageRecord:
+    numerator: float
+    denominator: float
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _BlockerSlot:
+    kind: str
+    labels: tuple[str, ...]
 
 
 def stable_metric_question_id(claim: str, metric: str) -> str:
@@ -351,7 +369,13 @@ def validate_rewrite_facts(
             source_evidence = (
                 bool(metric_quotes)
                 and _basis_is_informative(basis, metric)
-                and any(_contains_basis(quote, basis) for quote in metric_quotes)
+                and any(
+                    _contains_basis(quote, basis)
+                    and _source_metric_record_matches(
+                        quote, line.claim, metric, basis
+                    )
+                    for quote in metric_quotes
+                )
             )
 
             if audit.fact_status == "source_verified":
@@ -535,100 +559,141 @@ def _quote_contains_full_claim(quote: str, claim: str) -> bool:
     return _text_asserts_claim(quote, claim)
 
 
+DIRECT_ASSERTION_REJECTION = re.compile(
+    r"(?:不属实|并非真实|不是真实|并非最终|不是最终|明显错误|错误值|"
+    r"(?:说法|结果|口径|数值).{0,12}(?:错误|有误|废弃)|"
+    r"未达到|未主导|不负责|从未|未曾|否认)"
+)
+COLLECTIVE_ACTORS = ("团队", "我们", "项目组", "部门")
+PERSONAL_ACTORS = ("我", "本人", "候选人")
+
+
+def _measurement_records(value: str) -> list[str]:
+    return [
+        record
+        for record in re.split(r"[。；;！？\n]", unicodedata.normalize("NFKC", value))
+        if record.strip()
+    ]
+
+
+def _suffix_is_typed_measurement(value: str) -> bool:
+    suffix = value.lstrip("，,、 ")
+    if not suffix:
+        return True
+    suffix = suffix.removeprefix("的")
+    has_metric = bool(extract_business_metrics(suffix))
+    compact_suffix = _compact(suffix)
+    has_method = any(
+        term in compact_suffix
+        for term in (
+            *MEASUREMENT_METHOD_TERMS,
+            *QPS_MEASUREMENT_SOURCE_TERMS,
+            *STATISTICS_WINDOW_TERMS,
+            "成功",
+            "完成",
+            "命中",
+            "通过",
+        )
+    )
+    return has_metric and has_method
+
+
 def _text_asserts_claim(container: str, claim: str) -> bool:
-    compact_container = _compact(_display_claim(container))
     compact_claim = _compact(_display_claim(claim))
-    if not compact_container or not compact_claim:
+    if not compact_claim:
         return False
 
-    start = compact_container.find(compact_claim)
-    while start >= 0:
-        clause_start = max(
-            compact_container.rfind(mark, 0, start)
-            for mark in ("。", "，", ",", "；", ";", "！", "？")
-        ) + 1
-        clause_end_candidates = [
-            position
-            for mark in ("。", "，", ",", "；", ";", "！", "？")
-            if (position := compact_container.find(mark, start + len(compact_claim)))
-            >= 0
-        ]
-        clause_end = min(clause_end_candidates, default=len(compact_container))
-        prefix = compact_container[clause_start:start]
-        suffix = compact_container[start + len(compact_claim) : clause_end]
-
-        collective_positions = [
-            prefix.rfind(actor) for actor in ("团队", "我们", "项目组", "部门")
-        ]
-        last_collective = max(collective_positions)
-        personal_positions = [prefix.rfind(actor) for actor in ("本人", "候选人")]
-        personal_positions.extend(
-            match.start() for match in re.finditer(r"我(?!们)", prefix)
-        )
-        last_personal = max(personal_positions)
-        collective_upgrade = last_collective >= 0 and last_personal < last_collective
-        locally_negated = bool(
-            re.search(r"(?:不|未|没有|并非|不是|从未|未曾|否认)$", prefix)
-        ) or bool(re.match(r"(?:不属实|错误|有误|不正确|不对)", suffix))
-
-        if not collective_upgrade and not locally_negated:
-            return True
-        start = compact_container.find(compact_claim, start + 1)
+    for raw_record in _measurement_records(_display_claim(container)):
+        record = _compact(raw_record)
+        start = record.find(compact_claim)
+        while start >= 0:
+            prefix = record[:start]
+            suffix = record[start + len(compact_claim) :]
+            prefix_is_direct = not prefix or prefix in PERSONAL_ACTORS
+            has_collective_actor = any(actor in record for actor in COLLECTIVE_ACTORS)
+            has_rejection = bool(DIRECT_ASSERTION_REJECTION.search(record))
+            if (
+                prefix_is_direct
+                and _suffix_is_typed_measurement(suffix)
+                and not has_collective_actor
+                and not has_rejection
+            ):
+                return True
+            start = record.find(compact_claim, start + 1)
     return False
 
 
-QUESTION_FACT_GROUPS = (
-    (
-        ("学历", "学位", "教育背景", "学校", "院校", "专业"),
-        ("学历", "学位", "硕士", "本科", "博士", "大专", "学校", "院校", "专业"),
-    ),
-    (
-        ("入职", "离职", "任职日期", "工作日期", "就职时间"),
-        ("入职", "离职", "任职", "工作时间", "就职", "年", "月", "日"),
-    ),
-    (
-        ("日期", "时间", "何时", "哪一年"),
-        ("日期", "时间", "年", "月", "日"),
-    ),
-    (
-        ("部署", "运行环境", "部署环境"),
-        ("部署", "环境", "windows", "linux", "容器", "云", "本地"),
-    ),
-    (
-        ("职责", "负责", "主导", "角色"),
-        ("职责", "负责", "主导", "角色", "参与"),
-    ),
+def _nonmetric_claim_segments(claim: str | None) -> list[str]:
+    if not claim:
+        return []
+    return [
+        segment.strip()
+        for segment in re.split(r"[，,；;]", _display_claim(claim))
+        if segment.strip() and not extract_business_metrics(segment)
+    ]
+
+
+UNRESOLVED_ANSWER_TERMS = (
+    "尚未解决",
+    "待核实",
+    "不确定",
+    "未知",
+    "无法确认",
+    "未确认",
 )
+EDUCATION_VALUES = ("博士", "硕士", "本科", "大专", "专科", "高中", "中专")
+DEPLOYMENT_VALUES = (
+    "windows",
+    "linux",
+    "macos",
+    "容器",
+    "kubernetes",
+    "云",
+    "本地",
+    "服务器",
+    "工作站",
+)
+
+
+def _blocker_slot(question: str) -> _BlockerSlot | None:
+    normalized = _compact(question)
+    if "最高学历" in normalized:
+        return _BlockerSlot("highest_education", ("最高学历", "学历"))
+    if "入职" in normalized and any(term in normalized for term in ("日期", "时间")):
+        return _BlockerSlot("employment_start_date", ("入职日期", "入职时间", "入职于"))
+    if (
+        "项目" in normalized
+        and any(term in normalized for term in ("日期", "时间"))
+        and any(term in normalized for term in CONFLICT_TERMS)
+    ):
+        return _BlockerSlot("project_date_conflict", ("项目日期", "项目时间"))
+    if any(term in normalized for term in ("部署环境", "运行环境", "部署")):
+        return _BlockerSlot("deployment_environment", ("部署环境", "运行环境", "部署在"))
+    return None
 
 
 def _answer_addresses_question(answer: str, question: str) -> bool:
     normalized_answer = _compact(answer)
-    normalized_question = _compact(question)
-    matched_groups = [
-        answer_terms
-        for question_terms, answer_terms in QUESTION_FACT_GROUPS
-        if any(term in normalized_question for term in question_terms)
-    ]
-    if matched_groups:
-        return any(
-            any(term in normalized_answer for term in answer_terms)
-            for answer_terms in matched_groups
+    if any(term in normalized_answer for term in UNRESOLVED_ANSWER_TERMS):
+        return False
+    slot = _blocker_slot(question)
+    if slot is None or not any(label in normalized_answer for label in slot.labels):
+        return False
+    if slot.kind == "highest_education":
+        return any(value in normalized_answer for value in EDUCATION_VALUES)
+    if slot.kind == "employment_start_date":
+        return bool(DATE.search(unicodedata.normalize("NFKC", answer)))
+    if slot.kind == "project_date_conflict":
+        has_disambiguation = any(
+            term in normalized_answer
+            for term in ("以", "为准", "正确日期", "实际日期", "实际项目日期", "确认")
         )
-
-    reduced = normalized_question
-    for boilerplate in (
-        "请确认",
-        "请补充",
-        "请说明",
-        "请提供",
-        "是否",
-        "哪一个正确",
-        "存在冲突",
-        "缺少事实依据",
-    ):
-        reduced = reduced.replace(boilerplate, "")
-    anchors = re.findall(r"[a-z][a-z0-9.+#-]{1,}|[\u4e00-\u9fff]{2,}", reduced)
-    return bool(anchors) and any(anchor in normalized_answer for anchor in anchors)
+        return has_disambiguation and bool(
+            DATE.search(unicodedata.normalize("NFKC", answer))
+        )
+    if slot.kind == "deployment_environment":
+        return any(value in normalized_answer for value in DEPLOYMENT_VALUES)
+    return False
 
 
 def _basis_is_informative(basis: str, metric: str) -> bool:
@@ -655,6 +720,19 @@ def _basis_is_informative(basis: str, metric: str) -> bool:
         )
         return has_method and has_sample_size
     return has_method
+
+
+def _source_metric_record_matches(
+    quote: str, claim: str, metric: str, basis: str
+) -> bool:
+    normalized_metric = unicodedata.normalize("NFKC", metric)
+    if normalized_metric.rstrip().endswith("%"):
+        return _percentage_record_matches(quote, normalized_metric, claim)
+    if re.search(r"(?:qps|tps|rps)\s*$", normalized_metric, re.I):
+        return _throughput_record_matches(
+            quote, normalized_metric, claim, basis=basis
+        )
+    return True
 
 
 def _compact(value: str) -> str:
@@ -687,23 +765,18 @@ def _answer_explains_metric(
 ) -> bool:
     normalized_metric = unicodedata.normalize("NFKC", metric)
     normalized_answer = unicodedata.normalize("NFKC", answer)
+    if any(
+        not _text_asserts_claim(normalized_answer, segment)
+        for segment in _nonmetric_claim_segments(claim)
+    ):
+        return False
     if normalized_metric.rstrip().endswith("%"):
-        return _percentage_answer_matches(
+        return _percentage_record_matches(
             normalized_answer, normalized_metric, claim
         )
     if re.search(r"(?:qps|tps|rps)\s*$", normalized_metric, re.I):
-        compact_answer = _compact(normalized_answer)
-        return (
-            any(
-                _metric_clause_is_relevant(clause, claim, normalized_metric)
-                for clause in _clauses_with_exact_metric(
-                    normalized_answer, normalized_metric
-                )
-            )
-            and any(
-                term in compact_answer for term in QPS_MEASUREMENT_SOURCE_TERMS
-            )
-            and any(term in compact_answer for term in STATISTICS_WINDOW_TERMS)
+        return _throughput_record_matches(
+            normalized_answer, normalized_metric, claim
         )
     return any(
         _metric_clause_is_relevant(clause, claim, normalized_metric)
@@ -767,6 +840,76 @@ def _metric_clause_is_relevant(
     )
 
 
+def _throughput_record_matches(
+    text: str,
+    metric: str,
+    claim: str | None,
+    *,
+    basis: str | None = None,
+) -> bool:
+    for record in _measurement_records(text):
+        parts = [part for part in re.split(r"[，,]", record) if part.strip()]
+        for index, part in enumerate(parts):
+            if not _answer_has_exact_metric(part, metric):
+                continue
+            selected = [part]
+            adjacent = index - 1
+            while adjacent >= 0 and _is_measurement_continuation(parts[adjacent]):
+                selected.insert(0, parts[adjacent])
+                adjacent -= 1
+            adjacent = index + 1
+            while adjacent < len(parts) and _is_measurement_continuation(
+                parts[adjacent]
+            ):
+                selected.append(parts[adjacent])
+                adjacent += 1
+            candidate = "，".join(selected)
+            compact_candidate = _compact(candidate)
+            has_measurement_source = any(
+                term in compact_candidate for term in QPS_MEASUREMENT_SOURCE_TERMS
+            )
+            has_statistics_window = (
+                "窗口" in compact_candidate
+                or any(
+                    term in compact_candidate for term in STATISTICS_WINDOW_TERMS
+                )
+                or bool(
+                    re.search(
+                        r"持续\d+(?:\.\d+)?(?:秒|分钟|小时)",
+                        compact_candidate,
+                    )
+                )
+            )
+            basis_is_local = not basis or _contains_basis(candidate, basis)
+            if (
+                _metric_clause_is_relevant(candidate, claim, metric)
+                and has_measurement_source
+                and has_statistics_window
+                and basis_is_local
+            ):
+                return True
+    return False
+
+
+def _is_measurement_continuation(value: str) -> bool:
+    compact_value = _compact(value)
+    if any(
+        term in compact_value
+        for term in ("另一项目", "其他项目", "另一个项目", "平均年龄", "考试")
+    ):
+        return False
+    return (
+        any(term in compact_value for term in QPS_MEASUREMENT_SOURCE_TERMS)
+        or "窗口" in compact_value
+        or any(term in compact_value for term in STATISTICS_WINDOW_TERMS)
+        or bool(
+            re.search(
+                r"持续\d+(?:\.\d+)?(?:秒|分钟|小时)", compact_value
+            )
+        )
+    )
+
+
 def _span_clause(answer: str, start: int, end: int) -> str:
     clause_start = max(
         answer.rfind(mark, 0, start) for mark in ("。", "，", ",", "；", ";", "！", "？")
@@ -789,12 +932,63 @@ def _span_is_asserted(answer: str, start: int, end: int) -> bool:
     suffix = _compact(clause[end - clause_start :])
     if re.search(r"(?:不|未|没有|并非|不是|从未|未曾|未达到|未达)$", prefix):
         return False
-    if re.match(r".{0,4}(?:错误|错误值|有误|不正确|不属实|不对)", suffix):
+    if re.search(
+        r"(?:并非真实|不是真实|并非最终|不是最终|不属实|废弃|"
+        r"错误值|明显错误|口径.{0,8}错误|有误|不正确|不对)",
+        suffix,
+    ):
         return False
     return True
 
 
-def _percentage_answer_matches(
+def _span_measurement_record(answer: str, start: int, end: int) -> str:
+    record_start = max(
+        answer.rfind(mark, 0, start) for mark in ("。", "；", ";", "！", "？")
+    ) + 1
+    record_end_candidates = [
+        position
+        for mark in ("。", "；", ";", "！", "？")
+        if (position := answer.find(mark, end)) >= 0
+    ]
+    record_end = min(record_end_candidates, default=len(answer))
+    return answer[record_start:record_end]
+
+
+def _percentage_records(answer: str) -> list[_PercentageRecord]:
+    records: dict[tuple[int, int, float, float], _PercentageRecord] = {}
+    patterns = (
+        re.compile(
+            r"(?P<num>\d+(?:\.\d+)?)\s*/\s*(?P<den>\d+(?:\.\d+)?)"
+        ),
+        re.compile(
+            r"(?P<den>\d+(?:\.\d+)?)(?![\d.]|\s*%)"
+            r"\s*(?:次|个|条|项|例|样本)?"
+            r".{0,40}?(?:中|内|里).*?(?:成功|完成|命中|通过)\s*"
+            r"(?P<num>\d+(?:\.\d+)?)"
+        ),
+        re.compile(
+            r"(?P<den>\d+(?:\.\d+)?)(?![\d.]|\s*%)"
+            r"\s*(?:次|个|条|项|例|样本)?"
+            r".{0,40}?(?:中|内|里).*?(?:有\s*)?"
+            r"(?P<num>\d+(?:\.\d+)?)\s*(?:次|个|条|项|例|样本)?"
+            r"\s*(?:成功|完成|命中|通过)"
+        ),
+    )
+    for pattern in patterns:
+        for match in pattern.finditer(answer):
+            record = _PercentageRecord(
+                numerator=float(match.group("num")),
+                denominator=float(match.group("den")),
+                start=match.start(),
+                end=match.end(),
+            )
+            records[
+                (record.start, record.end, record.numerator, record.denominator)
+            ] = record
+    return sorted(records.values(), key=lambda item: (item.start, item.end))
+
+
+def _percentage_record_matches(
     answer: str, metric: str, claim: str | None = None
 ) -> bool:
     target_match = re.search(r"\d+(?:\.\d+)?", metric)
@@ -805,63 +999,25 @@ def _percentage_answer_matches(
     decimal_places = len(target_text.partition(".")[2])
     tolerance = 0.5 * (10 ** -decimal_places) + 1e-9
 
-    ratios: list[tuple[float, float, int, int]] = []
-    for match in re.finditer(
-        r"(?P<num>\d+(?:\.\d+)?)\s*/\s*(?P<den>\d+(?:\.\d+)?)",
-        answer,
-    ):
-        ratios.append(
-            (
-                float(match.group("num")),
-                float(match.group("den")),
-                match.start(),
-                match.end(),
-            )
+    asserted_records = [
+        record
+        for record in _percentage_records(answer)
+        if record.denominator > 0
+        and _span_is_asserted(answer, record.start, record.end)
+    ]
+    if not asserted_records:
+        return False
+    final = asserted_records[-1]
+    measurement_record = _span_measurement_record(answer, final.start, final.end)
+    final_clause = _span_clause(answer, final.start, final.end)
+    context_is_relevant = (
+        _metric_clause_is_relevant(final_clause, claim, metric)
+        or (claim is not None and _text_asserts_claim(measurement_record, claim))
+        or (
+            _compact(final_clause).startswith(("而是", "实际", "正确值", "应为"))
+            and _metric_clause_is_relevant(measurement_record, claim, metric)
         )
-    for match in re.finditer(
-        r"(?P<den>\d+(?:\.\d+)?)\s*(?:次|个|条|项|例|样本)?"
-        r".{0,40}?(?:中|内|里).*?(?:成功|完成|命中|通过)\s*"
-        r"(?P<num>\d+(?:\.\d+)?)",
-        answer,
-    ):
-        ratios.append(
-            (
-                float(match.group("num")),
-                float(match.group("den")),
-                match.start(),
-                match.end(),
-            )
-        )
-    for match in re.finditer(
-        r"(?P<den>\d+(?:\.\d+)?)\s*(?:次|个|条|项|例|样本)?"
-        r".{0,40}?(?:中|内|里).*?(?:有\s*)?"
-        r"(?P<num>\d+(?:\.\d+)?)\s*(?:次|个|条|项|例|样本)?"
-        r"\s*(?:成功|完成|命中|通过)",
-        answer,
-    ):
-        ratios.append(
-            (
-                float(match.group("num")),
-                float(match.group("den")),
-                match.start(),
-                match.end(),
-            )
-        )
-
-    return any(
-        denominator > 0
-        and abs(numerator / denominator * 100 - target) <= tolerance
-        and _span_is_asserted(answer, start, end)
-        and (
-            _metric_clause_is_relevant(
-                _span_clause(answer, start, end), claim, metric
-            )
-            or (
-                _compact(_span_clause(answer, start, end)).startswith(
-                    ("而是", "实际", "正确值", "应为")
-                )
-                and _metric_clause_is_relevant(answer, claim, metric)
-            )
-        )
-        for numerator, denominator, start, end in ratios
     )
+    return context_is_relevant and abs(
+        final.numerator / final.denominator * 100 - target
+    ) <= tolerance
