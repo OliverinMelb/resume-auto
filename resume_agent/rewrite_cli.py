@@ -1,0 +1,408 @@
+"""Local Windows-friendly entry point for the fact-gated rewrite pipeline."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+from typing import Iterable
+
+from pydantic import ValidationError
+
+from .importer import parse_raw_job
+from .repository import NotFoundError, Repository
+from .rewrite_factory import create_rewrite_pipeline
+from .rewrite_schemas import FactAnswer, RewriteRequest
+from .settings import get_settings
+
+
+_TEXT_RESUME_SUFFIXES = {".md", ".txt"}
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
+_INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+
+
+class _InputAction(argparse.Action):
+    """Collect repeatable ID/path inputs in the order the user supplied them."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        self.kind = kwargs.pop("kind")
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        inputs = list(getattr(namespace, self.dest, None) or [])
+        inputs.append((self.kind, values))
+        setattr(namespace, self.dest, inputs)
+
+
+def bootstrap_request(
+    repository: Repository,
+    candidate_id: str | None,
+    candidate_name: str | None,
+    target_role: str | None,
+    resume_paths: Iterable[Path] = (),
+    jd_paths: Iterable[Path] = (),
+    output_name: str | None = None,
+    *,
+    source_resume_ids: Iterable[str] = (),
+    job_ids: Iterable[str] = (),
+    resume_inputs: Iterable[tuple[str, str | Path]] | None = None,
+    job_inputs: Iterable[tuple[str, str | Path]] | None = None,
+) -> RewriteRequest:
+    """Create the canonical, ID-only request while retaining no file paths."""
+    candidate, role = _resolve_candidate(
+        repository, candidate_id, candidate_name, target_role
+    )
+    resume_ids = _reuse_or_import_resumes(
+        repository, candidate["id"], _combined_inputs(
+            source_resume_ids, resume_paths, resume_inputs
+        )
+    )
+    resolved_job_ids, jobs = _reuse_or_import_jobs(
+        repository, candidate["id"], role, _combined_inputs(
+            job_ids, jd_paths, job_inputs
+        )
+    )
+    if not resume_ids or not resolved_job_ids:
+        raise ValueError("at least one resume and one job are required")
+    generated_name = output_name or _default_output_name(candidate, jobs, role)
+    return RewriteRequest(
+        candidate_id=candidate["id"],
+        source_resume_ids=_ordered_unique(resume_ids),
+        job_ids=_ordered_unique(resolved_job_ids),
+        output_name=_sanitize_output_name(generated_name),
+    )
+
+
+def export_ready_pdf(
+    source_pdf: Path,
+    output_dir: Path,
+    output_name: str,
+    run_id: str,
+) -> Path:
+    """Copy a READY artifact below a user-selected directory without overwriting."""
+    source = Path(source_pdf).resolve(strict=True)
+    if not source.is_file() or source.suffix.lower() != ".pdf":
+        raise ValueError("ready PDF is unavailable")
+    name = _validated_export_name(output_name)
+    root_input = Path(output_dir)
+    root_input.mkdir(parents=True, exist_ok=True)
+    if _is_reparse_point(root_input):
+        raise ValueError("output directory is unsafe")
+    root = root_input.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("output directory is unavailable")
+
+    suffix = run_id[-6:] if len(run_id) >= 6 else run_id
+    candidate = root / name
+    attempt = 0
+    while True:
+        target = candidate if attempt == 0 else _collision_name(root, name, suffix, attempt)
+        resolved_target = target.resolve(strict=False)
+        if resolved_target.parent != root:
+            raise ValueError("export path escapes output directory")
+        try:
+            # Reserve before copy2 so an existing file is never overwritten.
+            with target.open("xb"):
+                pass
+        except FileExistsError:
+            attempt += 1
+            continue
+        except OSError as error:
+            raise ValueError("unable to reserve export path") from error
+        try:
+            if _is_reparse_point(target):
+                raise ValueError("export target is unsafe")
+            shutil.copy2(source, target)
+            return target
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+
+
+def _resolve_candidate(
+    repository: Repository,
+    candidate_id: str | None,
+    candidate_name: str | None,
+    target_role: str | None,
+) -> tuple[dict, str | None]:
+    if candidate_id:
+        if candidate_name or target_role:
+            raise ValueError("candidate ID cannot be combined with candidate details")
+        candidate = repository.get_candidate(candidate_id)
+        return candidate, _first_role(candidate)
+    name, role = _nonempty(candidate_name), _nonempty(target_role)
+    if not name or not role:
+        raise ValueError("candidate name and target role are required")
+    return repository.create_candidate(name, [role], ""), role
+
+
+def _reuse_or_import_resumes(
+    repository: Repository,
+    candidate_id: str,
+    inputs: Iterable[tuple[str, str | Path]],
+) -> list[str]:
+    existing = {
+        item["content_sha256"]: item["id"]
+        for item in repository.list_source_resumes(candidate_id)
+    }
+    result: list[str] = []
+    for kind, value in inputs:
+        if kind == "id":
+            resume = repository.get_source_resume(str(value))
+            if resume["candidate_id"] != candidate_id:
+                raise ValueError("source resume belongs to another candidate")
+            result.append(resume["id"])
+        elif kind == "path":
+            path = _readable_file(Path(value))
+            if path.suffix.lower() not in _TEXT_RESUME_SUFFIXES:
+                raise ValueError("resume paths must be .md or .txt")
+            content = path.read_text(encoding="utf-8-sig")
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            resume_id = existing.get(digest)
+            if resume_id is None:
+                resume = repository.create_source_resume(candidate_id, path.name, content)
+                resume_id = resume["id"]
+                existing[digest] = resume_id
+            result.append(resume_id)
+        else:
+            raise ValueError("resume input is invalid")
+    return _ordered_unique(result)
+
+
+def _reuse_or_import_jobs(
+    repository: Repository,
+    candidate_id: str,
+    target_role: str | None,
+    inputs: Iterable[tuple[str, str | Path]],
+) -> tuple[list[str], list[dict]]:
+    result: list[str] = []
+    jobs: list[dict] = []
+    by_id: dict[str, dict] = {}
+    for kind, value in inputs:
+        if kind == "id":
+            job = repository.get_job(str(value))
+            if job.get("candidate_id") != candidate_id:
+                raise ValueError("job belongs to another candidate")
+        elif kind == "path":
+            path = _readable_file(Path(value))
+            body = path.read_text(encoding="utf-8-sig").strip()
+            if not body:
+                raise ValueError("job description is empty")
+            fingerprint = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            job = repository.find_job_by_fingerprint(candidate_id, fingerprint)
+            if job is None:
+                title, salary, detail = parse_raw_job(body)
+                title = _nonempty(title) or target_role
+                if not title:
+                    raise ValueError("job title or target role is required")
+                detail = _nonempty(detail) or body
+                job = repository.create_job({
+                    "candidate_id": candidate_id,
+                    "source": "local-file",
+                    "title": title,
+                    "salary": salary,
+                    "detail": detail,
+                    "company": _job_company(body),
+                    "job_fingerprint": fingerprint,
+                })
+        else:
+            raise ValueError("job input is invalid")
+        if job["id"] not in by_id:
+            result.append(job["id"])
+            jobs.append(job)
+            by_id[job["id"]] = job
+    return result, jobs
+
+
+def _default_output_name(candidate: dict, jobs: list[dict], target_role: str | None) -> str:
+    candidate_label = _nonempty(candidate.get("display_name")) or "resume"
+    first_job = jobs[0]
+    job_label = _nonempty(first_job.get("company")) or _nonempty(first_job.get("title")) or target_role or "target"
+    return f"{candidate_label} {job_label}-定制版.pdf"
+
+
+def _job_company(body: str) -> str:
+    sections = re.split(r"\n\s*\n", body)
+    for section in sections:
+        lines = section.splitlines()
+        if not lines:
+            continue
+        heading = lines[0].strip().lstrip("#").strip().lower()
+        if heading in {"公司", "company"}:
+            return "\n".join(lines[1:]).strip()
+    return ""
+
+
+def _sanitize_output_name(value: str) -> str:
+    value = _INVALID_FILENAME.sub("-", str(value)).strip().rstrip(". ")
+    if not value:
+        value = "resume"
+    if not value.lower().endswith(".pdf"):
+        value += ".pdf"
+    stem = Path(value).stem.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED:
+        value = f"resume-{value}"
+    return _validated_export_name(value)
+
+
+def _validated_export_name(value: str) -> str:
+    if not isinstance(value, str) or not value or Path(value).name != value:
+        raise ValueError("export filename is unsafe")
+    if any(character in value for character in '<>:"/\\|?*') or value.rstrip(". ") != value:
+        raise ValueError("export filename is unsafe")
+    if not value.lower().endswith(".pdf"):
+        value += ".pdf"
+    stem = Path(value).stem.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED:
+        raise ValueError("export filename is unsafe")
+    return value
+
+
+def _collision_name(root: Path, name: str, suffix: str, attempt: int) -> Path:
+    stem = Path(name).stem
+    marker = f"-{suffix}" if attempt == 1 else f"-{suffix}-{attempt}"
+    return root / f"{stem}{marker}.pdf"
+
+
+def _readable_file(value: Path) -> Path:
+    path = Path(value).resolve(strict=True)
+    if not path.is_file():
+        raise ValueError("input path is unavailable")
+    return path
+
+
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        attributes = os.lstat(path).st_file_attributes
+    except (AttributeError, OSError):
+        attributes = 0
+    return path.is_symlink() or bool(attributes & 0x400)
+
+
+def _nonempty(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _first_role(candidate: dict) -> str | None:
+    roles = candidate.get("target_roles")
+    return _nonempty(roles[0]) if isinstance(roles, list) and roles else None
+
+
+def _ordered_unique(values: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _combined_inputs(
+    ids: Iterable[str], paths: Iterable[Path],
+    inputs: Iterable[tuple[str, str | Path]] | None,
+) -> list[tuple[str, str | Path]]:
+    if inputs is not None:
+        return list(inputs)
+    return [("id", value) for value in ids] + [("path", value) for value in paths]
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="rewrite_resume")
+    commands = parser.add_subparsers(dest="command", required=True)
+    run = commands.add_parser("run")
+    run.add_argument("--candidate-id")
+    run.add_argument("--candidate-name")
+    run.add_argument("--target-role")
+    run.add_argument("--source-resume-id", dest="resume_inputs", action=_InputAction, kind="id")
+    run.add_argument("--resume-path", dest="resume_inputs", action=_InputAction, kind="path")
+    run.add_argument("--job-id", dest="job_inputs", action=_InputAction, kind="id")
+    run.add_argument("--jd-path", dest="job_inputs", action=_InputAction, kind="path")
+    run.add_argument("--output-name")
+    run.add_argument("--output-dir")
+    resume = commands.add_parser("resume")
+    resume.add_argument("--run-id", required=True)
+    resume.add_argument("--facts-json", required=True)
+    resume.add_argument("--output-dir")
+    return parser
+
+
+def _build_pipeline(repository: Repository, settings):
+    return create_rewrite_pipeline(repository, settings)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    try:
+        args = parser.parse_args(argv)
+        settings = get_settings()
+        repository = Repository(settings.database_path)
+        pipeline = _build_pipeline(repository, settings)
+        if args.command == "run":
+            resume_inputs = args.resume_inputs or []
+            job_inputs = args.job_inputs or []
+            request = bootstrap_request(
+                repository, args.candidate_id, args.candidate_name, args.target_role,
+                [Path(value) for kind, value in resume_inputs if kind == "path"],
+                [Path(value) for kind, value in job_inputs if kind == "path"],
+                args.output_name,
+                source_resume_ids=[value for kind, value in resume_inputs if kind == "id"],
+                job_ids=[value for kind, value in job_inputs if kind == "id"],
+                resume_inputs=resume_inputs,
+                job_inputs=job_inputs,
+            )
+            run = pipeline.run(request)
+        else:
+            answers = _read_fact_answers(Path(args.facts_json))
+            run = pipeline.resume(args.run_id, answers)
+        exported = _export_if_ready(run, args.output_dir)
+        _print_result(run, exported)
+        return _status_exit_code(run.get("status"))
+    except (OSError, ValueError, ValidationError, NotFoundError, json.JSONDecodeError):
+        _print_result({"id": None, "status": "FAILED", "blocking_questions": []}, None)
+        print("resume rewrite command failed", file=sys.stderr)
+        return 1
+    except Exception:
+        _print_result({"id": None, "status": "FAILED", "blocking_questions": []}, None)
+        print("resume rewrite command failed", file=sys.stderr)
+        return 1
+
+
+def _read_fact_answers(path: Path) -> list[FactAnswer]:
+    raw = json.loads(_readable_file(path).read_text(encoding="utf-8-sig"))
+    if not isinstance(raw, list):
+        raise ValueError("facts JSON must be an array")
+    return [FactAnswer.model_validate(item, strict=True) for item in raw]
+
+
+def _export_if_ready(run: dict, output_dir: str | None) -> Path | None:
+    if run.get("status") != "READY":
+        return None
+    source = Path(run["artifact_dir"]) / "resume.pdf"
+    directory = Path(output_dir) if output_dir else Path.cwd() / "resume-agent-exports"
+    return export_ready_pdf(source, directory, run["output_name"], run["id"])
+
+
+def _print_result(run: dict, exported: Path | None) -> None:
+    result = {
+        "id": run.get("id"),
+        "status": run.get("status", "FAILED"),
+        "blocking_questions": run.get("blocking_questions", []),
+        "exported_path": str(exported) if exported else None,
+    }
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+
+
+def _status_exit_code(status: object) -> int:
+    if status == "READY":
+        return 0
+    if status == "NEEDS_FACTS":
+        return 2
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
