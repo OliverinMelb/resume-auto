@@ -62,6 +62,7 @@ class DiscoveryModelTests(unittest.TestCase):
         first = discovered(source="boss", source_job_id="7", url="https://x/job/7")
         duplicate = discovered(
             source="boss", source_job_id="7", url="https://x/job/7-new",
+            title="Different role", detail="Different job detail",
         )
         self.assertEqual(deduplicate_discovered_jobs([first, duplicate]), [first])
 
