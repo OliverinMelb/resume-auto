@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import threading
 from collections import deque
@@ -590,6 +591,192 @@ class JobDiscoveryOrchestratorTests(unittest.TestCase):
         self.assertNotIn(owner_token, json.dumps(orchestrator.get(started["id"])))
         self.assertNotIn("poll_owner_token", polled)
         self.assertNotIn("poll_lease_expires_at", polled)
+
+    def test_expired_lease_cannot_be_stolen_during_fenced_publication(self):
+        publication_entered = threading.Event()
+        release_publication = threading.Event()
+        second_claim_attempted = threading.Event()
+        writes = []
+        writes_lock = threading.Lock()
+        original_write = DiscoveryArtifacts.write_results
+
+        def blocking_write(artifacts, jobs):
+            ids = [item.source_job_id for item in jobs]
+            with writes_lock:
+                writes.append(ids)
+            if threading.current_thread().name == "discovery-owner-a":
+                publication_entered.set()
+                if not release_publication.wait(timeout=5):
+                    raise AssertionError("publication was not released")
+            return original_write(artifacts, jobs)
+
+        class NotifyingRepository(Repository):
+            def claim_discovery_poll(self, *args, **kwargs):
+                second_claim_attempted.set()
+                return super().claim_discovery_poll(*args, **kwargs)
+
+        first_jobs = [job("boss", 1), job("boss", 2), job("boss", 3)]
+        second_jobs = [job("boss", 10), job("boss", 11), job("boss", 12)]
+        first_source = completed("boss", first_jobs)
+        second_source = completed("boss", second_jobs)
+        first = self.orchestrator(
+            {"boss": first_source}, lease_duration_seconds=1
+        )
+        second_repository = NotifyingRepository(self.repository.database_path)
+        second = self.orchestrator(
+            {"boss": second_source},
+            repository=second_repository,
+            lease_duration_seconds=1,
+        )
+        started = first.start(
+            discovery_request(self.candidate_id, sources=["boss"])
+        )
+        first._lease_expiration = lambda now: "2000-01-01T00:00:00+00:00"
+        outcomes = []
+        outcome_lock = threading.Lock()
+
+        def run_poll(label, orchestrator):
+            try:
+                value = orchestrator.poll(started["id"])
+            except Exception as error:
+                value = error
+            with outcome_lock:
+                outcomes.append((label, value))
+
+        with patch.object(DiscoveryArtifacts, "write_results", blocking_write):
+            owner_a = threading.Thread(
+                target=run_poll,
+                args=("first", first),
+                name="discovery-owner-a",
+                daemon=True,
+            )
+            owner_a.start()
+            self.assertTrue(publication_entered.wait(timeout=5))
+            owner_b = threading.Thread(
+                target=run_poll,
+                args=("second", second),
+                name="discovery-owner-b",
+                daemon=True,
+            )
+            owner_b.start()
+            self.assertTrue(second_claim_attempted.wait(timeout=5))
+            release_publication.set()
+            owner_a.join(timeout=5)
+            owner_b.join(timeout=5)
+            self.assertFalse(owner_a.is_alive())
+            self.assertFalse(owner_b.is_alive())
+
+        final_run = self.repository.get_discovery_run(started["id"])
+        results = json.loads(
+            (Path(final_run["artifact_dir"]) / "source-results.json").read_text(
+                "utf-8"
+            )
+        )
+        self.assertEqual(final_run["status"], "READY_FOR_IMPORT")
+        self.assertEqual(
+            [row["source_job_id"] for row in results],
+            ["boss-1", "boss-2", "boss-3"],
+        )
+        self.assertEqual(writes, [["boss-1", "boss-2", "boss-3"]])
+        self.assertEqual(first_source.poll_calls, 1)
+        self.assertEqual(second_source.poll_calls, 0)
+        self.assertTrue(all(isinstance(value, dict) for _, value in outcomes))
+
+    def test_published_artifact_survives_db_update_rollback_and_reconciles(self):
+        jobs = [job("boss", 1), job("boss", 2), job("boss", 3)]
+        boss = completed("boss", jobs)
+        orchestrator = self.orchestrator({"boss": boss})
+        started = orchestrator.start(
+            discovery_request(self.candidate_id, sources=["boss"])
+        )
+        owner = "crashing-publication-owner"
+        self.assertTrue(
+            self.repository.claim_discovery_poll(
+                started["id"],
+                owner,
+                "2000-01-01T00:01:00+00:00",
+                "2000-01-01T00:00:00+00:00",
+            )
+        )
+        checkpoint = started["source_checkpoints"]["boss"]
+        artifacts = DiscoveryArtifacts.open(self.runs_root, started["id"])
+        with self.repository._connect() as connection:
+            connection.execute(
+                f"""
+                CREATE TRIGGER fail_discovery_publication
+                BEFORE UPDATE OF status ON discovery_runs
+                WHEN NEW.id = '{started["id"]}'
+                BEGIN
+                    SELECT RAISE(ABORT, 'private commit failure');
+                END;
+                """
+            )
+
+        with self.assertRaisesRegex(ValueError, "publication") as raised:
+            self.repository.publish_discovery_transition(
+                started["id"],
+                "COLLECTING",
+                "READY_FOR_IMPORT",
+                expected_poll_owner=owner,
+                source_checkpoints={"boss": checkpoint},
+                source_statuses={"boss": "completed"},
+                error_code=None,
+                publish_results=lambda: artifacts.write_results(jobs),
+            )
+        self.assertNotIn("private commit failure", str(raised.exception))
+        self.assertEqual(
+            self.repository.get_discovery_run(started["id"])["status"], "COLLECTING"
+        )
+        self.assertEqual(
+            len(json.loads(artifacts.path("source-results.json").read_text("utf-8"))),
+            3,
+        )
+        with self.repository._connect() as connection:
+            connection.execute("DROP TRIGGER fail_discovery_publication")
+
+        recovered = orchestrator.poll(started["id"])
+        self.assertEqual(recovered["status"], "READY_FOR_IMPORT")
+        self.assertEqual(
+            len(json.loads(artifacts.path("source-results.json").read_text("utf-8"))),
+            3,
+        )
+
+    def test_release_failure_never_masks_poll_success_or_primary_error(self):
+        success_source = completed(
+            "boss", [job("boss", 1), job("boss", 2), job("boss", 3)]
+        )
+        success = self.orchestrator({"boss": success_source})
+        success_run = success.start(
+            discovery_request(self.candidate_id, sources=["boss"])
+        )
+        with patch.object(
+            self.repository,
+            "release_discovery_poll",
+            side_effect=sqlite3.OperationalError("private release failure"),
+        ):
+            result = success.poll(success_run["id"])
+        self.assertEqual(result["status"], "READY_FOR_IMPORT")
+
+        failure_source = completed("boss", [job("boss", 4)])
+        failure = self.orchestrator({"boss": failure_source})
+        failure_run = failure.start(
+            discovery_request(self.candidate_id, sources=["boss"])
+        )
+        with (
+            patch.object(
+                DiscoveryArtifacts,
+                "write_results",
+                side_effect=OSError("primary private failure"),
+            ),
+            patch.object(
+                self.repository,
+                "release_discovery_poll",
+                side_effect=sqlite3.OperationalError("secondary private failure"),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "results") as primary:
+                failure.poll(failure_run["id"])
+        self.assertNotIn("secondary private failure", str(primary.exception))
 
     def test_snapshot_and_audit_are_structured_and_redacted(self):
         private = "candidate@example.com 13800138000 secret-project"

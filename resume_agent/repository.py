@@ -6,7 +6,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from resume_agent.discovery_schemas import (
     DISCOVERY_RUN_ID_PATTERN,
@@ -508,6 +508,82 @@ class Repository:
             if cursor.rowcount != 1:
                 raise ValueError("invalid discovery run state transition")
         return self.get_discovery_run(run_id)
+
+    def publish_discovery_transition(
+        self,
+        run_id: str,
+        expected_status: str,
+        new_status: str,
+        *,
+        expected_poll_owner: str,
+        source_checkpoints: dict[str, Any],
+        source_statuses: dict[str, str],
+        error_code: str | None,
+        publish_results: Callable[[], None],
+    ) -> dict[str, Any]:
+        self._validate_discovery_run_id(run_id)
+        self._validate_discovery_poll_owner(expected_poll_owner)
+        if (
+            expected_status not in DISCOVERY_RUN_STATUSES
+            or new_status not in DISCOVERY_RUN_STATUSES
+            or new_status not in DISCOVERY_STATUS_TRANSITIONS[expected_status]
+        ):
+            raise ValueError("invalid discovery run status transition")
+        if not isinstance(source_checkpoints, dict):
+            raise ValueError("invalid discovery source checkpoints")
+        if not isinstance(source_statuses, dict):
+            raise ValueError("invalid discovery source statuses")
+        if error_code is not None and not isinstance(error_code, str):
+            raise ValueError("invalid discovery error code")
+        if not callable(publish_results):
+            raise ValueError("invalid discovery results publisher")
+
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = connection.execute(
+                    """
+                    SELECT status, poll_owner_token
+                    FROM discovery_runs
+                    WHERE id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if (
+                    current is None
+                    or current["status"] != expected_status
+                    or current["poll_owner_token"] != expected_poll_owner
+                ):
+                    raise ValueError("invalid discovery publication owner")
+
+                publish_results()
+                cursor = connection.execute(
+                    """
+                    UPDATE discovery_runs
+                    SET status = ?, updated_at = ?, error_code = ?,
+                        source_checkpoints_json = ?, source_statuses_json = ?,
+                        poll_owner_token = NULL, poll_lease_expires_at = NULL
+                    WHERE id = ? AND status = ? AND poll_owner_token = ?
+                    """,
+                    (
+                        new_status,
+                        utc_now(),
+                        error_code,
+                        self._encode_discovery_json(source_checkpoints),
+                        self._encode_discovery_json(source_statuses),
+                        run_id,
+                        expected_status,
+                        expected_poll_owner,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("invalid discovery publication owner")
+                published = connection.execute(
+                    "SELECT * FROM discovery_runs WHERE id = ?", (run_id,)
+                ).fetchone()
+        except Exception:
+            raise ValueError("discovery results publication failed") from None
+        return self._decode_discovery_run(published, run_id)
 
     def claim_discovery_poll(
         self,

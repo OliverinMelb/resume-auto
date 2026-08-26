@@ -139,7 +139,10 @@ class JobDiscoveryOrchestrator:
         try:
             return self._poll_owned(run_id, owner_token)
         finally:
-            self.repository.release_discovery_poll(run_id, owner_token)
+            try:
+                self.repository.release_discovery_poll(run_id, owner_token)
+            except Exception:
+                pass
 
     def _poll_owned(self, run_id: str, owner_token: str) -> dict:
         run = self.repository.get_discovery_run(run_id)
@@ -148,6 +151,8 @@ class JobDiscoveryOrchestrator:
             raise ValueError("discovery run is not pollable")
 
         jobs = self._read_valid_results(artifacts)
+        if run["status"] in {"READY_FOR_IMPORT", "PARTIAL"}:
+            return run
         checkpoints = dict(run["source_checkpoints"])
         statuses = dict(run["source_statuses"])
         requested_sources = self._requested_sources(run)
@@ -234,11 +239,18 @@ class JobDiscoveryOrchestrator:
             self._lease_expiration(datetime.now(timezone.utc)),
         ):
             raise ValueError("discovery poll lease was lost")
-        try:
-            artifacts.write_results(unique_jobs)
-        except Exception:
-            raise ValueError("discovery results could not be saved") from None
         new_status = _resolve_discovery_status(statuses, unique_jobs)
+        error_code = self._run_error_code(new_status, statuses)
+        run = self.repository.publish_discovery_transition(
+            run_id,
+            run["status"],
+            new_status,
+            expected_poll_owner=owner_token,
+            source_checkpoints=checkpoints,
+            source_statuses=statuses,
+            error_code=error_code,
+            publish_results=lambda: artifacts.write_results(unique_jobs),
+        )
         for event in source_audit_events:
             self._append_audit_best_effort(
                 artifacts, run_id=run_id, status=new_status, **event
@@ -256,17 +268,7 @@ class JobDiscoveryOrchestrator:
             status=new_status,
             event_code=self._run_event_code(new_status),
             count=len(unique_jobs),
-            error_code=self._run_error_code(new_status, statuses),
-        )
-        run = self.repository.transition_discovery_run(
-            run_id,
-            {run["status"]},
-            new_status,
-            source_checkpoints=checkpoints,
-            source_statuses=statuses,
-            error_code=self._run_error_code(new_status, statuses),
-            expected_poll_owner=owner_token,
-            clear_poll_lease=True,
+            error_code=error_code,
         )
         return run
 
