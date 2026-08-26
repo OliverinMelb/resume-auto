@@ -17,6 +17,7 @@ def create_rewrite_pipeline(
         project_root=PROJECT_ROOT,
         codex_runner=CodexCliAdapter("codex", settings.codex_timeout_seconds),
         renderer=ReportLabAdapter(),
+        lease_duration_seconds=settings.codex_timeout_seconds + 300,
     )
-    repository.recover_interrupted_rewrite_runs()
+    pipeline.recover_interrupted_runs()
     return pipeline

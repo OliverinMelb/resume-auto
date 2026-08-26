@@ -3,6 +3,7 @@ import re
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ SOURCE_ID_PATTERN = re.compile(r"^(?:source_resume|job)_[0-9a-f]{32}$")
 QUESTION_ID_PATTERN = re.compile(r"^(?:metric|gap|conflict)-[0-9a-f]{12}$")
 SHA256_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
 AUDIT_STATUSES = {"QUEUED", "RUNNING", "NEEDS_FACTS", "READY", "FAILED"}
+GATE_OUTCOMES = {"PASS", "BLOCKED"}
 EVENT_CODES = {
     "RUN_CREATED",
     "RUN_STARTED",
@@ -123,6 +125,8 @@ class RunArtifacts:
         error_code: str | None = None,
         question_ids: Sequence[str] | None = None,
         source_ids: Sequence[str] | None = None,
+        gate_outcome: str | None = None,
+        claim_count: int | None = None,
     ) -> None:
         self._validate_run_id(run_id)
         if run_id != self.directory.name:
@@ -141,11 +145,18 @@ class RunArtifacts:
         self._validate_hash(error_safe_hash, "error_safe_hash")
         if error_code is not None and error_code not in ERROR_CODES:
             raise ValueError("不允许的审计错误码")
+        if gate_outcome is not None and gate_outcome not in GATE_OUTCOMES:
+            raise ValueError("不允许的门禁结果")
+        if claim_count is not None and (
+            type(claim_count) is not int or claim_count < 0
+        ):
+            raise ValueError("claim_count 必须是非负整数")
 
         event: dict[str, Any] = {
             "run_id": run_id,
             "status": status,
             "event_code": event_code,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         if duration_ms is not None:
             event["duration_ms"] = duration_ms
@@ -165,6 +176,10 @@ class RunArtifacts:
             event["source_ids"] = self._validate_ids(
                 source_ids, SOURCE_ID_PATTERN, "source_ids"
             )
+        if gate_outcome is not None:
+            event["gate_outcome"] = gate_outcome
+        if claim_count is not None:
+            event["claim_count"] = claim_count
         path = self.path("audit.md")
         existing = path.read_text("utf-8") if path.exists() else ""
         self._write_text(

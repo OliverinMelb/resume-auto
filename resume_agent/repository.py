@@ -88,6 +88,11 @@ class Repository:
                 "ALTER TABLE rewrite_runs ADD COLUMN "
                 "blocking_questions_json TEXT NOT NULL DEFAULT '[]'"
             )
+        for column in ("owner_token", "lease_expires_at"):
+            if column not in rewrite_run_columns:
+                connection.execute(
+                    f"ALTER TABLE rewrite_runs ADD COLUMN {column} TEXT"
+                )
 
     @staticmethod
     def _row(row: sqlite3.Row | None, kind: str, object_id: str) -> dict[str, Any]:
@@ -361,11 +366,20 @@ class Repository:
         error_code: str | None = None,
         error_summary: str = "",
         increment_attempt: bool = False,
+        owner_token: str | None = None,
+        lease_expires_at: str | None = None,
+        expected_owner_token: str | None = None,
     ) -> dict[str, Any]:
         if not expected_statuses:
             raise ValueError("expected_statuses 不能为空")
-        assignments = ["status = ?", "updated_at = ?", "error_code = ?", "error_summary = ?"]
-        parameters: list[Any] = [new_status, utc_now(), error_code, error_summary]
+        assignments = [
+            "status = ?", "updated_at = ?", "error_code = ?", "error_summary = ?",
+            "owner_token = ?", "lease_expires_at = ?",
+        ]
+        parameters: list[Any] = [
+            new_status, utc_now(), error_code, error_summary,
+            owner_token, lease_expires_at,
+        ]
         if fact_answers is not None:
             assignments.append("fact_answers_json = ?")
             parameters.append(json.dumps(fact_answers, ensure_ascii=False))
@@ -377,29 +391,64 @@ class Repository:
         allowed = sorted(expected_statuses)
         status_placeholders = ", ".join("?" for _ in allowed)
         parameters.extend([run_id, *allowed])
+        owner_condition = ""
+        if expected_owner_token is not None:
+            owner_condition = " AND owner_token = ?"
+            parameters.append(expected_owner_token)
         with self._connect() as connection:
             cursor = connection.execute(
                 f"UPDATE rewrite_runs SET {', '.join(assignments)} "
-                f"WHERE id = ? AND status IN ({status_placeholders})",
+                f"WHERE id = ? AND status IN ({status_placeholders}){owner_condition}",
                 parameters,
             )
             if cursor.rowcount != 1:
                 raise ValueError("非法的简历改写状态迁移")
         return self.get_rewrite_run(run_id)
 
-    def recover_interrupted_rewrite_runs(self) -> int:
-        now = utc_now()
+    def list_recoverable_rewrite_runs(
+        self, *, now: str, legacy_stale_before: str
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM rewrite_runs
+                WHERE status='RUNNING'
+                  AND (
+                    (lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                    OR (
+                        (owner_token IS NULL OR lease_expires_at IS NULL)
+                        AND updated_at <= ?
+                    )
+                  )
+                ORDER BY created_at, id
+                """,
+                (now, legacy_stale_before),
+            ).fetchall()
+        return [self._decode_rewrite_run(row, row["id"]) for row in rows]
+
+    def recover_interrupted_rewrite_run(
+        self,
+        run_id: str,
+        *,
+        expected_owner_token: str | None,
+        expected_lease_expires_at: str | None,
+    ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE rewrite_runs
                 SET status='FAILED', error_code='INTERRUPTED',
-                    error_summary='上次进程在运行期间中断', updated_at=?
-                WHERE status='RUNNING'
+                    error_summary='上次进程在运行期间中断', updated_at=?,
+                    owner_token=NULL, lease_expires_at=NULL
+                WHERE id=? AND status='RUNNING'
+                  AND owner_token IS ? AND lease_expires_at IS ?
                 """,
-                (now,),
+                (
+                    utc_now(), run_id, expected_owner_token,
+                    expected_lease_expires_at,
+                ),
             )
-        return cursor.rowcount
+        return cursor.rowcount == 1
 
     def create_delivery_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         candidate_id = payload.get("candidate_id")

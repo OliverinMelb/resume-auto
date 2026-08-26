@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 import sqlite3
 import shutil
 from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +22,13 @@ from resume_agent.rewrite_fact_gate import InvalidModelResult, validate_rewrite_
 from resume_agent.rewrite_prompt import build_codex_task, render_jd_evidence
 from resume_agent.rewrite_schemas import CodexRewriteResult, FactAnswer, RewriteRequest
 
+PIPELINE_SCHEMA_EXECUTION_VERSION = "resume-rewrite-pipeline/v1"
+
 
 class ResumeRewritePipeline:
     def __init__(
-        self, repository, runs_root, schema_path, project_root, codex_runner, renderer
+        self, repository, runs_root, schema_path, project_root, codex_runner, renderer,
+        *, lease_duration_seconds: int = 1200,
     ):
         self.repository = repository
         self.runs_root = Path(runs_root)
@@ -31,6 +36,37 @@ class ResumeRewritePipeline:
         self.project_root = Path(project_root)
         self.codex_runner = codex_runner
         self.renderer = renderer
+        self._owner_token = secrets.token_hex(32)
+        self._lease_duration_seconds = lease_duration_seconds
+
+    def recover_interrupted_runs(self) -> int:
+        now = datetime.now(timezone.utc)
+        stale = self.repository.list_recoverable_rewrite_runs(
+            now=now.isoformat(timespec="seconds"),
+            legacy_stale_before=(
+                now - timedelta(seconds=self._lease_duration_seconds)
+            ).isoformat(timespec="seconds"),
+        )
+        recovered = 0
+        for run in stale:
+            try:
+                artifacts = self._open_recovery_artifacts(run)
+            except ValueError:
+                continue
+            self._remove_deployable_artifacts(artifacts)
+            artifacts.append_audit(
+                run_id=run["id"], status="FAILED", event_code="RUN_RECOVERED",
+                error_code="INTERRUPTED",
+            )
+            changed = self.repository.recover_interrupted_rewrite_run(
+                run["id"],
+                expected_owner_token=run["owner_token"],
+                expected_lease_expires_at=run["lease_expires_at"],
+            )
+            if changed:
+                self._remove_deployable_artifacts(artifacts)
+                recovered += 1
+        return recovered
 
     def run(self, request: RewriteRequest) -> dict:
         try:
@@ -46,6 +82,9 @@ class ResumeRewritePipeline:
         except sqlite3.Error:
             self._remove_created_artifacts(artifacts)
             raise ValueError("unable to create rewrite run") from None
+        artifacts.append_audit(
+            run_id=run["id"], status="QUEUED", event_code="RUN_CREATED"
+        )
         return self._execute(run, artifacts)
 
     def resume(self, run_id: str, fact_answers: list[FactAnswer]) -> dict:
@@ -58,6 +97,12 @@ class ResumeRewritePipeline:
         run = self.repository.transition_rewrite_run(
             run_id, {"NEEDS_FACTS"}, "RUNNING",
             fact_answers=merged, increment_attempt=True,
+            owner_token=self._owner_token,
+            lease_expires_at=self._new_lease_expiration(),
+        )
+        artifacts.append_audit(
+            run_id=run["id"], status="RUNNING", event_code="FACTS_ACCEPTED",
+            question_ids=[answer.question_id for answer in fact_answers],
         )
         return self._execute_running(run, artifacts)
 
@@ -77,7 +122,9 @@ class ResumeRewritePipeline:
             self._fail_validation(run, artifacts)
             raise ValueError("rewrite input is invalid") from None
         run = self.repository.transition_rewrite_run(
-            run["id"], {"QUEUED"}, "RUNNING", increment_attempt=True
+            run["id"], {"QUEUED"}, "RUNNING", increment_attempt=True,
+            owner_token=self._owner_token,
+            lease_expires_at=self._new_lease_expiration(),
         )
         return self._run_with_materials(run, artifacts, materials)
 
@@ -108,6 +155,8 @@ class ResumeRewritePipeline:
             candidate["id"], target_role, job_ids, keyword_counts, [], ""
         )
         snapshot = {
+            "execution_version": PIPELINE_SCHEMA_EXECUTION_VERSION,
+            "schema_sha256": hashlib.sha256(self.schema_path.read_bytes()).hexdigest(),
             "run_id": run["id"],
             "candidate_id": candidate["id"],
             "job_ids": job_ids,
@@ -120,6 +169,18 @@ class ResumeRewritePipeline:
                 for resume in resumes
             ],
             "research_report_id": report["id"],
+            "fact_answers": [
+                FactAnswer.model_validate(answer).model_dump()
+                for answer in run["fact_answers"]
+            ],
+            "attempt_context": {
+                "attempt_count": (
+                    run["attempt_count"] + 1
+                    if run["status"] == "QUEUED"
+                    else run["attempt_count"]
+                ),
+                "resumed": run["status"] == "RUNNING",
+            },
         }
         artifacts.write_json("input-snapshot.json", snapshot)
         jd_evidence = render_jd_evidence(jobs, keyword_counts)
@@ -161,9 +222,15 @@ class ResumeRewritePipeline:
                 artifacts.append_audit(
                     run_id=run["id"], status="NEEDS_FACTS", event_code="FACTS_REQUIRED",
                     question_ids=[item["question_id"] for item in questions],
+                    source_ids=[
+                        item["id"] for item in materials["resumes"] + materials["jobs"]
+                    ],
+                    gate_outcome="BLOCKED",
+                    claim_count=len(result.claim_audit),
                 )
                 updated = self.repository.transition_rewrite_run(
-                    run["id"], {"RUNNING"}, "NEEDS_FACTS", blocking_questions=questions
+                    run["id"], {"RUNNING"}, "NEEDS_FACTS", blocking_questions=questions,
+                    expected_owner_token=self._owner_token,
                 )
                 return self._decorate_run(updated)
             artifacts.write_text("resume.md", result.rewritten_resume_markdown)
@@ -175,10 +242,20 @@ class ResumeRewritePipeline:
                 run_id=run["id"], status="RUNNING", event_code="RENDER_COMPLETED",
                 content_hash=_hash_text(result.rewritten_resume_markdown),
                 page_count=render_result.page_count,
+                source_ids=[
+                    item["id"] for item in materials["resumes"] + materials["jobs"]
+                ],
+                gate_outcome="PASS",
+                claim_count=len(result.claim_audit),
             )
-            updated = self.repository.transition_rewrite_run(
-                run["id"], {"RUNNING"}, "READY", blocking_questions=[]
-            )
+            try:
+                updated = self.repository.transition_rewrite_run(
+                    run["id"], {"RUNNING"}, "READY", blocking_questions=[],
+                    expected_owner_token=self._owner_token,
+                )
+            except ValueError:
+                self._remove_deployable_artifacts(artifacts)
+                return self.get(run["id"])
             artifacts.append_audit(
                 run_id=run["id"], status="READY", event_code="RUN_READY",
                 source_ids=[item["id"] for item in materials["resumes"] + materials["jobs"]],
@@ -200,23 +277,17 @@ class ResumeRewritePipeline:
         self, run: dict, artifacts: RunArtifacts, error: Exception,
         error_code: str | None = None,
     ) -> None:
-        artifacts.remove_if_exists("resume.md")
-        artifacts.remove_if_exists("resume.pdf")
-        preview_dir = artifacts.directory / ".preview"
-        if preview_dir.is_symlink():
-            preview_dir.unlink(missing_ok=True)
-        elif preview_dir.is_dir():
-            resolved_preview = preview_dir.resolve()
-            if resolved_preview.parent != artifacts.directory.resolve():
-                raise ValueError("preview directory escapes run artifacts")
-            shutil.rmtree(resolved_preview)
+        self._remove_deployable_artifacts(artifacts)
         code = error_code or _safe_error_code(error)
         artifacts.append_audit(
             run_id=run["id"], status="FAILED", event_code="RUN_FAILED", error_code=code,
             error_safe_hash=_hash_text(code),
         )
         self.repository.transition_rewrite_run(
-            run["id"], {"QUEUED", "RUNNING"}, "FAILED", error_code=code
+            run["id"], {"QUEUED", "RUNNING"}, "FAILED", error_code=code,
+            expected_owner_token=(
+                self._owner_token if run["status"] == "RUNNING" else None
+            ),
         )
 
     def _open_artifacts(self, run: dict) -> RunArtifacts:
@@ -225,6 +296,12 @@ class ResumeRewritePipeline:
         if stored != expected:
             self._fail_artifact_location(run)
             raise ValueError("rewrite artifacts are invalid")
+        return RunArtifacts.open(self.runs_root, run["id"])
+
+    def _open_recovery_artifacts(self, run: dict) -> RunArtifacts:
+        expected = self.runs_root.resolve() / run["id"]
+        if Path(run["artifact_dir"]).resolve() != expected:
+            raise ValueError("rewrite recovery artifacts are invalid")
         return RunArtifacts.open(self.runs_root, run["id"])
 
     def _fail_artifact_location(self, run: dict) -> None:
@@ -247,6 +324,24 @@ class ResumeRewritePipeline:
         if artifacts.directory.resolve() != expected:
             raise ValueError("created artifacts are invalid")
         shutil.rmtree(expected)
+
+    def _remove_deployable_artifacts(self, artifacts: RunArtifacts) -> None:
+        artifacts.remove_if_exists("resume.md")
+        artifacts.remove_if_exists("resume.pdf")
+        preview_dir = artifacts.directory / ".preview"
+        if preview_dir.is_symlink():
+            preview_dir.unlink(missing_ok=True)
+        elif preview_dir.is_dir():
+            resolved_preview = preview_dir.resolve()
+            if resolved_preview.parent != artifacts.directory.resolve():
+                raise ValueError("preview directory escapes run artifacts")
+            shutil.rmtree(resolved_preview)
+
+    def _new_lease_expiration(self) -> str:
+        return (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=self._lease_duration_seconds)
+        ).isoformat(timespec="seconds")
 
     @staticmethod
     def _decorate_run(run: dict) -> dict:

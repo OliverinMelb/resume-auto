@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from types import MappingProxyType
 from pathlib import Path
 
@@ -33,8 +34,12 @@ class RewriteSupportTests(unittest.TestCase):
                 ),
                 {"name": "曹申傲"},
             )
+            event = json.loads((artifacts.directory / "audit.md").read_text("utf-8"))
+            self.assertIn("timestamp_utc", event)
+            timestamp = datetime.fromisoformat(event.pop("timestamp_utc"))
+            self.assertIsNotNone(timestamp.tzinfo)
             self.assertEqual(
-                json.loads((artifacts.directory / "audit.md").read_text("utf-8")),
+                event,
                 {
                     "run_id": RUN_ID,
                     "status": "RUNNING",
@@ -65,6 +70,8 @@ class RewriteSupportTests(unittest.TestCase):
                 error_code="VALIDATION_ERROR",
                 question_ids=[QUESTION_ID],
                 source_ids=[SOURCE_RESUME_ID, JOB_ID],
+                gate_outcome="BLOCKED",
+                claim_count=2,
             )
             event = json.loads((artifacts.directory / "audit.md").read_text("utf-8"))
             self.assertEqual(
@@ -73,12 +80,15 @@ class RewriteSupportTests(unittest.TestCase):
                     "run_id",
                     "status",
                     "event_code",
+                    "timestamp_utc",
                     "duration_ms",
                     "content_hash",
                     "error_safe_hash",
                     "error_code",
                     "question_ids",
                     "source_ids",
+                    "gate_outcome",
+                    "claim_count",
                 },
             )
             self.assertNotIn("曹申傲", json.dumps(event, ensure_ascii=False))
@@ -113,6 +123,13 @@ class RewriteSupportTests(unittest.TestCase):
                     status="FAILED",
                     event_code="RUN_FAILED",
                     error_code="UNKNOWN_ERROR",
+                )
+            with self.assertRaises(ValueError):
+                artifacts.append_audit(
+                    run_id=RUN_ID,
+                    status="FAILED",
+                    event_code="RUN_FAILED",
+                    gate_outcome="UNKNOWN",
                 )
             for field, value in (
                 ("question_ids", ["metric_123abc"]),

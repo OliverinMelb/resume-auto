@@ -72,7 +72,7 @@ class RewriteRepositoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.repository.transition_rewrite_run(run["id"], {"QUEUED"}, "READY")
 
-    def test_startup_recovery_marks_only_stale_running_rows_failed(self):
+    def test_recovery_lists_expired_lease_and_conditionally_clears_owner(self):
         candidate = self.repository.create_candidate("Candidate", ["AI Agent"], "")
         request = RewriteRequest(
             candidate_id=candidate["id"],
@@ -84,14 +84,33 @@ class RewriteRepositoryTests(unittest.TestCase):
             request.model_dump(), "analysis/runs/stale"
         )
         self.repository.transition_rewrite_run(
-            run["id"], {"QUEUED"}, "RUNNING", increment_attempt=True
+            run["id"], {"QUEUED"}, "RUNNING", increment_attempt=True,
+            owner_token="session-a",
+            lease_expires_at="2000-01-01T00:00:00+00:00",
         )
-        recovered = self.repository.recover_interrupted_rewrite_runs()
-        self.assertEqual(recovered, 1)
-        self.assertEqual(self.repository.get_rewrite_run(run["id"])["status"], "FAILED")
-        self.assertEqual(
-            self.repository.get_rewrite_run(run["id"])["error_code"], "INTERRUPTED"
+        recoverable = self.repository.list_recoverable_rewrite_runs(
+            now="2026-08-26T00:00:00+00:00",
+            legacy_stale_before="2026-08-25T00:00:00+00:00",
         )
+        self.assertEqual([item["id"] for item in recoverable], [run["id"]])
+        self.assertFalse(
+            self.repository.recover_interrupted_rewrite_run(
+                run["id"],
+                expected_owner_token="different-session",
+                expected_lease_expires_at="2000-01-01T00:00:00+00:00",
+            )
+        )
+        self.assertTrue(
+            self.repository.recover_interrupted_rewrite_run(
+                run["id"],
+                expected_owner_token="session-a",
+                expected_lease_expires_at="2000-01-01T00:00:00+00:00",
+            )
+        )
+        recovered = self.repository.get_rewrite_run(run["id"])
+        self.assertEqual((recovered["status"], recovered["error_code"]), ("FAILED", "INTERRUPTED"))
+        self.assertIsNone(recovered["owner_token"])
+        self.assertIsNone(recovered["lease_expires_at"])
 
 
 if __name__ == "__main__":

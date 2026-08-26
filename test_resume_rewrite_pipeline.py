@@ -1,14 +1,18 @@
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from resume_agent.codex_runner import CodexRunError
 from resume_agent.repository import Repository
+from resume_agent.rewrite_artifacts import RunArtifacts
+from resume_agent.rewrite_factory import create_rewrite_pipeline
 from resume_agent.rewrite_pipeline import ResumeRewritePipeline
 from resume_agent.rewrite_schemas import CodexRewriteResult, FactAnswer, RewriteRequest
 from resume_agent.resume_renderer import RenderError, RenderResult
+from resume_agent.settings import ResumeAgentSettings
 
 
 class FakeCodexRunner:
@@ -30,6 +34,20 @@ class TempOutputFailureRunner(FakeCodexRunner):
     def run(self, task, schema_path, output_path, project_root):
         output_path.write_text('{"private": "partial output"}', encoding="utf-8")
         raise CodexRunError("CODEX_PROCESS_ERROR", "private runner detail")
+
+
+class BlockingCodexRunner(FakeCodexRunner):
+    def __init__(self, result):
+        super().__init__(result)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def run(self, task, schema_path, output_path, project_root):
+        self.run_count += 1
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise AssertionError("test did not release blocking Codex runner")
+        return self.result
 
 
 class InsertionFailingRepository(Repository):
@@ -55,6 +73,22 @@ class FakeRenderer:
             raise self.error
         pdf_path.write_bytes(b"%PDF-fake")
         return RenderResult(self.page_count, markdown, [])
+
+
+class PublishAfterRecoveryRenderer(FakeRenderer):
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def render(self, markdown, pdf_path, preview_dir):
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise AssertionError("test did not release blocking renderer")
+        pdf_path.write_bytes(b"%PDF-late")
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        (preview_dir / "page-1.png").write_bytes(b"late-preview")
+        return RenderResult(1, markdown, [preview_dir / "page-1.png"])
 
 
 def result_for(resume_id, job_id):
@@ -124,6 +158,151 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertFalse((Path(run["artifact_dir"]) / ".codex-output.tmp").exists())
         self.assertEqual(run["attempt_count"], 1)
 
+    def test_second_factory_preserves_live_lease_and_recovers_only_expired_run(self):
+        expired_id = "rewrite_run_" + "a" * 32
+        expired_artifacts = RunArtifacts.create(self.runs_root, expired_id)
+        expired = self.repository.create_rewrite_run_with_id(
+            expired_id, self.request().model_dump(), str(expired_artifacts.directory)
+        )
+        self.repository.transition_rewrite_run(
+            expired["id"], {"QUEUED"}, "RUNNING", increment_attempt=True
+        )
+        expired_artifacts.path("resume.pdf").write_bytes(b"%PDF-stale")
+        preview = expired_artifacts.directory / ".preview"
+        preview.mkdir()
+        (preview / "page-1.png").write_bytes(b"stale-preview")
+        connection = sqlite3.connect(self.repository.database_path)
+        try:
+            connection.execute(
+                "UPDATE rewrite_runs SET updated_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", expired_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        runner = BlockingCodexRunner(result_for(self.resume["id"], self.job["id"]))
+        first_pipeline = self.make_pipeline(runner, FakeRenderer())
+        errors = []
+        worker = threading.Thread(
+            target=lambda: self._capture_pipeline_run(first_pipeline, errors),
+            daemon=True,
+        )
+        worker.start()
+        self.assertTrue(runner.started.wait(timeout=2))
+        connection = sqlite3.connect(self.repository.database_path)
+        try:
+            live_id = connection.execute(
+                "SELECT id FROM rewrite_runs WHERE id != ? AND status = 'RUNNING'",
+                (expired_id,),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        live = self.repository.get_rewrite_run(live_id)
+
+        second_repository = Repository(self.repository.database_path)
+        settings = ResumeAgentSettings(
+            database_path=self.repository.database_path,
+            legacy_action_log_path=Path(self.temp_dir.name) / "actions.jsonl",
+            legacy_decision_log_path=Path(self.temp_dir.name) / "decisions.jsonl",
+            allow_remote=False,
+            runs_root=self.runs_root,
+            codex_timeout_seconds=30,
+        )
+        try:
+            create_rewrite_pipeline(second_repository, settings)
+            live_after_startup = second_repository.get_rewrite_run(live["id"])
+            expired_after_startup = second_repository.get_rewrite_run(expired_id)
+        finally:
+            runner.release.set()
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive(), "blocking pipeline thread did not stop")
+
+        self.assertEqual(live_after_startup["status"], "RUNNING")
+        self.assertEqual(expired_after_startup["status"], "FAILED")
+        self.assertEqual(expired_after_startup["error_code"], "INTERRUPTED")
+        self.assertFalse(expired_artifacts.path("resume.pdf").exists())
+        self.assertFalse(preview.exists())
+        recovery_events = [
+            event for event in self._audit_events(expired_after_startup)
+            if event["event_code"] == "RUN_RECOVERED"
+        ]
+        self.assertEqual(len(recovery_events), 1)
+        self.assertTrue(recovery_events[0]["timestamp_utc"])
+
+    def test_recovery_racing_with_render_cannot_leave_failed_run_with_pdf(self):
+        renderer = PublishAfterRecoveryRenderer()
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), renderer
+        )
+        outcomes = []
+        worker = threading.Thread(
+            target=lambda: self._capture_pipeline_run(pipeline, outcomes), daemon=True
+        )
+        worker.start()
+        self.assertTrue(renderer.started.wait(timeout=2))
+        running = self._latest_run()
+        connection = sqlite3.connect(self.repository.database_path)
+        try:
+            connection.execute(
+                "UPDATE rewrite_runs SET lease_expires_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", running["id"]),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        recovering = self.make_pipeline(FakeCodexRunner({}), FakeRenderer())
+        try:
+            self.assertEqual(recovering.recover_interrupted_runs(), 1)
+        finally:
+            renderer.release.set()
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive(), "rendering pipeline thread did not stop")
+        final = self.repository.get_rewrite_run(running["id"])
+        self.assertEqual((final["status"], final["error_code"]), ("FAILED", "INTERRUPTED"))
+        self._assert_no_deployable_artifacts(final)
+        self.assertFalse((Path(final["artifact_dir"]) / ".preview").exists())
+
+    def test_recovery_does_not_fail_run_with_unvalidated_artifact_directory(self):
+        run_id = "rewrite_run_" + "b" * 32
+        canonical = RunArtifacts.create(self.runs_root, run_id)
+        run = self.repository.create_rewrite_run_with_id(
+            run_id, self.request().model_dump(), str(canonical.directory)
+        )
+        self.repository.transition_rewrite_run(
+            run["id"], {"QUEUED"}, "RUNNING", increment_attempt=True,
+            owner_token="stale-owner",
+            lease_expires_at="2000-01-01T00:00:00+00:00",
+        )
+        forged = Path(self.temp_dir.name) / "forged-recovery"
+        forged.mkdir()
+        sentinel = forged / "resume.pdf"
+        sentinel.write_bytes(b"do-not-touch")
+        connection = sqlite3.connect(self.repository.database_path)
+        try:
+            connection.execute(
+                "UPDATE rewrite_runs SET artifact_dir = ? WHERE id = ?",
+                (str(forged), run_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        recovered = self.make_pipeline(FakeCodexRunner({}), FakeRenderer())
+        self.assertEqual(recovered.recover_interrupted_runs(), 0)
+        self.assertEqual(self.repository.get_rewrite_run(run_id)["status"], "RUNNING")
+        self.assertEqual(sentinel.read_bytes(), b"do-not-touch")
+        self.assertEqual(canonical.path("audit.md").read_text("utf-8"), "")
+
+    def _capture_pipeline_run(self, pipeline, errors):
+        try:
+            pipeline.run(self.request())
+        except Exception as error:  # pragma: no cover - asserted through state
+            errors.append(error)
+
     def test_metric_gap_needs_facts_and_resume_continues_same_run(self):
         pipeline = self.make_pipeline(FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])), FakeRenderer())
         first = pipeline.run(self.request())
@@ -133,6 +312,57 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual(resumed["id"], first["id"])
         self.assertEqual(resumed["status"], "READY")
         self.assertEqual(resumed["attempt_count"], 2)
+
+    def test_needs_facts_resume_snapshot_and_audit_are_reconstructable(self):
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+        first = pipeline.run(self.request())
+        artifact_dir = Path(first["artifact_dir"])
+        first_snapshot = json.loads(
+            (artifact_dir / "input-snapshot.json").read_text("utf-8")
+        )
+        self.assertIn("execution_version", first_snapshot)
+        self.assertEqual(
+            first_snapshot["execution_version"], "resume-rewrite-pipeline/v1"
+        )
+        self.assertRegex(first_snapshot["schema_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(first_snapshot["fact_answers"], [])
+        self.assertEqual(first_snapshot["attempt_context"]["attempt_count"], 1)
+
+        first_events = self._audit_events(first)
+        self.assertEqual(
+            [event["event_code"] for event in first_events],
+            ["RUN_CREATED", "RUN_STARTED", "MODEL_COMPLETED", "FACTS_REQUIRED"],
+        )
+        self.assertTrue(all(event.get("timestamp_utc") for event in first_events))
+        facts_required = first_events[-1]
+        self.assertEqual(facts_required["gate_outcome"], "BLOCKED")
+        self.assertEqual(facts_required["claim_count"], 1)
+        self.assertEqual(
+            facts_required["source_ids"], [self.resume["id"], self.job["id"]]
+        )
+
+        answer = FactAnswer(
+            question_id=first["blocking_questions"][0]["question_id"],
+            answer="Completed 86 of 100 fixed regression runs; 86/100.",
+            source_note="本地回归记录，候选人确认",
+        )
+        resumed = pipeline.resume(first["id"], [answer])
+        resumed_snapshot = json.loads(
+            (artifact_dir / "input-snapshot.json").read_text("utf-8")
+        )
+        self.assertEqual(resumed_snapshot["fact_answers"], [answer.model_dump()])
+        self.assertEqual(resumed_snapshot["attempt_context"]["attempt_count"], 2)
+        self.assertEqual(
+            [event["event_code"] for event in self._audit_events(resumed)],
+            [
+                "RUN_CREATED", "RUN_STARTED", "MODEL_COMPLETED", "FACTS_REQUIRED",
+                "FACTS_ACCEPTED", "RUN_STARTED", "MODEL_COMPLETED",
+                "RENDER_COMPLETED", "RUN_READY",
+            ],
+        )
 
     def test_rejects_resume_owned_by_another_candidate_before_running(self):
         other = self.repository.create_candidate("Other", [], "")
@@ -208,6 +438,12 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual(run["error_summary"], "")
         self.assertFalse((Path(run["artifact_dir"]) / "resume.pdf").exists())
         self.assertNotIn("private secret text", (Path(run["artifact_dir"]) / "audit.md").read_text("utf-8"))
+        events = self._audit_events(run)
+        self.assertEqual(
+            [event["event_code"] for event in events],
+            ["RUN_CREATED", "RUN_STARTED", "RUN_FAILED"],
+        )
+        self.assertTrue(all(event.get("timestamp_utc") for event in events))
 
     def test_temporary_runner_output_is_removed_when_runner_raises(self):
         run = self.make_pipeline(TempOutputFailureRunner(None), FakeRenderer()).run(self.request())
@@ -236,10 +472,15 @@ class RewritePipelineTests(unittest.TestCase):
 
     def test_audits_renderer_page_count_and_source_mapping(self):
         run = self.make_pipeline(FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), FakeRenderer(page_count=2)).run(self.request())
-        events = [json.loads(line) for line in (Path(run["artifact_dir"]) / "audit.md").read_text("utf-8").splitlines()]
+        events = self._audit_events(run)
+        self.assertEqual(
+            [event["event_code"] for event in events],
+            ["RUN_CREATED", "RUN_STARTED", "MODEL_COMPLETED", "RENDER_COMPLETED", "RUN_READY"],
+        )
         render_event = next(event for event in events if event["event_code"] == "RENDER_COMPLETED")
         ready_event = next(event for event in events if event["event_code"] == "RUN_READY")
         self.assertEqual(render_event["page_count"], 2)
+        self.assertEqual((render_event["gate_outcome"], render_event["claim_count"]), ("PASS", 1))
         self.assertEqual(ready_event["source_ids"], [self.resume["id"], self.job["id"]])
 
     def test_headline_is_allowed_only_when_audited_from_same_source(self):
@@ -320,6 +561,15 @@ class RewritePipelineTests(unittest.TestCase):
         finally:
             connection.close()
         return self.repository.get_rewrite_run(run_id)
+
+    @staticmethod
+    def _audit_events(run):
+        return [
+            json.loads(line)
+            for line in (Path(run["artifact_dir"]) / "audit.md")
+            .read_text("utf-8")
+            .splitlines()
+        ]
 
     def _assert_no_deployable_artifacts(self, run):
         directory = Path(run["artifact_dir"])
