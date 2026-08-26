@@ -92,6 +92,72 @@ class DiscoveryRepositoryTests(unittest.TestCase):
         self.assertIn("discovery_runs", tables)
         self.assertEqual(count, 1)
 
+    def test_existing_discovery_table_adds_poll_lease_columns_without_data_loss(self):
+        old_database = self.root / "old-discovery.db"
+        with closing(sqlite3.connect(old_database)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE candidates (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT,
+                    target_roles_json TEXT NOT NULL DEFAULT '[]',
+                    notes TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE discovery_runs (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL REFERENCES candidates(id),
+                    request_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    source_checkpoints_json TEXT NOT NULL DEFAULT '{}',
+                    source_statuses_json TEXT NOT NULL DEFAULT '{}',
+                    imported_job_ids_json TEXT NOT NULL DEFAULT '[]',
+                    artifact_dir TEXT NOT NULL,
+                    error_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO candidates VALUES (?, ?, ?, ?, ?)",
+                ("candidate_old", "Existing", '["Engineer"]', "keep", "2025-01-01"),
+            )
+            connection.execute(
+                "INSERT INTO discovery_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    RUN_ID,
+                    "candidate_old",
+                    '{"sources":["boss"]}',
+                    "COLLECTING",
+                    '{"boss":{"remote_ids":["remote-1"],"source":"boss","state":{}}}',
+                    '{"boss":"collecting"}',
+                    "[]",
+                    str(self.root / "runs" / RUN_ID),
+                    None,
+                    "2025-01-01T00:00:00+00:00",
+                    "2025-01-01T00:00:00+00:00",
+                ),
+            )
+            connection.commit()
+
+        migrated = Repository(old_database)
+        run = migrated.get_discovery_run(RUN_ID)
+
+        self.assertEqual(run["candidate_id"], "candidate_old")
+        self.assertEqual(run["source_statuses"], {"boss": "collecting"})
+        self.assertNotIn("poll_owner_token", run)
+        self.assertNotIn("poll_lease_expires_at", run)
+        with closing(sqlite3.connect(old_database)) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(discovery_runs)")
+            }
+            count = connection.execute(
+                "SELECT COUNT(*) FROM discovery_runs WHERE id=?", (RUN_ID,)
+            ).fetchone()[0]
+        self.assertTrue({"poll_owner_token", "poll_lease_expires_at"} <= columns)
+        self.assertEqual(count, 1)
+
     def test_discovery_run_round_trips_only_named_json_fields_deterministically(self):
         run = self._create_run(request={"z": 1, "a": "中文"})
         self.assertEqual(run["status"], "CREATED")
@@ -155,6 +221,88 @@ class DiscoveryRepositoryTests(unittest.TestCase):
         self.assertEqual(stale_error, str(missing.exception))
         self.assertNotIn(RUN_ID, stale_error)
         self.assertEqual(self.repository.get_discovery_run(RUN_ID)["status"], "COLLECTING")
+
+    def test_poll_lease_claim_renew_release_and_owner_guarded_transition(self):
+        self._create_run()
+        self.repository.transition_discovery_run(RUN_ID, {"CREATED"}, "COLLECTING")
+        contender = Repository(self.database_path)
+        now = "2026-08-27T00:00:00+00:00"
+
+        self.assertTrue(
+            self.repository.claim_discovery_poll(
+                RUN_ID,
+                "owner-one",
+                "2026-08-27T00:05:00+00:00",
+                now,
+            )
+        )
+        self.assertFalse(
+            contender.claim_discovery_poll(
+                RUN_ID,
+                "owner-two",
+                "2026-08-27T00:05:00+00:00",
+                now,
+            )
+        )
+        self.assertTrue(
+            self.repository.renew_discovery_poll(
+                RUN_ID, "owner-one", "2026-08-27T00:06:00+00:00"
+            )
+        )
+        self.assertFalse(
+            contender.renew_discovery_poll(
+                RUN_ID, "owner-two", "2026-08-27T00:06:00+00:00"
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "discovery run"):
+            contender.transition_discovery_run(
+                RUN_ID,
+                {"COLLECTING"},
+                "READY_FOR_IMPORT",
+                expected_poll_owner="owner-two",
+                clear_poll_lease=True,
+            )
+        self.assertFalse(contender.release_discovery_poll(RUN_ID, "owner-two"))
+
+        updated = self.repository.transition_discovery_run(
+            RUN_ID,
+            {"COLLECTING"},
+            "READY_FOR_IMPORT",
+            expected_poll_owner="owner-one",
+            clear_poll_lease=True,
+        )
+        self.assertEqual(updated["status"], "READY_FOR_IMPORT")
+        self.assertNotIn("poll_owner_token", updated)
+        self.assertFalse(self.repository.release_discovery_poll(RUN_ID, "owner-one"))
+
+    def test_expired_or_incomplete_poll_lease_can_be_reclaimed(self):
+        self._create_run()
+        self.repository.transition_discovery_run(RUN_ID, {"CREATED"}, "COLLECTING")
+        contender = Repository(self.database_path)
+        self.assertTrue(
+            self.repository.claim_discovery_poll(
+                RUN_ID,
+                "owner-old",
+                "2026-08-27T00:01:00+00:00",
+                "2026-08-27T00:00:00+00:00",
+            )
+        )
+
+        self.assertTrue(
+            contender.claim_discovery_poll(
+                RUN_ID,
+                "owner-new",
+                "2026-08-27T00:10:00+00:00",
+                "2026-08-27T00:02:00+00:00",
+            )
+        )
+        self.assertFalse(
+            self.repository.renew_discovery_poll(
+                RUN_ID, "owner-old", "2026-08-27T00:11:00+00:00"
+            )
+        )
+        self.assertFalse(self.repository.release_discovery_poll(RUN_ID, "owner-old"))
+        self.assertTrue(contender.release_discovery_poll(RUN_ID, "owner-new"))
 
     def test_repository_rejects_invalid_run_ids_and_statuses(self):
         for invalid_id in ("../run", "discovery_run_" + "A" * 32, "rewrite_run_" + "a" * 32):

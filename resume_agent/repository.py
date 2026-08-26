@@ -102,6 +102,17 @@ class Repository:
                 connection.execute(
                     f"ALTER TABLE rewrite_runs ADD COLUMN {column} TEXT"
                 )
+        discovery_run_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(discovery_runs)"
+            ).fetchall()
+        }
+        for column in ("poll_owner_token", "poll_lease_expires_at"):
+            if column not in discovery_run_columns:
+                connection.execute(
+                    f"ALTER TABLE discovery_runs ADD COLUMN {column} TEXT"
+                )
 
     @staticmethod
     def _row(row: sqlite3.Row | None, kind: str, object_id: str) -> dict[str, Any]:
@@ -127,6 +138,8 @@ class Repository:
         if row is None:
             raise NotFoundError("discovery run not found")
         data = dict(row)
+        data.pop("poll_owner_token", None)
+        data.pop("poll_lease_expires_at", None)
         for name in (
             "request",
             "source_checkpoints",
@@ -150,6 +163,27 @@ class Repository:
             separators=(",", ":"),
             allow_nan=False,
         )
+
+    @staticmethod
+    def _validate_discovery_poll_owner(owner_token: str) -> None:
+        if (
+            not isinstance(owner_token, str)
+            or not owner_token
+            or len(owner_token) > 200
+        ):
+            raise ValueError("invalid discovery poll owner")
+
+    @staticmethod
+    def _canonical_discovery_poll_time(value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("invalid discovery poll lease")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("invalid discovery poll lease") from None
+        if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+            raise ValueError("invalid discovery poll lease")
+        return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
 
     def create_candidate(
         self, display_name: str | None, target_roles: list[str], notes: str
@@ -408,6 +442,8 @@ class Repository:
         source_statuses: dict[str, str] | None = None,
         imported_job_ids: list[str] | None = None,
         error_code: str | None = None,
+        expected_poll_owner: str | None = None,
+        clear_poll_lease: bool = False,
     ) -> dict[str, Any]:
         self._validate_discovery_run_id(run_id)
         if (
@@ -434,9 +470,19 @@ class Repository:
             raise ValueError("invalid imported job ids")
         if error_code is not None and not isinstance(error_code, str):
             raise ValueError("invalid discovery error code")
+        if not isinstance(clear_poll_lease, bool):
+            raise ValueError("invalid discovery poll lease")
+        if expected_poll_owner is not None:
+            self._validate_discovery_poll_owner(expected_poll_owner)
+        if clear_poll_lease and expected_poll_owner is None:
+            raise ValueError("invalid discovery poll lease")
 
         assignments = ["status = ?", "updated_at = ?", "error_code = ?"]
         parameters: list[Any] = [new_status, utc_now(), error_code]
+        if clear_poll_lease:
+            assignments.extend(
+                ["poll_owner_token = NULL", "poll_lease_expires_at = NULL"]
+            )
         for column, value in (
             ("source_checkpoints_json", source_checkpoints),
             ("source_statuses_json", source_statuses),
@@ -448,15 +494,81 @@ class Repository:
         allowed = sorted(expected_statuses)
         status_placeholders = ", ".join("?" for _ in allowed)
         parameters.extend([run_id, *allowed])
+        owner_condition = ""
+        if expected_poll_owner is not None:
+            owner_condition = " AND poll_owner_token = ?"
+            parameters.append(expected_poll_owner)
         with self._connect() as connection:
             cursor = connection.execute(
                 f"UPDATE discovery_runs SET {', '.join(assignments)} "
-                f"WHERE id = ? AND status IN ({status_placeholders})",
+                f"WHERE id = ? AND status IN ({status_placeholders})"
+                f"{owner_condition}",
                 parameters,
             )
             if cursor.rowcount != 1:
                 raise ValueError("invalid discovery run state transition")
         return self.get_discovery_run(run_id)
+
+    def claim_discovery_poll(
+        self,
+        run_id: str,
+        owner_token: str,
+        lease_expires_at: str,
+        now: str,
+    ) -> bool:
+        self._validate_discovery_run_id(run_id)
+        self._validate_discovery_poll_owner(owner_token)
+        expires = self._canonical_discovery_poll_time(lease_expires_at)
+        current = self._canonical_discovery_poll_time(now)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE discovery_runs
+                SET poll_owner_token=?, poll_lease_expires_at=?, updated_at=?
+                WHERE id=?
+                  AND status IN ('COLLECTING', 'READY_FOR_IMPORT', 'PARTIAL')
+                  AND (
+                    poll_owner_token IS NULL
+                    OR poll_lease_expires_at IS NULL
+                    OR poll_lease_expires_at <= ?
+                  )
+                """,
+                (owner_token, expires, current, run_id, current),
+            )
+        return cursor.rowcount == 1
+
+    def renew_discovery_poll(
+        self, run_id: str, owner_token: str, lease_expires_at: str
+    ) -> bool:
+        self._validate_discovery_run_id(run_id)
+        self._validate_discovery_poll_owner(owner_token)
+        expires = self._canonical_discovery_poll_time(lease_expires_at)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE discovery_runs
+                SET poll_lease_expires_at=?, updated_at=?
+                WHERE id=?
+                  AND status IN ('COLLECTING', 'READY_FOR_IMPORT', 'PARTIAL')
+                  AND poll_owner_token=?
+                """,
+                (expires, utc_now(), run_id, owner_token),
+            )
+        return cursor.rowcount == 1
+
+    def release_discovery_poll(self, run_id: str, owner_token: str) -> bool:
+        self._validate_discovery_run_id(run_id)
+        self._validate_discovery_poll_owner(owner_token)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE discovery_runs
+                SET poll_owner_token=NULL, poll_lease_expires_at=NULL, updated_at=?
+                WHERE id=? AND poll_owner_token=?
+                """,
+                (utc_now(), run_id, owner_token),
+            )
+        return cursor.rowcount == 1
 
     def create_rewrite_run(
         self, payload: dict[str, Any], artifact_dir: str

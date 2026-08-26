@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS discovery_runs (
     imported_job_ids_json TEXT NOT NULL DEFAULT '[]',
     artifact_dir TEXT NOT NULL,
     error_code TEXT,
+    poll_owner_token TEXT,
+    poll_lease_expires_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

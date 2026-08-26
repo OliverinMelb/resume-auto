@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,10 +41,15 @@ class JobDiscoveryOrchestrator:
         repository: Repository,
         runs_root: Path,
         adapters: dict[str, DiscoverySourceAdapter],
+        *,
+        lease_duration_seconds: int = 300,
     ):
+        if type(lease_duration_seconds) is not int or lease_duration_seconds < 1:
+            raise ValueError("invalid discovery poll lease duration")
         self.repository = repository
         self.runs_root = Path(runs_root)
         self.adapters = dict(adapters)
+        self._lease_duration_seconds = lease_duration_seconds
 
     def start(self, request: DiscoveryRequest) -> dict:
         if not isinstance(request, DiscoveryRequest):
@@ -116,6 +123,25 @@ class JobDiscoveryOrchestrator:
         return run
 
     def poll(self, run_id: str) -> dict:
+        owner_token = secrets.token_hex(32)
+        now = datetime.now(timezone.utc)
+        claimed = self.repository.claim_discovery_poll(
+            run_id,
+            owner_token,
+            self._lease_expiration(now),
+            now.isoformat(timespec="seconds"),
+        )
+        if not claimed:
+            run = self.repository.get_discovery_run(run_id)
+            if run["status"] in _POLLABLE_RUN_STATUSES:
+                raise ValueError("discovery poll is busy")
+            raise ValueError("discovery run is not pollable")
+        try:
+            return self._poll_owned(run_id, owner_token)
+        finally:
+            self.repository.release_discovery_poll(run_id, owner_token)
+
+    def _poll_owned(self, run_id: str, owner_token: str) -> dict:
         run = self.repository.get_discovery_run(run_id)
         artifacts = self._artifacts_for(run)
         if run["status"] not in _POLLABLE_RUN_STATUSES:
@@ -202,19 +228,17 @@ class JobDiscoveryOrchestrator:
                 source_audit_events.append(result_event)
 
         unique_jobs = deduplicate_discovered_jobs(jobs)
+        if not self.repository.renew_discovery_poll(
+            run_id,
+            owner_token,
+            self._lease_expiration(datetime.now(timezone.utc)),
+        ):
+            raise ValueError("discovery poll lease was lost")
         try:
             artifacts.write_results(unique_jobs)
         except Exception:
             raise ValueError("discovery results could not be saved") from None
         new_status = _resolve_discovery_status(statuses, unique_jobs)
-        run = self.repository.transition_discovery_run(
-            run_id,
-            {run["status"]},
-            new_status,
-            source_checkpoints=checkpoints,
-            source_statuses=statuses,
-            error_code=self._run_error_code(new_status, statuses),
-        )
         for event in source_audit_events:
             self._append_audit_best_effort(
                 artifacts, run_id=run_id, status=new_status, **event
@@ -233,6 +257,16 @@ class JobDiscoveryOrchestrator:
             event_code=self._run_event_code(new_status),
             count=len(unique_jobs),
             error_code=self._run_error_code(new_status, statuses),
+        )
+        run = self.repository.transition_discovery_run(
+            run_id,
+            {run["status"]},
+            new_status,
+            source_checkpoints=checkpoints,
+            source_statuses=statuses,
+            error_code=self._run_error_code(new_status, statuses),
+            expected_poll_owner=owner_token,
+            clear_poll_lease=True,
         )
         return run
 
@@ -408,6 +442,11 @@ class JobDiscoveryOrchestrator:
                 )
             except Exception:
                 raise ValueError("discovery sources could not be persisted") from None
+
+    def _lease_expiration(self, now: datetime) -> str:
+        return (now + timedelta(seconds=self._lease_duration_seconds)).isoformat(
+            timespec="seconds"
+        )
 
     @staticmethod
     def _append_audit_best_effort(
