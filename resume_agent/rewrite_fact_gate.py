@@ -67,6 +67,12 @@ SOURCE_NOTE_TERMS = (
     "截图",
     "测量",
 )
+SOURCE_NOTE_NEGATED_PREFIX = re.compile(
+    r"(?:没有|无|未有|缺少|缺乏|不存在|无法提供|不可用)$"
+)
+SOURCE_NOTE_UNAVAILABLE_SUFFIX = re.compile(
+    r"^(?:已)?(?:遗失|丢失|缺失|不存在|无法提供|不可用|待查)"
+)
 QPS_MEASUREMENT_SOURCE_TERMS = ("压测", "监控", "负载测试", "性能测试")
 STATISTICS_WINDOW_TERMS = (
     "统计窗口",
@@ -467,8 +473,7 @@ def _answer_has_evidence(
         return False
     if _is_placeholder(answer_text) or _is_placeholder(source_note):
         return False
-    normalized_note = _normalize_for_hash(source_note)
-    if not any(term in normalized_note for term in SOURCE_NOTE_TERMS):
+    if not _source_note_has_concrete_evidence(source_note):
         return False
     if metric is not None:
         return _answer_explains_metric(answer_text, metric, claim)
@@ -499,6 +504,26 @@ def _optional_field(item: Any, name: str) -> Any:
     if isinstance(item, Mapping):
         return item.get(name)
     return getattr(item, name, None)
+
+
+def _source_note_has_concrete_evidence(source_note: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", source_note).lower()
+    for term in SOURCE_NOTE_TERMS:
+        for match in re.finditer(re.escape(term), normalized):
+            clause = _span_clause(normalized, match.start(), match.end())
+            local_start = match.start() - max(
+                normalized.rfind(mark, 0, match.start())
+                for mark in ("。", "，", ",", "；", ";", "！", "？")
+            ) - 1
+            local_end = local_start + len(term)
+            prefix = _compact(clause[:local_start])
+            suffix = _compact(clause[local_end:])
+            if SOURCE_NOTE_NEGATED_PREFIX.search(prefix):
+                continue
+            if SOURCE_NOTE_UNAVAILABLE_SUFFIX.search(suffix):
+                continue
+            return True
+    return False
 
 
 def _contains_basis(container: str, basis: str) -> bool:

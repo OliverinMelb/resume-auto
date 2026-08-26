@@ -161,6 +161,33 @@ class FactGateTests(unittest.TestCase):
 
         self.assertEqual([item.question_id for item in gate.blockers], [question_id])
 
+    def test_negated_or_lost_source_notes_do_not_unlock_metric(self):
+        first = validate_rewrite_facts(
+            result_with_metric("user_confirmed"), self.resumes, self.jobs, []
+        )
+        question_id = first.blockers[0].question_id
+
+        for source_note in (
+            "候选人确认，没有记录",
+            "候选人确认，记录已遗失",
+            "没有日志，仅候选人确认",
+        ):
+            with self.subTest(source_note=source_note):
+                gate = validate_rewrite_facts(
+                    result_with_metric("user_confirmed"),
+                    self.resumes,
+                    self.jobs,
+                    [FactAnswer(
+                        question_id=question_id,
+                        answer="工具调用的100次固定回归中成功86次",
+                        source_note=source_note,
+                    )],
+                )
+
+                self.assertEqual(
+                    [item.question_id for item in gate.blockers], [question_id]
+                )
+
     def test_source_verified_metric_with_source_basis_passes(self):
         basis = "100次固定回归中成功86次"
         quote = f"工具调用成功率达到 86%，统计口径为{basis}"
