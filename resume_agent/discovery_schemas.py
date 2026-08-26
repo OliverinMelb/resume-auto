@@ -74,7 +74,7 @@ def canonicalize_job_url(url: str) -> str:
     """Return a URL suitable for deterministic job identity comparisons."""
     parsed = urlsplit(url)
     hostname = parsed.hostname.lower() if parsed.hostname else ""
-    netloc = hostname
+    netloc = f"[{hostname}]" if ":" in hostname else hostname
     if parsed.username:
         credentials = parsed.username
         if parsed.password is not None:
