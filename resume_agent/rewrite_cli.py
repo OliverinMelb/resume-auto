@@ -28,6 +28,8 @@ _WINDOWS_RESERVED = {
     *(f"LPT{number}" for number in range(1, 10)),
 }
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+_EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+_PHONE = re.compile(r"(?<![\w])(?:\+?\d[\d()\s.-]{6,}\d)(?![\w])")
 
 
 class _InputAction(argparse.Action):
@@ -436,7 +438,19 @@ def _print_result(run: dict, exported: Path | None) -> None:
         "blocking_questions": run.get("blocking_questions", []),
         "exported_path": str(exported) if exported else None,
     }
-    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    print(json.dumps(_redact_nested(result), ensure_ascii=False, separators=(",", ":")))
+
+
+def _redact_nested(value):
+    if isinstance(value, str):
+        return _PHONE.sub(
+            "[REDACTED_PHONE]", _EMAIL.sub("[REDACTED_EMAIL]", value)
+        )
+    if isinstance(value, dict):
+        return {key: _redact_nested(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_nested(item) for item in value]
+    return value
 
 
 def _status_exit_code(status: object) -> int:

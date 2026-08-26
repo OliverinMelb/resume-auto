@@ -2,13 +2,14 @@ import io
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from contextlib import redirect_stderr, redirect_stdout
 from os import environ
 from pathlib import Path
 from unittest.mock import patch
 
 from resume_agent.repository import Repository
-from resume_agent.rewrite_cli import bootstrap_request, export_ready_pdf, main
+from resume_agent.rewrite_cli import _print_result, bootstrap_request, export_ready_pdf, main
 from resume_agent.rewrite_schemas import FactAnswer
 
 
@@ -174,6 +175,38 @@ class RewriteCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(set(json.loads(stdout.getvalue())), {"id", "status", "blocking_questions", "exported_path"})
         self.assertNotIn("PRIVATE", stdout.getvalue() + stderr.getvalue())
+
+    def test_print_result_recursively_redacts_phone_and_email_without_mutation(self):
+        run = {
+            "id": "rewrite_run_abcdef",
+            "status": "NEEDS_FACTS",
+            "blocking_questions": [{
+                "question_id": "gap-aaaaaaaaaaaa",
+                "question": "Email Candidate.Test+cv@example.com",
+                "details": {
+                    "contacts": ["+86 138-1234-5678", "13812345678"],
+                },
+            }],
+        }
+        original = deepcopy(run)
+        exported = Path("Candidate.Test+cv@example.com") / "13812345678.pdf"
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            _print_result(run, exported)
+
+        rendered = stdout.getvalue()
+        self.assertNotIn("Candidate.Test+cv@example.com", rendered)
+        self.assertNotIn("+86 138-1234-5678", rendered)
+        self.assertNotIn("13812345678", rendered)
+        payload = json.loads(rendered)
+        self.assertIn("[REDACTED_EMAIL]", payload["blocking_questions"][0]["question"])
+        self.assertEqual(
+            payload["blocking_questions"][0]["details"]["contacts"],
+            ["[REDACTED_PHONE]", "[REDACTED_PHONE]"],
+        )
+        self.assertIn("[REDACTED_EMAIL]", payload["exported_path"])
+        self.assertIn("[REDACTED_PHONE]", payload["exported_path"])
+        self.assertEqual(run, original)
 
     def test_resume_requires_exact_fact_answer_array_and_status_codes(self):
         facts = self.root / "facts.json"
