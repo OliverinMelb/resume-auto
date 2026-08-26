@@ -431,26 +431,18 @@ def _title_family_blockers(jobs: list[dict]) -> list[dict[str, Any]]:
         family for job in jobs
         if (family := _obvious_title_family(str(job.get("title", "")))) is not None
     }
-    if families != {"AI_AGENT_ENGINEERING", "SALES_BD"}:
+    if len(families) < 2:
         return []
     return [{
         "question_id": MULTI_JOB_TITLE_FAMILY_BLOCKER_ID,
         "question": "Please reselect jobs from one title family and create a new run.",
         "blocking": True,
-        "reason": "Selected job titles span AI/Agent engineering and Sales/BD.",
+        "reason": "Selected job titles span multiple known career families.",
     }]
 
 
 def _obvious_title_family(title: str) -> str | None:
     normalized = " ".join(title.casefold().split())
-    sales_bd = (
-        re.search(r"(?:^|[^a-z0-9])(?:sales|bd)(?:[^a-z0-9]|$)", normalized)
-        or "business development" in normalized
-        or "account executive" in normalized
-        or any(marker in normalized for marker in ("销售", "商务拓展", "业务拓展"))
-    )
-    if sales_bd:
-        return "SALES_BD"
     ai_agent = (
         re.search(r"(?:^|[^a-z0-9])ai(?:[^a-z0-9]|$)", normalized)
         or any(marker in normalized for marker in ("agent", "llm", "人工智能", "智能体", "大模型"))
@@ -462,7 +454,40 @@ def _obvious_title_family(title: str) -> str | None:
             "工程师", "开发", "架构",
         )
     )
-    return "AI_AGENT_ENGINEERING" if ai_agent and engineering else None
+    if ai_agent and engineering:
+        return "AI_AGENT_ENGINEERING"
+    sales_bd = (
+        re.search(r"(?:^|[^a-z0-9])(?:sales|bd)(?:[^a-z0-9]|$)", normalized)
+        or "business development" in normalized
+        or "account executive" in normalized
+        or any(marker in normalized for marker in ("销售", "商务拓展", "业务拓展"))
+    )
+    if sales_bd:
+        return "SALES_BD"
+    finance_accounting = (
+        re.search(
+            r"(?:^|[^a-z0-9])(?:accountant|accounting|auditor|audit|finance|"
+            r"financial|controller|bookkeeper)(?:[^a-z0-9]|$)",
+            normalized,
+        )
+        or any(marker in normalized for marker in ("会计", "财务", "审计"))
+    )
+    if finance_accounting:
+        return "FINANCE_ACCOUNTING"
+    healthcare_nursing = (
+        re.search(
+            r"(?:^|[^a-z0-9])(?:nurse|nursing|physician|doctor|clinician|"
+            r"medical|healthcare)(?:[^a-z0-9]|$)",
+            normalized,
+        )
+        or "health care" in normalized
+        or any(marker in normalized for marker in (
+            "护士", "护理", "医生", "医师", "医疗", "临床",
+        ))
+    )
+    if healthcare_nursing:
+        return "HEALTHCARE_NURSING"
+    return None
 
 
 def _has_title_family_blocker(blockers: list[dict]) -> bool:

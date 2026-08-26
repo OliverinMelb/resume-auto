@@ -647,6 +647,40 @@ class RewritePipelineTests(unittest.TestCase):
         )
         self.assertEqual(unchanged["fact_answers"], [])
 
+    def test_known_cross_family_job_titles_block_before_model(self):
+        for first_title, second_title in (
+            ("AI Agent Engineer", "Accountant"),
+            ("AI Agent Engineer", "Registered Nurse"),
+            ("人工智能工程师", "财务会计"),
+            ("大模型开发工程师", "护士"),
+            ("Sales Manager", "Accountant"),
+            ("审计师", "临床护士"),
+        ):
+            with self.subTest(first_title=first_title, second_title=second_title):
+                first_job = self.repository.create_job({
+                    "candidate_id": self.candidate["id"], "source": "manual",
+                    "title": first_title, "detail": "Known family role",
+                    "company": "Example",
+                })
+                second_job = self.repository.create_job({
+                    "candidate_id": self.candidate["id"], "source": "manual",
+                    "title": second_title, "detail": "Different known family role",
+                    "company": "Example",
+                })
+                runner = FakeCodexRunner(
+                    result_for(self.resume["id"], first_job["id"])
+                )
+
+                run = self.make_pipeline(runner, FakeRenderer()).run(
+                    self.request(job_ids=[first_job["id"], second_job["id"]])
+                )
+
+                self.assertEqual(
+                    (run["status"], run["attempt_count"], runner.run_count),
+                    ("NEEDS_FACTS", 0, 0),
+                )
+                self.assertEqual(len(run["blocking_questions"]), 1)
+
     def test_coherent_and_unknown_engineering_job_titles_reach_model(self):
         llm_job = self.repository.create_job({
             "candidate_id": self.candidate["id"], "source": "manual",
