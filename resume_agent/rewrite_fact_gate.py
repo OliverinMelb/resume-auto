@@ -17,13 +17,16 @@ VERSION = re.compile(
     r"\b(?:Python|Java|Node(?:\.js)?)\s+v?\d+(?:\.\d+){0,3}\b", re.I
 )
 METRIC = re.compile(
+    r"(?:"
     r"(?<![A-Za-z0-9])"
     r"\d+(?:\.\d+)?"
     r"(?:\s*(?:-|–|—|~|～|至|到)\s*\d+(?:\.\d+)?)?"
     r"\s*(?:%|\+|qps|tps|rps|ms|毫秒|s|秒|分钟|小时|年|个月|月|天|"
-    r"(?:万|亿)(?:用户|人|家|条|次|个|元)?|人|家|条|"
+    r"(?:万|亿)(?:用户|人|家|条|次|个|元)?|元|人|家|条|"
     r"个(?:节点|字段)?|项|轮|维|种(?:状态)?|字段|节点|倍|次)"
-    r"(?![A-Za-z0-9])",
+    r"(?![A-Za-z0-9])"
+    r"|(?:上千|百余|数十|近百|约百)(?:用户|人|家|项|次|条)"
+    r")",
     re.I,
 )
 QUESTION_ID = re.compile(r"^(?:metric|gap|conflict)-[0-9a-f]{12}$")
@@ -35,6 +38,11 @@ PLACEHOLDER_TERMS = (
     "随便",
     "不记得",
     "没有",
+    "不是",
+    "并非",
+    "从未",
+    "未曾",
+    "否认",
 )
 PLACEHOLDER_EXACT = {"无", "不知道", "不清楚", "随便", "没有", "不记得"}
 SOURCE_NOTE_TERMS = (
@@ -51,9 +59,52 @@ SOURCE_NOTE_TERMS = (
     "测量",
     "候选人确认",
 )
+QPS_ANSWER_TERMS = (
+    "压测",
+    "吞吐",
+    "每秒",
+    "峰值",
+    "平均",
+    "监控",
+    "统计窗口",
+    "持续",
+)
+OTHER_METRIC_ANSWER_TERMS = (
+    "统计",
+    "测量",
+    "记录",
+    "日志",
+    "目录",
+    "清单",
+    "监控",
+    "回归",
+    "报告",
+    "数据库",
+    "仓库",
+    "代码",
+    "截图",
+    "压测",
+    "每秒",
+    "窗口",
+)
+SECTION_HEADINGS = {
+    "个人信息",
+    "教育经历",
+    "实习经历",
+    "工作经历",
+    "项目经历",
+    "专业技能",
+    "技能",
+    "自我评价",
+    "荣誉奖项",
+    "证书",
+    "联系方式",
+    "求职意向",
+}
 MIN_ANSWER_LENGTH = 4
 MIN_SOURCE_NOTE_LENGTH = 6
-HEADING = re.compile(r"^\s{0,3}#{1,6}(?:\s+|$)")
+HEADING = re.compile(r"^\s{0,3}#{1,6}(?!#)")
+HEADING_PREFIX = re.compile(r"^\s{0,3}#{1,6}(?!#)\s*")
 STRUCTURAL_MARKDOWN = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,}|```.*)\s*$")
 LIST_PREFIX = re.compile(r"^\s*(?:(?:[-*+]|\d+[.)])\s+|>\s*)")
 CHECKBOX_PREFIX = re.compile(r"^\[[ xX]\]\s+")
@@ -214,35 +265,27 @@ def validate_rewrite_facts(
         if len(indexes) != 1:
             continue
         audit = result.claim_audit[indexes[0]]
-        linked_quotes = [
-            quote
-            for quote in audit.source_quotes
-            if _quote_relates_to_claim(quote, line.claim)
-        ]
-        if audit.source_quotes and not linked_quotes:
-            blockers.append(
-                _gap_blocker(
-                    f"请为“{line.claim}”提供与 claim 确定关联的原文 quote",
-                    "claim_audit quote 与成稿 claim 缺少确定性关联",
-                )
-            )
+        if metrics_by_claim.get(line.normalized):
+            continue
 
+        blocker = _claim_evidence_blocker(line.claim)
         if audit.fact_status == "source_verified":
-            if not audit.source_resume_ids or not audit.source_quotes:
-                blockers.append(
-                    _gap_blocker(
-                        f"请为“{line.claim}”补充归属明确的原文证据",
-                        "source_verified claim 缺少 source_resume_ids/source_quotes",
-                    )
-                )
-        elif not audit.source_quotes and not metrics_by_claim.get(line.normalized):
-            question = f"请确认“{line.claim}”并说明可核验来源"
-            reason = "成稿 claim 缺少可核验来源或候选人确认"
-            blocker = _gap_blocker(question, reason)
-            if not _answer_has_evidence(
-                answers.get(blocker.question_id), blocker.question_id
-            ):
-                blockers.append(blocker)
+            valid_claim = bool(audit.source_resume_ids) and bool(
+                audit.source_quotes
+            ) and any(
+                _quote_contains_full_claim(quote, line.claim)
+                for quote in audit.source_quotes
+            )
+        elif audit.fact_status == "user_confirmed":
+            valid_claim = _answer_has_evidence(
+                answers.get(blocker.question_id),
+                blocker.question_id,
+                claim=line.claim,
+            )
+        else:
+            valid_claim = False
+        if not valid_claim:
+            blockers.append(blocker)
 
     for line, indexes in zip(draft_lines, coverage):
         for metric in metrics_by_claim.get(line.normalized, []):
@@ -262,7 +305,10 @@ def validate_rewrite_facts(
 
             audit = result.claim_audit[indexes[0]]
             answer = answers.get(question_id)
-            answered = _answer_has_evidence(answer, question_id, metric)
+            answered = (
+                audit.fact_status == "user_confirmed"
+                and _answer_has_evidence(answer, question_id, metric=metric)
+            )
             basis = _clean_text(audit.measurement_basis)
             answer_supports_basis = answered and (
                 not basis or _answer_contains_basis(answer, basis)
@@ -277,10 +323,8 @@ def validate_rewrite_facts(
             )
 
             if audit.fact_status == "source_verified":
-                valid_metric = bool(metric_quotes) and (
-                    source_evidence or answer_supports_basis
-                )
-            elif audit.fact_status in {"user_confirmed", "unverified"}:
+                valid_metric = source_evidence
+            elif audit.fact_status == "user_confirmed":
                 valid_metric = answer_supports_basis
             else:
                 valid_metric = False
@@ -352,6 +396,7 @@ def _answer_has_evidence(
     answer: Any,
     expected_question_id: str,
     metric: str | None = None,
+    claim: str | None = None,
 ) -> bool:
     if (
         answer is None
@@ -367,7 +412,11 @@ def _answer_has_evidence(
     normalized_note = _normalize_for_hash(source_note)
     if not any(term in normalized_note for term in SOURCE_NOTE_TERMS):
         return False
-    return metric is None or _answer_explains_metric(answer_text, metric)
+    if metric is not None:
+        return _answer_explains_metric(answer_text, metric)
+    if claim is not None:
+        return _normalize_claim(claim) in _normalize_claim(answer_text)
+    return True
 
 
 def _contains_basis(container: str, basis: str) -> bool:
@@ -400,6 +449,7 @@ def _basis_has_evidence(
 
 def _display_claim(raw_line: str) -> str:
     value = unicodedata.normalize("NFKC", raw_line).strip()
+    value = HEADING_PREFIX.sub("", value)
     value = LIST_PREFIX.sub("", value)
     value = CHECKBOX_PREFIX.sub("", value)
     value = re.sub(r"[*_`]+", "", value)
@@ -413,14 +463,13 @@ def _normalize_claim(value: str) -> str:
 def _substantive_lines(markdown: str) -> list[_DraftLine]:
     lines: list[_DraftLine] = []
     for raw_line in markdown.splitlines():
-        if (
-            not raw_line.strip()
-            or HEADING.match(raw_line)
-            or STRUCTURAL_MARKDOWN.match(raw_line)
-        ):
+        if not raw_line.strip() or STRUCTURAL_MARKDOWN.match(raw_line):
             continue
+        is_heading = bool(HEADING.match(raw_line))
         claim = _display_claim(raw_line)
         normalized = _normalize_claim(claim)
+        if is_heading and normalized in SECTION_HEADINGS:
+            continue
         if normalized:
             lines.append(_DraftLine(claim=claim, normalized=normalized))
     return lines
@@ -437,16 +486,23 @@ def _gap_blocker(question: str, reason: str) -> MissingInformation:
     )
 
 
-def _quote_relates_to_claim(quote: str, claim: str) -> bool:
+def _claim_evidence_blocker(claim: str) -> MissingInformation:
+    return _gap_blocker(
+        f"请完整确认“{claim}”并说明可核验来源",
+        (
+            "非数字 claim 缺少完整 source_verified quote 确定性关联，"
+            "或有效 user_confirmed 答案"
+        ),
+    )
+
+
+def _quote_contains_full_claim(quote: str, claim: str) -> bool:
     normalized_quote = _normalize_claim(quote)
     normalized_claim = _normalize_claim(claim)
     return bool(
         normalized_quote
         and normalized_claim
-        and (
-            normalized_claim in normalized_quote
-            or normalized_quote in normalized_claim
-        )
+        and normalized_claim in normalized_quote
     )
 
 
@@ -476,20 +532,60 @@ def _is_placeholder(value: str) -> bool:
 
 
 def _answer_explains_metric(answer: str, metric: str) -> bool:
+    normalized_metric = unicodedata.normalize("NFKC", metric)
+    normalized_answer = unicodedata.normalize("NFKC", answer)
+    if normalized_metric.rstrip().endswith("%"):
+        return _percentage_answer_matches(normalized_answer, normalized_metric)
+    if re.search(r"(?:qps|tps|rps)\s*$", normalized_metric, re.I):
+        return _answer_has_exact_metric(normalized_answer, normalized_metric) and any(
+            term in normalized_answer.lower() for term in QPS_ANSWER_TERMS
+        )
+    return _answer_has_exact_metric(normalized_answer, normalized_metric) and any(
+        term in normalized_answer.lower() for term in OTHER_METRIC_ANSWER_TERMS
+    )
+
+
+def _answer_has_exact_metric(answer: str, metric: str) -> bool:
     expected = _compact(metric)
-    if any(
+    return any(
         _compact(candidate) == expected
         for _, candidate in extract_business_metrics(answer)
-    ):
-        return True
-    normalized = unicodedata.normalize("NFKC", answer)
-    numbers = re.findall(r"\d+(?:\.\d+)?", normalized)
-    metric_numbers = re.findall(
-        r"\d+(?:\.\d+)?", unicodedata.normalize("NFKC", metric)
     )
-    formula_terms = ("成功", "失败", "总计", "其中", "样本", "回归", "统计", "/", "除以")
-    return (
-        len(numbers) >= 2
-        and bool(set(numbers) & set(metric_numbers))
-        and any(term in normalized for term in formula_terms)
+
+
+def _percentage_answer_matches(answer: str, metric: str) -> bool:
+    target_match = re.search(r"\d+(?:\.\d+)?", metric)
+    if target_match is None:
+        return False
+    target_text = target_match.group(0)
+    target = float(target_text)
+    decimal_places = len(target_text.partition(".")[2])
+    tolerance = 0.5 * (10 ** -decimal_places) + 1e-9
+
+    ratios: list[tuple[float, float]] = []
+    for match in re.finditer(
+        r"(?P<num>\d+(?:\.\d+)?)\s*/\s*(?P<den>\d+(?:\.\d+)?)",
+        answer,
+    ):
+        ratios.append((float(match.group("num")), float(match.group("den"))))
+    for match in re.finditer(
+        r"(?P<den>\d+(?:\.\d+)?)\s*(?:次|个|条|项|例|样本)?"
+        r".{0,40}?(?:中|内|里).*?(?:成功|完成|命中|通过)\s*"
+        r"(?P<num>\d+(?:\.\d+)?)",
+        answer,
+    ):
+        ratios.append((float(match.group("num")), float(match.group("den"))))
+    for match in re.finditer(
+        r"(?P<den>\d+(?:\.\d+)?)\s*(?:次|个|条|项|例|样本)?"
+        r".{0,40}?(?:中|内|里).*?(?:有\s*)?"
+        r"(?P<num>\d+(?:\.\d+)?)\s*(?:次|个|条|项|例|样本)?"
+        r"\s*(?:成功|完成|命中|通过)",
+        answer,
+    ):
+        ratios.append((float(match.group("num")), float(match.group("den"))))
+
+    return any(
+        denominator > 0
+        and abs(numerator / denominator * 100 - target) <= tolerance
+        for numerator, denominator in ratios
     )

@@ -19,7 +19,7 @@ def result_with_metric(status="unverified", basis=None):
             "scorecard": [],
             "risks": [],
             "missing_information": [],
-            "rewritten_resume_markdown": "# 曹申傲\n- 工具调用成功率达到 86%",
+            "rewritten_resume_markdown": "## 项目经历\n- 工具调用成功率达到 86%",
             "rewrite_reasons": [],
             "depth_recommendations": [],
             "interviewer_probes": [],
@@ -54,6 +54,32 @@ def empty_result(*, markdown="", missing_information=None):
     )
 
 
+def result_for_claim(claim, *, status, quote=None, basis=None):
+    return CodexRewriteResult.model_validate(
+        {
+            "verdict": "匹配",
+            "scorecard": [],
+            "risks": [],
+            "missing_information": [],
+            "rewritten_resume_markdown": f"## 项目经历\n- {claim}",
+            "rewrite_reasons": [],
+            "depth_recommendations": [],
+            "interviewer_probes": [],
+            "claim_audit": [
+                {
+                    "claim": claim,
+                    "source_resume_ids": ["source_resume_1"] if quote else [],
+                    "source_quotes": [quote] if quote else [],
+                    "job_ids": ["job_1"],
+                    "change_type": "unchanged",
+                    "fact_status": status,
+                    "measurement_basis": basis,
+                }
+            ],
+        }
+    )
+
+
 class FactGateTests(unittest.TestCase):
     def setUp(self):
         self.resumes = [
@@ -72,7 +98,7 @@ class FactGateTests(unittest.TestCase):
 
     def test_candidate_answer_with_basis_unblocks_same_stable_question(self):
         first = validate_rewrite_facts(
-            result_with_metric(), self.resumes, self.jobs, []
+            result_with_metric("user_confirmed"), self.resumes, self.jobs, []
         )
         answers = [
             FactAnswer(
@@ -83,7 +109,7 @@ class FactGateTests(unittest.TestCase):
         ]
 
         gate = validate_rewrite_facts(
-            result_with_metric(), self.resumes, self.jobs, answers
+            result_with_metric("user_confirmed"), self.resumes, self.jobs, answers
         )
 
         self.assertEqual(gate.blockers, [])
@@ -599,6 +625,322 @@ class FactGateTests(unittest.TestCase):
         )
 
         self.assertEqual(gate.blockers, [])
+
+    def test_short_kubernetes_quote_does_not_support_full_migration_claim(self):
+        claim = "主导 Kubernetes 集群迁移"
+        result = result_for_claim(
+            claim,
+            status="source_verified",
+            quote="Kubernetes",
+        )
+        resumes = [{"id": "source_resume_1", "content": "技能：Kubernetes"}]
+
+        gate = validate_rewrite_facts(result, resumes, self.jobs, [])
+
+        self.assertEqual(len(gate.blockers), 1)
+        self.assertTrue(gate.blockers[0].question_id.startswith("gap-"))
+
+    def test_short_python_quote_does_not_support_combined_claim(self):
+        claim = "熟悉 Python 并主导 Kubernetes 集群迁移"
+        result = result_for_claim(
+            claim,
+            status="source_verified",
+            quote="熟悉 Python",
+        )
+        resumes = [{"id": "source_resume_1", "content": "技能：熟悉 Python"}]
+
+        gate = validate_rewrite_facts(result, resumes, self.jobs, [])
+
+        self.assertEqual(len(gate.blockers), 1)
+        self.assertTrue(gate.blockers[0].question_id.startswith("gap-"))
+
+    def test_only_allowlisted_section_headings_are_skipped(self):
+        result = empty_result(markdown="# 高级架构师｜8年经验\n## 项目经历")
+
+        gate = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+
+        self.assertEqual(
+            [metric for _, metric in extract_business_metrics(result.rewritten_resume_markdown)],
+            ["8年"],
+        )
+        self.assertTrue(any("缺少 claim_audit" in item.reason for item in gate.blockers))
+
+    def test_heading_allowlist_is_applied_after_stripping_hashes(self):
+        section = validate_rewrite_facts(
+            empty_result(markdown="##项目经历"), self.resumes, self.jobs, []
+        )
+        name = validate_rewrite_facts(
+            empty_result(markdown="#曹申傲"), self.resumes, self.jobs, []
+        )
+
+        self.assertEqual(section.blockers, [])
+        self.assertTrue(any("缺少 claim_audit" in item.reason for item in name.blockers))
+
+    def test_unrelated_lunch_answer_does_not_confirm_general_claim(self):
+        claim = "主导 Kubernetes 集群迁移"
+        result = result_for_claim(claim, status="user_confirmed")
+        initial = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+        question_id = initial.blockers[0].question_id
+
+        gate = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="午餐菜单是鸡肉沙拉",
+                    source_note="候选人确认，依据记录",
+                )
+            ],
+        )
+
+        self.assertEqual([item.question_id for item in gate.blockers], [question_id])
+
+    def test_percentage_answer_rejects_wrong_ratio(self):
+        result = result_with_metric("user_confirmed")
+        initial = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+        question_id = initial.blockers[0].question_id
+
+        gate = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="成功率86%，统计样本为86/85",
+                    source_note="本地回归记录，候选人确认",
+                )
+            ],
+        )
+
+        self.assertEqual([item.question_id for item in gate.blockers], [question_id])
+
+    def test_percentage_answer_rejects_negated_matching_ratio(self):
+        result = result_with_metric("user_confirmed")
+        initial = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+        question_id = initial.blockers[0].question_id
+
+        gate = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="不是86/100，而是85/100",
+                    source_note="本地回归记录，候选人确认",
+                )
+            ],
+        )
+
+        self.assertEqual([item.question_id for item in gate.blockers], [question_id])
+
+    def test_percentage_answer_accepts_reproducible_ratio(self):
+        result = result_with_metric("user_confirmed")
+        initial = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+        question_id = initial.blockers[0].question_id
+
+        gate = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="统计样本为86/100，即成功率86%",
+                    source_note="本地回归记录，候选人确认",
+                )
+            ],
+        )
+
+        self.assertEqual(gate.blockers, [])
+
+    def test_percentage_answer_accepts_equivalent_chinese_ratio_order(self):
+        result = result_with_metric("user_confirmed")
+        initial = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+        question_id = initial.blockers[0].question_id
+
+        gate = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="共100次固定回归，其中86次成功",
+                    source_note="本地回归记录，候选人确认",
+                )
+            ],
+        )
+
+        self.assertEqual(gate.blockers, [])
+
+    def test_percentage_confirmation_without_basis_is_rejected(self):
+        result = result_with_metric("user_confirmed")
+        initial = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+        question_id = initial.blockers[0].question_id
+
+        gate = validate_rewrite_facts(
+            result,
+            self.resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="候选人确认成功率为86%",
+                    source_note="候选人确认，依据回归记录",
+                )
+            ],
+        )
+
+        self.assertEqual([item.question_id for item in gate.blockers], [question_id])
+
+    def test_qps_answer_requires_exact_unit_and_throughput_method(self):
+        claim = "接口峰值达到 500 QPS"
+        result = result_for_claim(
+            claim,
+            status="user_confirmed",
+            quote=claim,
+        )
+        resumes = [{"id": "source_resume_1", "content": claim}]
+        initial = validate_rewrite_facts(result, resumes, self.jobs, [])
+        question_id = initial.blockers[0].question_id
+
+        invalid_answers = ["500次回归均通过", "服务能力为500 QPS"]
+        for answer in invalid_answers:
+            with self.subTest(answer=answer):
+                gate = validate_rewrite_facts(
+                    result,
+                    resumes,
+                    self.jobs,
+                    [
+                        FactAnswer(
+                            question_id=question_id,
+                            answer=answer,
+                            source_note="压测报告和监控日志",
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    [item.question_id for item in gate.blockers], [question_id]
+                )
+
+        gate = validate_rewrite_facts(
+            result,
+            resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="压测峰值为500 QPS，持续10分钟",
+                    source_note="压测报告和监控日志",
+                )
+            ],
+        )
+        self.assertEqual(gate.blockers, [])
+
+    def test_source_verified_metric_cannot_borrow_candidate_basis(self):
+        claim = "工具调用成功率达到 86%"
+        basis = "100次固定回归"
+        result = result_for_claim(
+            claim,
+            status="source_verified",
+            quote=claim,
+            basis=basis,
+        )
+        resumes = [
+            {
+                "id": "source_resume_1",
+                "content": f"{claim}。其他位置记录{basis}",
+            }
+        ]
+        initial = validate_rewrite_facts(result, resumes, self.jobs, [])
+        question_id = initial.blockers[0].question_id
+        answers = [
+            FactAnswer(
+                question_id=question_id,
+                answer="100次固定回归中成功86次，成功率为86%",
+                source_note="本地回归记录，候选人确认",
+            )
+        ]
+
+        source_gate = validate_rewrite_facts(result, resumes, self.jobs, answers)
+        result.claim_audit[0].fact_status = "user_confirmed"
+        user_gate = validate_rewrite_facts(result, resumes, self.jobs, answers)
+
+        self.assertEqual(
+            [item.question_id for item in source_gate.blockers], [question_id]
+        )
+        self.assertEqual(user_gate.blockers, [])
+
+    def test_other_metric_needs_exact_value_and_method_in_answer(self):
+        claim = "管理10人团队"
+        result = result_for_claim(
+            claim,
+            status="user_confirmed",
+            quote=claim,
+        )
+        resumes = [{"id": "source_resume_1", "content": claim}]
+        initial = validate_rewrite_facts(result, resumes, self.jobs, [])
+        question_id = initial.blockers[0].question_id
+
+        weak = validate_rewrite_facts(
+            result,
+            resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="候选人确认管理10人",
+                    source_note="候选人确认，依据项目记录",
+                )
+            ],
+        )
+        strong = validate_rewrite_facts(
+            result,
+            resumes,
+            self.jobs,
+            [
+                FactAnswer(
+                    question_id=question_id,
+                    answer="团队清单记录管理10人",
+                    source_note="候选人确认，依据项目记录",
+                )
+            ],
+        )
+
+        self.assertEqual([item.question_id for item in weak.blockers], [question_id])
+        self.assertEqual(strong.blockers, [])
+
+    def test_chinese_scale_and_currency_metrics_table(self):
+        positives = {
+            "服务上千用户": "上千用户",
+            "覆盖百余家企业": "百余家",
+            "管理数十人": "数十人",
+            "完成近百项任务": "近百项",
+            "执行约百次回归": "约百次",
+            "单价500元": "500元",
+            "节省50万元": "50万元",
+        }
+        for claim, expected in positives.items():
+            with self.subTest(claim=claim):
+                self.assertEqual(
+                    [metric for _, metric in extract_business_metrics(claim)],
+                    [expected],
+                )
+
+        negatives = [
+            "2027 年 6 月 1 日",
+            "18895477216",
+            "Python 3.12",
+            "Java 21",
+            "Node.js v20.11.1",
+        ]
+        for claim in negatives:
+            with self.subTest(claim=claim):
+                self.assertEqual(extract_business_metrics(claim), [])
 
 
 if __name__ == "__main__":
