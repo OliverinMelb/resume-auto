@@ -3,6 +3,8 @@ import ipaddress
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from .repository import NotFoundError, Repository
+from .rewrite_factory import create_rewrite_pipeline
+from .rewrite_schemas import FactAnswersRequest, RewriteRequest
 from .schemas import (
     CandidateProfilePromptRequest,
     CandidateCreate,
@@ -48,6 +50,7 @@ _service = ResumeAgentService(
     _settings.legacy_action_log_path,
     _settings.legacy_decision_log_path,
 )
+_rewrite_pipeline = create_rewrite_pipeline(_repository, _settings)
 
 
 def _raise_api_error(error: Exception):
@@ -60,11 +63,45 @@ def _raise_api_error(error: Exception):
 
 @router.get("/health")
 def health():
+    available = _rewrite_pipeline.available()
     return {
         "status": "ok",
-        "model_enabled": False,
-        "resume_modification_enabled": False,
+        "model_enabled": available,
+        "resume_modification_enabled": available,
     }
+
+
+def _rewrite_response(run: dict):
+    status = run.get("status")
+    if status in {"READY", "RUNNING", "NEEDS_FACTS"}:
+        return run
+    if status == "FAILED" and run.get("error_code") == "CODEX_TIMEOUT":
+        raise HTTPException(status_code=504, detail="Codex timed out")
+    raise HTTPException(status_code=502, detail="Resume rewrite failed")
+
+
+@router.post("/rewrite-runs")
+def create_rewrite_run(payload: RewriteRequest):
+    try:
+        return _rewrite_response(_rewrite_pipeline.run(payload))
+    except (NotFoundError, ValueError) as error:
+        _raise_api_error(error)
+
+
+@router.get("/rewrite-runs/{run_id}")
+def get_rewrite_run(run_id: str):
+    try:
+        return _rewrite_response(_rewrite_pipeline.get(run_id))
+    except (NotFoundError, ValueError) as error:
+        _raise_api_error(error)
+
+
+@router.post("/rewrite-runs/{run_id}/facts")
+def resume_rewrite_run(run_id: str, payload: FactAnswersRequest):
+    try:
+        return _rewrite_response(_rewrite_pipeline.resume(run_id, payload.fact_answers))
+    except (NotFoundError, ValueError) as error:
+        _raise_api_error(error)
 
 
 @router.post("/candidates", status_code=201)

@@ -14,6 +14,10 @@ class FactAnswer(StrictModel):
     source_note: str = Field(min_length=1, max_length=2000)
 
 
+class FactAnswersRequest(StrictModel):
+    fact_answers: list[FactAnswer] = Field(min_length=1, max_length=200)
+
+
 class RewriteRequest(StrictModel):
     candidate_id: str = Field(min_length=1, max_length=200)
     job_ids: list[str] = Field(min_length=1, max_length=100)

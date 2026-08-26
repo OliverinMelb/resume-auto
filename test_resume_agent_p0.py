@@ -307,6 +307,9 @@ class ResumeAgentP0Tests(unittest.TestCase):
         self.assertIn("/resume-agent/v1/imports/job-decisions", paths)
         self.assertIn("/resume-agent/v1/market-report", paths)
         self.assertIn("/resume-agent/v1/delivery-stats", paths)
+        self.assertIn("/resume-agent/v1/rewrite-runs", paths)
+        self.assertIn("/resume-agent/v1/rewrite-runs/{run_id}", paths)
+        self.assertIn("/resume-agent/v1/rewrite-runs/{run_id}/facts", paths)
         self.assertIn("/get-job-score", paths)
         self.assertIn("/log-action", paths)
 
@@ -316,12 +319,20 @@ class ResumeAgentP0Tests(unittest.TestCase):
         router_module = importlib.import_module("resume_agent.router")
         original_repository = router_module._repository
         original_service = router_module._service
+        original_pipeline = router_module._rewrite_pipeline
+
+        class UnavailablePipeline:
+            def available(self):
+                return False
+
         router_module._repository = self.repository
         router_module._service = self.service
+        router_module._rewrite_pipeline = UnavailablePipeline()
         try:
             client = TestClient(app)
             health = client.get("/resume-agent/v1/health")
             self.assertEqual(health.status_code, 200)
+            self.assertFalse(health.json()["model_enabled"])
             self.assertFalse(health.json()["resume_modification_enabled"])
 
             created = client.post(
@@ -336,6 +347,7 @@ class ResumeAgentP0Tests(unittest.TestCase):
         finally:
             router_module._repository = original_repository
             router_module._service = original_service
+            router_module._rewrite_pipeline = original_pipeline
 
     def test_subrouter_rejects_non_loopback_client(self):
         router_module = importlib.import_module("resume_agent.router")
