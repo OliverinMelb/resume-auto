@@ -1,3 +1,5 @@
+import io
+import os
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -15,6 +17,7 @@ from resume_agent.discovery_sources import (
     SourceInteractionRequiredError,
 )
 from resume_agent.repository import Repository
+from resume_agent import rewrite_cli
 from resume_agent.targeted_jobs import JobTarget, TargetedJobResolver
 from resume_agent.rewrite_cli import read_target_jd_file
 
@@ -631,7 +634,8 @@ class TargetJdFileBoundaryTests(unittest.TestCase):
                 read_target_jd_file(target)
         open_file.assert_not_called()
 
-    def test_rejects_leaf_identity_change_after_open(self):
+    @unittest.skipIf(os.name == "nt", "Windows uses final handle paths")
+    def test_non_windows_rejects_leaf_identity_change_after_open(self):
         target = self.root / "target.md"
         target.write_text("Agent JD", encoding="utf-8")
         with patch("os.path.samestat", return_value=False) as same_stat:
@@ -678,6 +682,89 @@ class TargetJdFileBoundaryTests(unittest.TestCase):
         self.assertEqual(len(read_target_jd_file(accepted)), 100_000)
         with self.assertRaisesRegex(ValueError, "100000"):
             read_target_jd_file(oversized)
+
+    def test_windows_final_path_normalizes_dos_and_unc_prefixes(self):
+        normalize = getattr(rewrite_cli, "_normalize_windows_final_path", None)
+        self.assertIsNotNone(normalize, "Windows final path normalizer is required")
+        self.assertEqual(
+            normalize(r"\\?\C:\Users\Case\Target.MD"),
+            r"c:\users\case\target.md",
+        )
+        self.assertEqual(
+            normalize(r"\\?\UNC\Server\Share\Folder\Target.MD"),
+            r"\\server\share\folder\target.md",
+        )
+        self.assertEqual(
+            normalize(r"C:/Users/Case/../Case/Target.MD"),
+            r"c:\users\case\target.md",
+        )
+
+    def test_windows_path_validator_rejects_ads_and_device_prefixes(self):
+        validate = getattr(rewrite_cli, "_validate_windows_target_path", None)
+        self.assertIsNotNone(validate, "Windows lexical path validator is required")
+        for value in (
+            r"document.pdf:target.txt",
+            r"C:\safe\document.pdf:target.txt",
+            r"\\?\C:\safe\target.txt",
+            r"\\?\UNC\server\share\target.txt",
+            r"\\.\C:\safe\target.txt",
+            r"//?/C:/safe/target.txt",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "unsafe") as raised:
+                    validate(value)
+                self.assertNotIn(value, str(raised.exception))
+        for value in (
+            r"target.txt",
+            r"C:\safe\target.txt",
+            r"\\server\share\target.txt",
+        ):
+            with self.subTest(value=value):
+                validate(value)
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle path check")
+    def test_windows_rejects_mismatched_final_handle_before_content_read(self):
+        target = self.root / "target.md"
+        target.write_text("must not return", encoding="utf-8")
+        different = self.root / "different.md"
+        with patch(
+            "resume_agent.rewrite_cli._windows_final_path_for_descriptor",
+            return_value=str(different),
+            create=True,
+        ) as final_path, patch(
+            "io.TextIOWrapper", wraps=io.TextIOWrapper
+        ) as text_reader:
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                read_target_jd_file(target)
+        final_path.assert_called_once()
+        text_reader.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle path check")
+    def test_windows_rejects_final_handle_api_failure_before_content_read(self):
+        target = self.root / "target.md"
+        target.write_text("must not return", encoding="utf-8")
+        with patch(
+            "resume_agent.rewrite_cli._windows_final_path_for_descriptor",
+            side_effect=OSError("private failure"),
+            create=True,
+        ) as final_path, patch(
+            "io.TextIOWrapper", wraps=io.TextIOWrapper
+        ) as text_reader:
+            with self.assertRaisesRegex(ValueError, "unsafe") as raised:
+                read_target_jd_file(target)
+        final_path.assert_called_once()
+        text_reader.assert_not_called()
+        self.assertNotIn("private failure", str(raised.exception))
+
+    @unittest.skipUnless(os.name == "nt", "Windows ADS semantics")
+    def test_windows_read_rejects_ads_before_open(self):
+        target = self.root / "document.pdf"
+        target.write_text("base", encoding="utf-8")
+        ads = Path(f"{target}:target.txt")
+        with patch("resume_agent.rewrite_cli.os.open") as open_file:
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                read_target_jd_file(ads)
+        open_file.assert_not_called()
 
 
 if __name__ == "__main__":

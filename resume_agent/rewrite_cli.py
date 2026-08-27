@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import io
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -41,6 +42,8 @@ def read_target_jd_file(path: Path) -> str:
         raise ValueError("target JD file path is invalid")
     if path.suffix.lower() not in _TEXT_RESUME_SUFFIXES:
         raise ValueError("target JD file must be .md or .txt")
+    if os.name == "nt":
+        _validate_windows_target_path(str(path))
     absolute = path.absolute()
     _reject_reparse_components(absolute)
     flags = (
@@ -63,12 +66,15 @@ def read_target_jd_file(path: Path) -> str:
             if not stat.S_ISREG(opened_stat.st_mode):
                 raise ValueError("target JD file is unsafe")
             _reject_reparse_components(absolute)
-            path_stat = _nonfollowing_stat(absolute)
-            if (
-                not stat.S_ISREG(path_stat.st_mode)
-                or not os.path.samestat(opened_stat, path_stat)
-            ):
-                raise ValueError("target JD file is unsafe")
+            if os.name == "nt":
+                _verify_windows_opened_path(binary.fileno(), absolute)
+            else:
+                path_stat = _nonfollowing_stat(absolute)
+                if (
+                    not stat.S_ISREG(path_stat.st_mode)
+                    or not os.path.samestat(opened_stat, path_stat)
+                ):
+                    raise ValueError("target JD file is unsafe")
             with io.TextIOWrapper(
                 binary, encoding="utf-8-sig", errors="strict"
             ) as reader:
@@ -97,6 +103,79 @@ def _nonfollowing_stat(path: Path):
         return os.stat(path, follow_symlinks=False)
     except (NotImplementedError, TypeError):
         return os.lstat(path)
+
+
+def _validate_windows_target_path(value: str) -> None:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("target JD file is unsafe")
+    normalized = value.replace("/", "\\")
+    folded = normalized.casefold()
+    if folded.startswith(("\\\\?\\", "\\\\.\\", "\\??\\")):
+        raise ValueError("target JD file is unsafe")
+    drive, tail = ntpath.splitdrive(normalized)
+    if ":" in tail or (
+        ":" in drive
+        and not (len(drive) == 2 and drive[0].isalpha() and drive[1] == ":")
+    ):
+        raise ValueError("target JD file is unsafe")
+
+
+def _normalize_windows_final_path(value: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("target JD file is unsafe")
+    normalized = value.replace("/", "\\")
+    folded = normalized.casefold()
+    if folded.startswith("\\\\?\\unc\\"):
+        normalized = "\\\\" + normalized[8:]
+    elif folded.startswith("\\\\?\\"):
+        normalized = normalized[4:]
+    elif folded.startswith("\\\\.\\"):
+        raise ValueError("target JD file is unsafe")
+    return ntpath.normcase(ntpath.normpath(normalized)).casefold()
+
+
+def _verify_windows_opened_path(descriptor: int, intended_path: Path) -> None:
+    try:
+        actual = _windows_final_path_for_descriptor(descriptor)
+        actual_normalized = _normalize_windows_final_path(actual)
+        intended_normalized = _normalize_windows_final_path(str(intended_path))
+    except Exception:
+        raise ValueError("target JD file is unsafe") from None
+    if actual_normalized != intended_normalized:
+        raise ValueError("target JD file is unsafe")
+
+
+def _windows_final_path_for_descriptor(descriptor: int) -> str:
+    if os.name != "nt":
+        raise OSError("Windows handle paths are unavailable")
+    try:
+        import ctypes
+        from ctypes import wintypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(descriptor)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_final_path = kernel32.GetFinalPathNameByHandleW
+        get_final_path.argtypes = (
+            wintypes.HANDLE,
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        )
+        get_final_path.restype = wintypes.DWORD
+    except Exception:
+        raise OSError("Windows handle paths are unavailable") from None
+
+    capacity = 512
+    while capacity <= 32_768:
+        buffer = ctypes.create_unicode_buffer(capacity)
+        length = get_final_path(handle, buffer, capacity, 0)
+        if length == 0:
+            raise OSError(ctypes.get_last_error(), "Windows handle path failed")
+        if length < capacity:
+            return buffer.value
+        capacity = length + 1
+    raise OSError("Windows handle path is too long")
 
 
 class _InputAction(argparse.Action):
