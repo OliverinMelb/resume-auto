@@ -5,10 +5,16 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import timezone
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .discovery_schemas import DiscoveredJob
 from .discovery_sources import (
@@ -21,20 +27,31 @@ from .rewrite_schemas import StrictModel
 
 
 _URL_SOURCES = {
-    "nowcoder.com": "nowcoder",
     "www.nowcoder.com": "nowcoder",
-    "zhipin.com": "boss",
     "www.zhipin.com": "boss",
 }
 _COMPANY_HEADINGS = {"公司", "公司名称", "company"}
 
 
 class JobTarget(StrictModel):
+    """Validated internal target; external mappings must use ``from_payload``."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
     job_id: str | None = None
     jd_text: str | None = Field(default=None, max_length=100_000)
     jd_url: str | None = Field(default=None, max_length=8192)
     title: str | None = Field(default=None, max_length=500)
     company: str | None = Field(default=None, max_length=500)
+
+    @classmethod
+    def from_payload(cls, payload: object) -> Self:
+        """Validate untrusted input without exposing raw validation details."""
+        try:
+            return cls.model_validate(payload)
+        except (ValidationError, TypeError, ValueError):
+            pass
+        raise ValueError("INVALID_JOB_TARGET")
 
     @field_validator("job_id", "jd_text", "jd_url", mode="before")
     @classmethod
@@ -117,7 +134,7 @@ class TargetedJobResolver:
             raise ValueError("TARGET_TITLE_REQUIRED")
         detail = _nonempty(parsed_detail) or body
         company = _parsed_company(body) or target.company or ""
-        fingerprint = _fingerprint("targeted_text", body)
+        fingerprint = _fingerprint("targeted_text", body, title, company)
         job, _ = self.repository.create_job_if_absent(
             {
                 "candidate_id": candidate_id,
@@ -211,9 +228,13 @@ def _parsed_company(body: str) -> str | None:
     return None
 
 
-def _fingerprint(kind: str, identity: str) -> str:
-    material = f"{kind}\0{identity.strip()}"
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+def _fingerprint(*parts: str) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        encoded = part.strip().encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def _nonempty(value: object) -> str | None:

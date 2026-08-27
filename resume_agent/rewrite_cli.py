@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -30,6 +32,7 @@ _WINDOWS_RESERVED = {
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _PHONE = re.compile(r"(?<![\w])(?:\+?\d[\d()\s.-]{6,}\d)(?![\w])")
+_TARGET_JD_MAX_CHARACTERS = 100_000
 
 
 def read_target_jd_file(path: Path) -> str:
@@ -38,23 +41,62 @@ def read_target_jd_file(path: Path) -> str:
         raise ValueError("target JD file path is invalid")
     if path.suffix.lower() not in _TEXT_RESUME_SUFFIXES:
         raise ValueError("target JD file must be .md or .txt")
-    if _is_reparse_point(path):
-        raise ValueError("target JD file is unsafe")
+    absolute = path.absolute()
+    _reject_reparse_components(absolute)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError):
+        descriptor = os.open(absolute, flags)
+    except OSError:
         raise ValueError("target JD file is unavailable") from None
-    if not resolved.is_file():
-        raise ValueError("target JD file is unavailable")
     try:
-        content = resolved.read_text(encoding="utf-8-sig").strip()
-    except (OSError, UnicodeError):
+        binary = os.fdopen(descriptor, "rb")
+    except Exception:
+        os.close(descriptor)
         raise ValueError("target JD file is unavailable") from None
+    try:
+        with binary:
+            opened_stat = os.fstat(binary.fileno())
+            if not stat.S_ISREG(opened_stat.st_mode):
+                raise ValueError("target JD file is unsafe")
+            _reject_reparse_components(absolute)
+            path_stat = _nonfollowing_stat(absolute)
+            if (
+                not stat.S_ISREG(path_stat.st_mode)
+                or not os.path.samestat(opened_stat, path_stat)
+            ):
+                raise ValueError("target JD file is unsafe")
+            with io.TextIOWrapper(
+                binary, encoding="utf-8-sig", errors="strict"
+            ) as reader:
+                content = reader.read(_TARGET_JD_MAX_CHARACTERS + 1)
+    except UnicodeError:
+        raise ValueError("target JD file is not valid UTF-8") from None
+    except OSError:
+        raise ValueError("target JD file is unavailable") from None
+    if len(content) > _TARGET_JD_MAX_CHARACTERS:
+        raise ValueError("target JD file exceeds 100000 characters")
+    content = content.strip()
     if not content:
         raise ValueError("target JD file is empty")
-    if len(content) > 100_000:
-        raise ValueError("target JD file exceeds 100000 characters")
     return content
+
+
+def _reject_reparse_components(path: Path) -> None:
+    absolute = path.absolute()
+    for component in [*reversed(absolute.parents), absolute]:
+        if os.path.lexists(component) and _is_reparse_point(component):
+            raise ValueError("target JD file is unsafe")
+
+
+def _nonfollowing_stat(path: Path):
+    try:
+        return os.stat(path, follow_symlinks=False)
+    except (NotImplementedError, TypeError):
+        return os.lstat(path)
 
 
 class _InputAction(argparse.Action):

@@ -3,11 +3,17 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from resume_agent.discovery_http import LocalJsonClient
 from resume_agent.discovery_schemas import DiscoveredJob
-from resume_agent.discovery_sources import SourceInteractionRequiredError
+from resume_agent.discovery_sources import (
+    BossResearchAdapter,
+    NowcoderResearchAdapter,
+    SourceInteractionRequiredError,
+)
 from resume_agent.repository import Repository
 from resume_agent.targeted_jobs import JobTarget, TargetedJobResolver
 from resume_agent.rewrite_cli import read_target_jd_file
@@ -55,6 +61,16 @@ class FakeAdapter:
         return self.result
 
 
+class ContractTransport:
+    def __init__(self, response=None):
+        self.response = response or {}
+        self.calls = []
+
+    def request_json(self, method, url, payload, timeout_seconds):
+        self.calls.append((method, url, payload, timeout_seconds))
+        return self.response
+
+
 class JobTargetModelTests(unittest.TestCase):
     def test_requires_exactly_one_primary_input_and_forbids_extras(self):
         for payload in ({}, {"job_id": "job-1", "jd_text": "body"}):
@@ -79,6 +95,111 @@ class JobTargetModelTests(unittest.TestCase):
             JobTarget(jd_url="https://www.nowcoder.com/jobs/detail/7", company="Ignore")
         target = JobTarget(jd_text="  body  ", title=" Agent ", company=" Acme ")
         self.assertEqual((target.jd_text, target.title, target.company), ("body", "Agent", "Acme"))
+
+    def test_internal_validation_rendering_hides_sensitive_inputs(self):
+        sentinels_and_payloads = [
+            (
+                ("OVERSIZED_TEXT_SENTINEL",),
+                {"jd_text": "OVERSIZED_TEXT_SENTINEL" + "x" * 100_001},
+            ),
+            (
+                ("OVERSIZED_URL_SENTINEL",),
+                {
+                    "jd_url": "https://www.nowcoder.com/OVERSIZED_URL_SENTINEL"
+                    + "x" * 8192
+                },
+            ),
+            (
+                ("MUTUAL_TEXT_SENTINEL", "MUTUAL_URL_SENTINEL"),
+                {
+                    "jd_text": "MUTUAL_TEXT_SENTINEL",
+                    "jd_url": "https://www.nowcoder.com/jobs/detail/7?secret=MUTUAL_URL_SENTINEL",
+                },
+            ),
+            (
+                ("EXTRA_URL_FIELD_SENTINEL",),
+                {
+                    "jd_url": "https://www.nowcoder.com/jobs/detail/7",
+                    "private_extra": "EXTRA_URL_FIELD_SENTINEL",
+                },
+            ),
+            (
+                ("EXTRA_TEXT_BODY_SENTINEL", "EXTRA_TEXT_FIELD_SENTINEL"),
+                {
+                    "jd_text": "EXTRA_TEXT_BODY_SENTINEL",
+                    "private_extra": "EXTRA_TEXT_FIELD_SENTINEL",
+                },
+            ),
+        ]
+        for sentinels, payload in sentinels_and_payloads:
+            with self.subTest(sentinels=sentinels):
+                with self.assertRaises(ValidationError) as raised:
+                    JobTarget(**payload)
+                for sentinel in sentinels:
+                    self.assertNotIn(sentinel, str(raised.exception))
+                    self.assertNotIn(sentinel, repr(raised.exception))
+
+    def test_external_payload_factory_returns_only_stable_safe_error(self):
+        factory = getattr(JobTarget, "from_payload", None)
+        self.assertIsNotNone(factory, "safe external payload factory is required")
+        cases = [
+            (
+                ("SAFE_FACTORY_OVERSIZED",),
+                {"jd_text": "SAFE_FACTORY_OVERSIZED" + "x" * 100_001},
+            ),
+            (
+                ("SAFE_FACTORY_URL_OVERSIZED",),
+                {
+                    "jd_url": "https://www.nowcoder.com/SAFE_FACTORY_URL_OVERSIZED"
+                    + "x" * 8192
+                },
+            ),
+            (
+                ("SAFE_FACTORY_TEXT", "SAFE_FACTORY_URL"),
+                {
+                    "jd_text": "SAFE_FACTORY_TEXT",
+                    "jd_url": "https://www.nowcoder.com/jobs/detail/7?SAFE_FACTORY_URL",
+                },
+            ),
+            (
+                ("SAFE_FACTORY_EXTRA",),
+                {
+                    "jd_url": "https://www.nowcoder.com/jobs/detail/7",
+                    "secret": "SAFE_FACTORY_EXTRA",
+                },
+            ),
+            (
+                ("SAFE_FACTORY_TEXT_BODY", "SAFE_FACTORY_TEXT_EXTRA"),
+                {
+                    "jd_text": "SAFE_FACTORY_TEXT_BODY",
+                    "secret": "SAFE_FACTORY_TEXT_EXTRA",
+                },
+            ),
+        ]
+        for sentinels, payload in cases:
+            with self.subTest(sentinels=sentinels):
+                try:
+                    factory(payload)
+                except ValueError as error:
+                    renderings = [str(error), repr(error), repr(error.args)]
+                    if hasattr(error, "errors"):
+                        renderings.append(repr(error.errors()))
+                    if hasattr(error, "json"):
+                        renderings.append(error.json())
+                    self.assertEqual(str(error), "INVALID_JOB_TARGET")
+                    self.assertIsNone(error.__cause__)
+                    self.assertIsNone(error.__context__)
+                    self.assertTrue(
+                        all(
+                            sentinel not in rendering
+                            for sentinel in sentinels
+                            for rendering in renderings
+                        )
+                    )
+                else:
+                    self.fail("invalid external payload was accepted")
+        valid = factory({"jd_text": "  Build agents  ", "title": " Agent "})
+        self.assertEqual((valid.jd_text, valid.title), ("Build agents", "Agent"))
 
 
 class TargetedJobResolverTests(unittest.TestCase):
@@ -106,11 +227,12 @@ class TargetedJobResolverTests(unittest.TestCase):
 
     def assert_failure_without_job(self, code, target, *, resolver=None, candidate_id=None):
         before = self.job_count()
-        with self.assertRaisesRegex(ValueError, code):
+        with self.assertRaisesRegex(ValueError, code) as raised:
             (resolver or self.resolver).resolve(
                 target, candidate_id or self.candidate["id"]
             )
         self.assertEqual(self.job_count(), before)
+        return raised.exception
 
     def test_existing_job_id_is_reused_only_for_exact_candidate(self):
         job = self.repository.create_job({
@@ -189,6 +311,69 @@ class TargetedJobResolverTests(unittest.TestCase):
         self.assertEqual(len(self.repository.list_jobs(self.candidate["id"])), 1)
         self.assertEqual(len(self.repository.list_jobs(self.other_candidate["id"])), 1)
 
+    def test_direct_text_identity_includes_effective_title_and_company(self):
+        body = "Build reliable agents"
+        first = self.resolver.resolve(
+            JobTarget(jd_text=body, title="Agent", company="Acme"),
+            self.candidate["id"],
+        )
+        retried = self.resolver.resolve(
+            JobTarget(jd_text=body, title="Agent", company="Acme"),
+            self.candidate["id"],
+        )
+        other_title = self.resolver.resolve(
+            JobTarget(jd_text=body, title="RAG Engineer", company="Acme"),
+            self.candidate["id"],
+        )
+        other_company = self.resolver.resolve(
+            JobTarget(jd_text=body, title="Agent", company="Other"),
+            self.candidate["id"],
+        )
+
+        self.assertEqual(first, retried)
+        self.assertEqual(len({first, other_title, other_company}), 3)
+        jobs = self.repository.get_jobs([first, other_title, other_company])
+        self.assertEqual(
+            [(job["title"], job["company"]) for job in jobs],
+            [("Agent", "Acme"), ("RAG Engineer", "Acme"), ("Agent", "Other")],
+        )
+
+    def test_concurrent_direct_text_resolution_preserves_effective_identity(self):
+        barrier = threading.Barrier(6)
+
+        class GatedRepository(Repository):
+            def create_job_if_absent(self, payload, fingerprint):
+                barrier.wait(timeout=5)
+                return super().create_job_if_absent(payload, fingerprint)
+
+        resolver = TargetedJobResolver(
+            GatedRepository(self.repository.database_path), {}
+        )
+        target = JobTarget(
+            jd_text="Build concurrent agents", title="Agent", company="Acme"
+        )
+        results = []
+        errors = []
+
+        def resolve():
+            try:
+                results.append(resolver.resolve(target, self.candidate["id"]))
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=resolve) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(set(results)), 1)
+        job = self.repository.get_job(results[0])
+        self.assertEqual((job["title"], job["company"]), ("Agent", "Acme"))
+        self.assertEqual(len(self.repository.list_jobs(self.candidate["id"])), 1)
+
     def test_nowcoder_url_routes_only_to_nowcoder_and_maps_canonical_fields(self):
         url = "https://www.nowcoder.com/jobs/detail/7?tracking=private"
         resolved = self.resolver.resolve(JobTarget(jd_url=url), self.candidate["id"])
@@ -209,9 +394,61 @@ class TargetedJobResolverTests(unittest.TestCase):
         self.assertNotIn("nowcoder.com", job["detail"])
 
     def test_default_https_port_is_allowed(self):
-        url = "https://NOWCODER.COM:443/jobs/detail/7"
+        url = "https://WWW.NOWCODER.COM:443/jobs/detail/7"
         self.resolver.resolve(JobTarget(jd_url=url), self.candidate["id"])
         self.assertEqual(self.nowcoder.calls, [(url, "targeted")])
+
+    def test_real_adapters_align_with_exact_supported_hosts(self):
+        nowcoder_transport = ContractTransport({
+            "source_job_id": "n-7",
+            "source_url": "https://www.nowcoder.com/jobs/detail/7",
+            "title": "Agent Engineer",
+            "company": "Acme",
+            "locations": [],
+            "description": "Build agents",
+            "responsibilities": "",
+            "requirements": "",
+            "salary_text": None,
+            "published_at": None,
+            "last_verified_at": "2026-08-27T00:00:00Z",
+            "detail_status": "complete",
+            "score": None,
+            "qualified": None,
+        })
+        nowcoder = NowcoderResearchAdapter(
+            LocalJsonClient("http://localhost:8002", transport=nowcoder_transport)
+        )
+        boss_transport = ContractTransport()
+        boss = BossResearchAdapter(
+            LocalJsonClient("http://localhost:8001", transport=boss_transport)
+        )
+        resolver = TargetedJobResolver(
+            self.repository, {"nowcoder": nowcoder, "boss": boss}
+        )
+
+        resolved = resolver.resolve(
+            JobTarget(jd_url="https://www.nowcoder.com/jobs/detail/7"),
+            self.candidate["id"],
+        )
+        self.assertEqual(self.repository.get_job(resolved)["external_job_id"], "n-7")
+        self.assertEqual(len(nowcoder_transport.calls), 1)
+        self.assert_failure_without_job(
+            "SOURCE_INTERACTION_REQUIRED",
+            JobTarget(jd_url="https://www.zhipin.com/job_detail/7.html"),
+            resolver=resolver,
+        )
+        self.assertEqual(boss_transport.calls, [])
+
+        for url in (
+            "https://nowcoder.com/jobs/detail/7",
+            "https://zhipin.com/job_detail/7.html",
+        ):
+            with self.subTest(url=url):
+                self.assert_failure_without_job(
+                    "UNSUPPORTED_JD_SOURCE", JobTarget(jd_url=url), resolver=resolver
+                )
+        self.assertEqual(len(nowcoder_transport.calls), 1)
+        self.assertEqual(boss_transport.calls, [])
 
     def test_boss_interaction_required_is_stable_and_does_not_create_job(self):
         self.assert_failure_without_job(
@@ -275,11 +512,12 @@ class TargetedJobResolverTests(unittest.TestCase):
         for code, adapter in cases:
             with self.subTest(code=code):
                 resolver = TargetedJobResolver(self.repository, {"nowcoder": adapter})
-                self.assert_failure_without_job(
+                error = self.assert_failure_without_job(
                     code,
                     JobTarget(jd_url="https://www.nowcoder.com/jobs/detail/7?secret=x"),
                     resolver=resolver,
                 )
+                self.assertNotIn("secret=x", str(error))
 
     def test_concurrent_url_resolution_reuses_one_job(self):
         barrier = threading.Barrier(6)
@@ -347,6 +585,99 @@ class TargetJdFileBoundaryTests(unittest.TestCase):
             self.skipTest("symlinks unavailable")
         with self.assertRaisesRegex(ValueError, "unsafe"):
             read_target_jd_file(link)
+
+    def test_rejects_symlinked_ancestor_when_supported(self):
+        real = self.root / "real"
+        real.mkdir()
+        (real / "target.md").write_text("private", encoding="utf-8")
+        linked = self.root / "linked"
+        try:
+            linked.symlink_to(real, target_is_directory=True)
+        except OSError:
+            self.skipTest("directory symlinks unavailable")
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            read_target_jd_file(linked / "target.md")
+
+    def test_checks_each_existing_component_before_and_after_open(self):
+        nested = self.root / "nested"
+        nested.mkdir()
+        target = nested / "target.md"
+        target.write_text("Agent JD", encoding="utf-8")
+        checked = []
+
+        def record(path):
+            checked.append(Path(path).absolute())
+            return False
+
+        with patch(
+            "resume_agent.rewrite_cli._is_reparse_point", side_effect=record
+        ):
+            self.assertEqual(read_target_jd_file(target), "Agent JD")
+
+        self.assertEqual(checked.count(nested.absolute()), 2)
+        self.assertEqual(checked.count(target.absolute()), 2)
+
+    def test_rejects_patched_unsafe_ancestor_before_open(self):
+        nested = self.root / "nested"
+        nested.mkdir()
+        target = nested / "target.md"
+        target.write_text("Agent JD", encoding="utf-8")
+
+        with patch(
+            "resume_agent.rewrite_cli._is_reparse_point",
+            side_effect=lambda path: Path(path).absolute() == nested.absolute(),
+        ), patch("resume_agent.rewrite_cli.os.open") as open_file:
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                read_target_jd_file(target)
+        open_file.assert_not_called()
+
+    def test_rejects_leaf_identity_change_after_open(self):
+        target = self.root / "target.md"
+        target.write_text("Agent JD", encoding="utf-8")
+        with patch("os.path.samestat", return_value=False) as same_stat:
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                read_target_jd_file(target)
+        same_stat.assert_called_once()
+
+    def test_reads_at_most_100001_characters_from_fixed_handle(self):
+        target = self.root / "target.md"
+        target.write_text("path content must not be reopened", encoding="utf-8")
+
+        class RecordingReader:
+            def __init__(self):
+                self.limit = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *unused):
+                return False
+
+            def read(self, limit):
+                self.limit = limit
+                return "bounded content"
+
+        reader = RecordingReader()
+        with patch("io.TextIOWrapper", return_value=reader):
+            self.assertEqual(read_target_jd_file(target), "bounded content")
+        self.assertEqual(reader.limit, 100_001)
+
+    def test_rejects_invalid_utf8_with_stable_error(self):
+        target = self.root / "target.md"
+        target.write_bytes(b"\xff\xfe\xff")
+        with self.assertRaisesRegex(ValueError, "UTF-8") as raised:
+            read_target_jd_file(target)
+        self.assertNotIn(str(target), str(raised.exception))
+
+    def test_character_limit_is_checked_before_trimming(self):
+        accepted = self.root / "accepted.md"
+        accepted.write_text("x" * 100_000, encoding="utf-8")
+        oversized = self.root / "oversized.md"
+        oversized.write_text("x" * 100_000 + " ", encoding="utf-8")
+
+        self.assertEqual(len(read_target_jd_file(accepted)), 100_000)
+        with self.assertRaisesRegex(ValueError, "100000"):
+            read_target_jd_file(oversized)
 
 
 if __name__ == "__main__":
