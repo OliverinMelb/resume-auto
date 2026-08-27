@@ -48,6 +48,17 @@ class TempOutputFailureRunner(FakeCodexRunner):
         raise CodexRunError("CODEX_PROCESS_ERROR", "private runner detail")
 
 
+class OfficialArtifactWritingRunner(FakeCodexRunner):
+    def run(self, task, schema_path, output_path, project_root):
+        official_dir = Path(output_path).parent
+        (official_dir / "resume.md").write_text("stale", encoding="utf-8")
+        (official_dir / "resume.pdf").write_bytes(b"%PDF-stale")
+        preview = official_dir / ".preview"
+        preview.mkdir(parents=True, exist_ok=True)
+        (preview / "page-1.png").write_bytes(b"stale-preview")
+        return super().run(task, schema_path, output_path, project_root)
+
+
 class BlockingCodexRunner(FakeCodexRunner):
     def __init__(self, result):
         super().__init__(result)
@@ -74,6 +85,20 @@ class ReadyTransitionFailingRepository(Repository):
         return super().transition_rewrite_run(
             run_id, expected_statuses, new_status, **changes
         )
+
+
+class CommitThenReadyErrorRepository(Repository):
+    def __init__(self, database_path, error):
+        super().__init__(database_path)
+        self.error = error
+
+    def transition_rewrite_run(self, run_id, expected_statuses, new_status, **changes):
+        updated = super().transition_rewrite_run(
+            run_id, expected_statuses, new_status, **changes
+        )
+        if new_status == "READY":
+            raise self.error
+        return updated
 
 
 class ReadyBeforeRecoveryClaimRepository(Repository):
@@ -923,6 +948,124 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertFalse((artifact_dir / ".preview").exists())
         self.assertEqual(list(artifact_dir.glob(".render-stage-*")), [])
         self.assertEqual(self._audit_events(run)[-1]["event_code"], "RUN_FAILED")
+
+    def test_ready_commit_then_ordinary_error_preserves_ready_delivery(self):
+        errors = (
+            ValueError("private post-commit value error"),
+            sqlite3.OperationalError("private post-commit database error"),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                repository = CommitThenReadyErrorRepository(
+                    self.repository.database_path, error
+                )
+                pipeline = ResumeRewritePipeline(
+                    repository,
+                    self.runs_root,
+                    Path("resume_agent/codex_resume_result.schema.json"),
+                    Path.cwd(),
+                    FakeCodexRunner(
+                        result_for(self.resume["id"], self.job["id"])
+                    ),
+                    FakeRenderer(),
+                )
+
+                run = pipeline.run(self.request())
+
+                self.assertEqual((run["status"], run["error_code"]), ("READY", None))
+                artifact_dir = Path(run["artifact_dir"])
+                self.assertTrue((artifact_dir / "resume.md").is_file())
+                self.assertTrue((artifact_dir / "resume.pdf").is_file())
+                self.assertTrue((artifact_dir / ".preview" / "page-1.png").is_file())
+                self.assertNotIn(
+                    "RUN_FAILED",
+                    [event["event_code"] for event in self._audit_events(run)],
+                )
+
+    def test_post_ready_audit_interrupt_preserves_delivery_then_reraises(self):
+        interrupt = KeyboardInterrupt("post-ready audit interrupted")
+        original_append_audit = RunArtifacts.append_audit
+
+        def interrupt_ready_audit(artifacts, **event):
+            if event.get("event_code") == "RUN_READY":
+                raise interrupt
+            return original_append_audit(artifacts, **event)
+
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+
+        with patch.object(RunArtifacts, "append_audit", interrupt_ready_audit):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                pipeline.run(self.request())
+
+        self.assertIs(caught.exception, interrupt)
+        run = self._latest_run()
+        self.assertEqual((run["status"], run["error_code"]), ("READY", None))
+        artifact_dir = Path(run["artifact_dir"])
+        self.assertTrue((artifact_dir / "resume.md").is_file())
+        self.assertTrue((artifact_dir / "resume.pdf").is_file())
+        self.assertTrue((artifact_dir / ".preview" / "page-1.png").is_file())
+
+    def test_publication_cleanup_failure_keeps_owned_run_running(self):
+        renderer = DerivedOfficialPathInterruptRenderer(
+            RuntimeError("private renderer failure")
+        )
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            renderer,
+        )
+        original_unlink = Path.unlink
+
+        def locked_official_pdf(path, missing_ok=False):
+            if path.name == "resume.pdf" and path.parent.name.startswith(
+                "rewrite_run_"
+            ):
+                raise OSError("official PDF is locked")
+            return original_unlink(path, missing_ok=missing_ok)
+
+        with patch.object(Path, "unlink", locked_official_pdf):
+            run = pipeline.run(self.request())
+
+        self.assertEqual((run["status"], run["error_code"]), ("RUNNING", None))
+        self.assertIsNotNone(run["owner_token"])
+        self.assertIsNotNone(run["lease_expires_at"])
+        artifact_dir = Path(run["artifact_dir"])
+        self.assertTrue((artifact_dir / "resume.pdf").exists())
+        self.assertNotIn(
+            "RUN_FAILED",
+            [event["event_code"] for event in self._audit_events(run)],
+        )
+
+    def test_needs_facts_cleanup_failure_keeps_owned_run_running(self):
+        result = in_progress_result(
+            self.resume["id"], self.job["id"], claim="实现LangGraph路由"
+        )
+        pipeline = self.make_pipeline(
+            OfficialArtifactWritingRunner(result), FakeRenderer()
+        )
+        original_unlink = Path.unlink
+
+        def locked_official_pdf(path, missing_ok=False):
+            if path.name == "resume.pdf" and path.parent.name.startswith(
+                "rewrite_run_"
+            ):
+                raise OSError("official PDF is locked")
+            return original_unlink(path, missing_ok=missing_ok)
+
+        with patch.object(Path, "unlink", locked_official_pdf):
+            try:
+                run = pipeline.run(self.request())
+            except OSError as error:
+                self.fail(f"cleanup failure escaped pipeline: {error}")
+
+        self.assertEqual((run["status"], run["error_code"]), ("RUNNING", None))
+        self.assertTrue((Path(run["artifact_dir"]) / "resume.pdf").exists())
+        self.assertNotIn(
+            "FACTS_REQUIRED",
+            [event["event_code"] for event in self._audit_events(run)],
+        )
 
     def test_renderer_base_exception_cleans_derived_official_paths_then_reraises(self):
         for interrupt in (KeyboardInterrupt("stop"), SystemExit("stop")):

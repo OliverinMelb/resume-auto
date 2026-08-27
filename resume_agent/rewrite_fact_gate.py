@@ -175,12 +175,24 @@ EXPLICIT_COMPLETED_ASSERTION = re.compile(
 COMPLETED_ASSERTION = re.compile(
     r"(?:成功|正式).{0,4}(?:发布|上线|投产|交付|投入使用)"
     r"|(?:稳定运行|投入生产|服务真实用户|服务生产用户)"
-    r"|(?:开发|研发|构建|建设).{0,8}(?:完成|完工|实现|上线|落地|交付)"
+    r"|(?:开发|研发|构建|建设).{0,8}"
+    r"(?:完成|完工|完毕|实现|上线|落地|交付)"
+    r"|实现.{0,4}(?:完成|完毕)"
     r"|(?:主导|负责|为客户).{0,16}(?:上线|落地|交付|投产|发布)",
     re.I,
 )
 BARE_COMPLETION_TERMS = ("上线", "落地", "交付", "生产")
 FUTURE_TERMS = ("计划", "待", "目标", "拟", "预计", "准备", "将", "验收")
+FUTURE_SCOPE_BOUNDARIES = (
+    "然而",
+    "不过",
+    "但是",
+    "当前",
+    "目前",
+    "现已",
+    "已经",
+    "但",
+)
 TEST_CONTEXT_TERMS = ("回归", "测试", "用例", "样本", "验收")
 HTML_MARKUP = re.compile(r"<!--[\s\S]*?-->|<[^>\n]*>")
 MIN_ANSWER_LENGTH = 4
@@ -986,7 +998,16 @@ def _is_future_or_artifact_reference(clause: str, term: str, start: int) -> bool
 
 def _has_future_target_before(clause: str, event_start: int) -> bool:
     prefix = clause[:event_start]
-    return any(marker in prefix for marker in FUTURE_TERMS)
+    boundary_end = max(
+        (
+            position + len(boundary)
+            for boundary in FUTURE_SCOPE_BOUNDARIES
+            if (position := prefix.rfind(boundary)) >= 0
+        ),
+        default=0,
+    )
+    local_prefix = prefix[boundary_end:]
+    return any(marker in local_prefix for marker in FUTURE_TERMS)
 
 
 def _has_unverified_in_progress_result(claim: str) -> bool:

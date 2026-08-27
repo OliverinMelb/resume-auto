@@ -277,8 +277,13 @@ class ResumeRewritePipeline:
                 result, materials["resumes"], materials["jobs"], run["fact_answers"]
             )
             if gate.blockers:
-                artifacts.remove_if_exists("resume.md")
-                artifacts.remove_if_exists("resume.pdf")
+                current = self._authoritative_run(run["id"])
+                if not self._is_current_owner_running(current):
+                    return self._decorate_run(current or run)
+                if not self._remove_publication_artifacts(artifacts):
+                    return self._decorate_run(
+                        self._authoritative_run(run["id"]) or current
+                    )
                 questions = [item.model_dump() for item in gate.blockers]
                 artifacts.append_audit(
                     run_id=run["id"], status="NEEDS_FACTS", event_code="FACTS_REQUIRED",
@@ -324,30 +329,22 @@ class ResumeRewritePipeline:
                 gate_outcome="PASS",
                 claim_count=len(result.claim_audit),
             )
-            try:
-                updated = self.repository.transition_rewrite_run(
-                    run["id"], {"RUNNING"}, "READY", blocking_questions=[],
-                    expected_owner_token=self._owner_token,
-                )
-            except ValueError:
-                current = self.repository.get_rewrite_run(run["id"])
-                if (
-                    current["status"] != "RUNNING"
-                    or current.get("owner_token") != self._owner_token
-                ):
-                    self._best_effort_remove_publication_artifacts(artifacts)
-                    return self._decorate_run(current)
-                raise
+            updated = self.repository.transition_rewrite_run(
+                run["id"], {"RUNNING"}, "READY", blocking_questions=[],
+                expected_owner_token=self._owner_token,
+            )
             artifacts.append_audit(
                 run_id=run["id"], status="READY", event_code="RUN_READY",
                 source_ids=[item["id"] for item in materials["resumes"] + materials["jobs"]],
             )
             return self._decorate_run(updated)
         except (KeyboardInterrupt, SystemExit):
-            self._best_effort_remove_publication_artifacts(artifacts)
+            current = self._authoritative_run(run["id"])
+            if self._is_current_owner_running(current):
+                self._remove_publication_artifacts(artifacts)
             raise
         except Exception as error:
-            return self._fail_publication_best_effort(run, artifacts, error)
+            return self._settle_publication_failure(run, artifacts, error)
 
     def _fail_validation(self, run: dict, artifacts: RunArtifacts) -> None:
         self._fail(
@@ -413,42 +410,59 @@ class ResumeRewritePipeline:
         shutil.rmtree(expected)
 
     def _remove_deployable_artifacts(self, artifacts: RunArtifacts) -> None:
-        artifacts.remove_if_exists("resume.md")
-        artifacts.remove_if_exists("resume.pdf")
-        preview_dir = artifacts.directory / ".preview"
-        if preview_dir.is_symlink():
-            preview_dir.unlink(missing_ok=True)
-        elif preview_dir.is_dir():
-            resolved_preview = preview_dir.resolve()
-            if resolved_preview.parent != artifacts.directory.resolve():
-                raise ValueError("preview directory escapes run artifacts")
-            shutil.rmtree(resolved_preview)
+        if not self._remove_publication_artifacts(artifacts):
+            raise OSError("deployable artifact cleanup is incomplete")
 
-    def _best_effort_remove_publication_artifacts(
-        self, artifacts: RunArtifacts
-    ) -> None:
-        targets = [
-            artifacts.directory / "resume.md",
-            artifacts.directory / "resume.pdf",
-            artifacts.directory / ".preview",
-            *artifacts.directory.glob(".render-stage-*"),
-        ]
+    def _remove_publication_artifacts(self, artifacts: RunArtifacts) -> bool:
+        run_directory = artifacts.directory.resolve()
+        try:
+            targets = [
+                artifacts.directory / "resume.md",
+                artifacts.directory / "resume.pdf",
+                artifacts.directory / ".preview",
+                *artifacts.directory.glob(".render-stage-*"),
+            ]
+        except OSError:
+            return False
         for target in targets:
             try:
                 if target.is_symlink():
                     target.unlink(missing_ok=True)
                 elif target.is_dir():
-                    if target.resolve().parent == artifacts.directory.resolve():
-                        shutil.rmtree(target)
+                    if target.resolve().parent != run_directory:
+                        return False
+                    shutil.rmtree(target)
                 elif target.exists():
                     target.unlink()
             except Exception:
                 continue
+        try:
+            official_targets = (
+                artifacts.directory / "resume.md",
+                artifacts.directory / "resume.pdf",
+                artifacts.directory / ".preview",
+            )
+            return not any(
+                target.exists() or target.is_symlink()
+                for target in official_targets
+            ) and not any(artifacts.directory.glob(".render-stage-*"))
+        except OSError:
+            return False
 
-    def _fail_publication_best_effort(
+    def _settle_publication_failure(
         self, run: dict, artifacts: RunArtifacts, error: Exception
     ) -> dict:
-        self._best_effort_remove_publication_artifacts(artifacts)
+        current = self._authoritative_run(run["id"])
+        if current is None:
+            return self._decorate_run(run)
+        if current["status"] == "READY":
+            return self._decorate_run(current)
+        if not self._is_current_owner_running(current):
+            return self._decorate_run(current)
+        if not self._remove_publication_artifacts(artifacts):
+            return self._decorate_run(
+                self._authoritative_run(run["id"]) or current
+            )
         code = _publication_error_code(error)
         try:
             artifacts.append_audit(
@@ -461,22 +475,31 @@ class ResumeRewritePipeline:
         except Exception:
             pass
         try:
-            current = self.repository.get_rewrite_run(run["id"])
-            if current["status"] in {"QUEUED", "RUNNING", "READY"}:
-                self.repository.transition_rewrite_run(
-                    run["id"],
-                    {current["status"]},
-                    "FAILED",
-                    error_code=code,
-                    expected_owner_token=(
-                        self._owner_token
-                        if current["status"] == "RUNNING"
-                        else None
-                    ),
-                )
+            updated = self.repository.transition_rewrite_run(
+                run["id"],
+                {"RUNNING"},
+                "FAILED",
+                error_code=code,
+                expected_owner_token=self._owner_token,
+            )
         except Exception:
-            pass
-        return self._decorate_run(self.repository.get_rewrite_run(run["id"]))
+            return self._decorate_run(
+                self._authoritative_run(run["id"]) or current
+            )
+        return self._decorate_run(updated)
+
+    def _authoritative_run(self, run_id: str) -> dict | None:
+        try:
+            return self.repository.get_rewrite_run(run_id)
+        except Exception:
+            return None
+
+    def _is_current_owner_running(self, run: dict | None) -> bool:
+        return bool(
+            run
+            and run["status"] == "RUNNING"
+            and run.get("owner_token") == self._owner_token
+        )
 
     def _render_and_publish(
         self, artifacts: RunArtifacts, validated_markdown: str
