@@ -167,6 +167,9 @@ class FactGateTests(unittest.TestCase):
     def test_in_progress_claim_language_table(self):
         cases = [
             ("在建：正在实现LangGraph多Agent路由，计划以回归集验收", True),
+            ("在建：正在实现路由，计划以上线前回归集验收", True),
+            ("在建：正在实现路由，计划验收交付物完整性", True),
+            ("在建：正在实现路由，计划以100条固定回归集验收", True),
             ("主导LangGraph多Agent平台上线", False),
             ("为客户上线RAG系统", False),
             ("准确率提升到92%", False),
@@ -175,6 +178,18 @@ class FactGateTests(unittest.TestCase):
             ("面向甲\u200b方生产用户部署", False),
             ("在建：正在为[客](https://example.test)户实现RAG，计划验收", False),
             ("在建：项目已完\ufe0f成，待验收", False),
+            ("在建：已经完成核心模块，待验收", False),
+            ("在建：核心模块已完工，待验收", False),
+            ("在建：成功发布核心模块，待验收", False),
+            ("在建：核心模块已投入使用，待验收", False),
+            ("在建：系统稳定运行，待验收", False),
+            ("在建：系统正式投产，待验收", False),
+            ("在建：服务真实用户，待验收", False),
+            ("在建：转化率显著提升，待验收", False),
+            ("在建：可用性达到四个九，待验收", False),
+            ("在建：日活增长一倍，待验收", False),
+            ("在建：已&#23436;&#25104;核心模块，待验收", False),
+            ("在建：已<span></span>完成核心模块，待验收", False),
         ]
         for claim, allowed in cases:
             with self.subTest(claim=claim):
@@ -225,6 +240,81 @@ class FactGateTests(unittest.TestCase):
         )
 
         self.assertInProgressBlocked(gate)
+
+    def test_rendered_claim_identity_blocks_unicode_and_markdown_collisions(self):
+        visible = "在建：正在实现LangGraph多Agent路由，计划验收"
+        cases = [
+            (
+                "在建：正\u200b在实现LangGraph多Agent路由，计划验收",
+                visible,
+            ),
+            (
+                visible,
+                f"[{visible}](https://example.test/pending)",
+            ),
+            (
+                "在建：正在实现LangGraph多&#65;gent路由，计划验收",
+                visible,
+            ),
+        ]
+        for pending_claim, outside_claim in cases:
+            with self.subTest(pending_claim=pending_claim, outside_claim=outside_claim):
+                markdown = (
+                    f"## 在建项目（待验收）\n- {pending_claim}\n"
+                    f"## 项目经历\n- {outside_claim}"
+                )
+                result = in_progress_result(pending_claim, markdown=markdown)
+                verified_audit = result.claim_audit[0].model_copy(
+                    update={
+                        "claim": outside_claim,
+                        "claim_status": "verified",
+                        "gap_id": None,
+                        "source_resume_ids": ["source_resume_1"],
+                        "source_quotes": [outside_claim],
+                        "fact_status": "source_verified",
+                    }
+                )
+                result = result.model_copy(
+                    update={"claim_audit": [result.claim_audit[0], verified_audit]}
+                )
+                resumes = [{"id": "source_resume_1", "content": outside_claim}]
+
+                gate = validate_rewrite_facts(result, resumes, self.jobs, [])
+
+                self.assertInProgressBlocked(gate)
+
+    def test_rendered_heading_identity_rejects_wrapped_duplicate_section(self):
+        claim = "在建：正在实现LangGraph多Agent路由，计划验收"
+        headings = [
+            "[在建项目（待验收）](https://example.test/section)",
+            "在建项目（待&#39564;收）",
+            "在建项\u200b目（待验收）",
+        ]
+        for duplicate_heading in headings:
+            with self.subTest(duplicate_heading=duplicate_heading):
+                markdown = (
+                    f"## 在建项目（待验收）\n- {claim}\n"
+                    f"## {duplicate_heading}"
+                )
+                result = in_progress_result(claim, markdown=markdown)
+                verified_audit = result.claim_audit[0].model_copy(
+                    update={
+                        "claim": duplicate_heading,
+                        "claim_status": "verified",
+                        "gap_id": None,
+                        "source_resume_ids": ["source_resume_1"],
+                        "source_quotes": [duplicate_heading],
+                        "fact_status": "source_verified",
+                    }
+                )
+                result = result.model_copy(
+                    update={"claim_audit": [result.claim_audit[0], verified_audit]}
+                )
+                resumes = [{"id": "source_resume_1", "content": duplicate_heading}]
+
+                gate = validate_rewrite_facts(result, resumes, self.jobs, [])
+
+                self.assertInProgressBlocked(gate)
 
     def test_in_progress_section_rejects_non_in_progress_audit(self):
         claim = "在建：正在实现LangGraph多Agent路由，计划以回归集验收"

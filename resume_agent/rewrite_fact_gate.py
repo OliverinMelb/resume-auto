@@ -4,6 +4,7 @@ import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from html import unescape
 from typing import Any
 
 from resume_agent.rewrite_schemas import CodexRewriteResult, MissingInformation
@@ -134,6 +135,8 @@ IN_PROGRESS_HEADING = "在建项目（待验收）"
 IN_PROGRESS_MARKERS = ("在建", "正在", "进行中", "开发中", "实现中", "计划验收", "待验收")
 COMPLETED_MARKERS = (
     "已完成",
+    "已经完成",
+    "已完工",
     "完成了",
     "主导完成",
     "已上线",
@@ -143,16 +146,36 @@ COMPLETED_MARKERS = (
     "已交付",
     "交付",
     "投入生产",
+    "投入使用",
+    "成功发布",
+    "稳定运行",
+    "正式投产",
     "生产",
 )
-FORBIDDEN_EXTERNAL_ACTORS = ("客户", "甲方", "生产用户")
+FORBIDDEN_EXTERNAL_ACTORS = ("客户", "甲方", "生产用户", "真实用户")
 BUSINESS_RESULT = re.compile(
-    r"(?:准确率|召回率|成功率|效率|性能|吞吐|qps|成本|耗时|时延|用户数)"
-    r".{0,8}(?:提升|提高|降低|减少|节省|达到|达成|增长)"
-    r"|(?:提升|提高|降低|减少|节省|增长).{0,8}"
-    r"(?:准确率|召回率|成功率|效率|性能|吞吐|qps|成本|耗时|时延|用户数)",
+    r"(?:准确率|召回率|成功率|转化率|可用性|效率|性能|吞吐|qps|成本|"
+    r"耗时|时延|用户数|日活|月活|收入|业务量).{0,12}"
+    r"(?:显著|明显|大幅)?(?:提升|提高|降低|减少|节省|达到|达成|增长)"
+    r"|(?:显著|明显|大幅)?(?:提升|提高|降低|减少|节省|增长).{0,12}"
+    r"(?:准确率|召回率|成功率|转化率|可用性|效率|性能|吞吐|qps|成本|"
+    r"耗时|时延|用户数|日活|月活|收入|业务量)"
+    r"|(?:达到四个九|增长一倍)",
     re.I,
 )
+COMPLETED_ASSERTION = re.compile(
+    r"(?:已|已经|现已).{0,6}(?:完成|完工|上线|落地|交付|投入使用|投产|发布|"
+    r"通过|达标)"
+    r"|(?:成功|正式).{0,4}(?:发布|上线|投产|交付|投入使用)"
+    r"|(?:稳定运行|投入生产|服务真实用户|服务生产用户)"
+    r"|(?:主导|负责|为客户).{0,16}(?:上线|落地|交付|投产|发布)",
+    re.I,
+)
+BARE_COMPLETION_TERMS = ("上线", "落地", "交付", "生产")
+FUTURE_TERMS = ("计划", "待", "目标", "拟", "预计", "准备", "将", "验收")
+TEST_CONTEXT_TERMS = ("回归", "测试", "用例", "样本", "验收")
+HTML_MARKUP = re.compile(r"<!--[\s\S]*?-->|<[^>\n]*>")
+MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^\n)]*\)")
 MIN_ANSWER_LENGTH = 4
 MIN_SOURCE_NOTE_LENGTH = 6
 HEADING = re.compile(r"^\s{0,3}#{1,6}(?!#)")
@@ -340,14 +363,7 @@ def validate_in_progress_claims(
                     "在建项目 claim 缺少在建、正在、计划验收或待验收标记",
                 )
             )
-        forbidden = next(
-            (
-                marker
-                for marker in (*COMPLETED_MARKERS, *FORBIDDEN_EXTERNAL_ACTORS)
-                if _policy_key(marker) in policy_text
-            ),
-            None,
-        )
+        forbidden = _forbidden_in_progress_state(claim)
         if forbidden is not None:
             blockers.append(
                 _in_progress_blocker(
@@ -355,7 +371,7 @@ def validate_in_progress_claims(
                     f"在建项目不得声称完成、上线、交付、生产、客户或甲方事实：{forbidden}",
                 )
             )
-        if BUSINESS_RESULT.search(policy_text) or extract_business_metrics(claim):
+        if _has_unverified_in_progress_result(claim):
             blockers.append(
                 _in_progress_blocker(
                     f"请移除“{claim}”中的未验收业务结果或指标",
@@ -713,12 +729,11 @@ def _basis_has_evidence(
 
 
 def _display_claim(raw_line: str) -> str:
-    value = unicodedata.normalize("NFKC", raw_line).strip()
+    value = raw_line.strip()
     value = HEADING_PREFIX.sub("", value)
     value = LIST_PREFIX.sub("", value)
     value = CHECKBOX_PREFIX.sub("", value)
-    value = re.sub(r"[*_`]+", "", value)
-    return re.sub(r"\s+", " ", value).strip()
+    return _rendered_visible_text(value)
 
 
 def _normalize_claim(value: str) -> str:
@@ -787,27 +802,118 @@ def _is_explicit_in_progress_heading(raw_line: str, claim: str) -> bool:
 
 
 def _heading_key(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value)
-    return "".join(
-        character
-        for character in normalized
-        if not character.isspace()
-        and unicodedata.category(character) != "Cf"
-        and not unicodedata.category(character).startswith("M")
-    ).lower()
+    return re.sub(r"\s+", "", _normalize_claim(value))
 
 
 def _policy_key(value: str) -> str:
-    visible = re.sub(r"!?\[([^\]]*)\]\([^\n)]*\)", r"\1", value)
-    normalized = unicodedata.normalize("NFKC", visible)
+    normalized = _rendered_visible_text(value)
     return "".join(
         character
         for character in normalized
         if not character.isspace()
-        and unicodedata.category(character) != "Cf"
-        and not unicodedata.category(character).startswith("M")
         and not unicodedata.category(character).startswith("P")
     ).lower()
+
+
+def _rendered_visible_text(value: str) -> str:
+    visible = value
+    for _ in range(4):
+        decoded = unescape(visible)
+        if decoded == visible:
+            break
+        visible = decoded
+    visible = HTML_MARKUP.sub("", visible)
+    visible = MARKDOWN_LINK.sub(lambda match: match.group(1), visible)
+    visible = unicodedata.normalize("NFKC", visible)
+    visible = "".join(
+        character for character in visible if not _is_default_ignorable(character)
+    )
+    visible = re.sub(r"[*_`]+", "", visible)
+    return re.sub(r"\s+", " ", visible).strip()
+
+
+def _is_default_ignorable(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        unicodedata.category(character) == "Cf"
+        or codepoint == 0x034F
+        or 0x180B <= codepoint <= 0x180F
+        or 0xFE00 <= codepoint <= 0xFE0F
+        or 0xFFF0 <= codepoint <= 0xFFF8
+        or 0x1BCA0 <= codepoint <= 0x1BCA3
+        or 0x1D173 <= codepoint <= 0x1D17A
+        or 0xE0000 <= codepoint <= 0xE0FFF
+    )
+
+
+def _forbidden_in_progress_state(claim: str) -> str | None:
+    for clause in _policy_clauses(claim):
+        external = next(
+            (
+                actor
+                for actor in FORBIDDEN_EXTERNAL_ACTORS
+                if _policy_key(actor) in clause
+            ),
+            None,
+        )
+        if external is not None:
+            return external
+        completed = COMPLETED_ASSERTION.search(clause)
+        if completed:
+            return completed.group(0)
+        for term in BARE_COMPLETION_TERMS:
+            start = clause.find(term)
+            while start >= 0:
+                if not _is_future_or_artifact_reference(clause, term, start):
+                    return term
+                start = clause.find(term, start + len(term))
+    return None
+
+
+def _is_future_or_artifact_reference(clause: str, term: str, start: int) -> bool:
+    prefix = clause[max(0, start - 12):start]
+    suffix = clause[start + len(term):start + len(term) + 4]
+    if term == "上线" and suffix.startswith("前"):
+        return True
+    if term == "交付" and suffix.startswith("物"):
+        return True
+    return any(marker in prefix for marker in FUTURE_TERMS)
+
+
+def _has_unverified_in_progress_result(claim: str) -> bool:
+    for clause in _visible_clauses(claim):
+        policy_clause = _policy_key(clause)
+        if BUSINESS_RESULT.search(policy_clause):
+            return True
+        metrics = extract_business_metrics(clause)
+        if metrics and not _is_future_test_scale(policy_clause, metrics):
+            return True
+    return False
+
+
+def _is_future_test_scale(
+    policy_clause: str, metrics: Sequence[tuple[str, str]]
+) -> bool:
+    if not any(term in policy_clause for term in FUTURE_TERMS):
+        return False
+    if not any(term in policy_clause for term in TEST_CONTEXT_TERMS):
+        return False
+    return all(
+        bool(re.search(r"(?:条|项|个|轮|次|例|组)", metric))
+        for _, metric in metrics
+    )
+
+
+def _visible_clauses(value: str) -> list[str]:
+    return [
+        clause
+        for clause in re.split(r"[，,。；;！？\n]", _rendered_visible_text(value))
+        if clause.strip()
+    ]
+
+
+def _policy_clauses(value: str) -> list[str]:
+    return [_policy_key(clause) for clause in _visible_clauses(value)]
 
 
 def _in_progress_blocker(question: str, reason: str) -> MissingInformation:

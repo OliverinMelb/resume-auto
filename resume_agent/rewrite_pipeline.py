@@ -6,6 +6,7 @@ import hashlib
 import secrets
 import sqlite3
 import shutil
+import tempfile
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -294,10 +295,8 @@ class ResumeRewritePipeline:
                 )
                 return self._decorate_run(updated)
             validated_markdown = gate.rewritten_resume_markdown
-            artifacts.write_text("resume.md", validated_markdown)
-            render_result = self.renderer.render(
-                validated_markdown, artifacts.path("resume.pdf"),
-                artifacts.directory / ".preview",
+            render_result = self._render_and_publish(
+                artifacts, validated_markdown
             )
             artifacts.append_audit(
                 run_id=run["id"], status="RUNNING", event_code="RENDER_COMPLETED",
@@ -402,6 +401,100 @@ class ResumeRewritePipeline:
             if resolved_preview.parent != artifacts.directory.resolve():
                 raise ValueError("preview directory escapes run artifacts")
             shutil.rmtree(resolved_preview)
+
+    def _render_and_publish(
+        self, artifacts: RunArtifacts, validated_markdown: str
+    ):
+        self._remove_deployable_artifacts(artifacts)
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix=".render-stage-", dir=artifacts.directory
+            ) as raw_stage:
+                stage = Path(raw_stage)
+                staged_markdown = stage / "resume.md"
+                staged_pdf = stage / "resume.pdf"
+                staged_preview = stage / "preview"
+                staged_markdown.write_text(
+                    validated_markdown, encoding="utf-8", newline="\n"
+                )
+                try:
+                    render_result = self.renderer.render(
+                        validated_markdown, staged_pdf, staged_preview
+                    )
+                except RenderError:
+                    raise
+                except Exception:
+                    raise RenderError(
+                        "RENDER_ERROR", "Unable to render the resume safely."
+                    ) from None
+                self._publish_staged_deployables(artifacts, stage)
+                return render_result
+        except RenderError:
+            raise
+        except Exception:
+            raise RenderError(
+                "RENDER_ERROR", "Unable to publish the rendered resume safely."
+            ) from None
+
+    def _publish_staged_deployables(
+        self, artifacts: RunArtifacts, stage: Path
+    ) -> None:
+        expected_parent = artifacts.directory.resolve()
+        resolved_stage = stage.resolve()
+        if (
+            resolved_stage.parent != expected_parent
+            or not stage.name.startswith(".render-stage-")
+            or stage.is_symlink()
+        ):
+            raise RenderError("RENDER_ERROR", "Render staging path is invalid.")
+
+        staged_markdown = stage / "resume.md"
+        staged_pdf = stage / "resume.pdf"
+        staged_preview = stage / "preview"
+        if not self._is_regular_staged_file(staged_markdown, resolved_stage):
+            raise RenderError("RENDER_ERROR", "Rendered Markdown staging is invalid.")
+        if not self._is_regular_staged_file(staged_pdf, resolved_stage):
+            raise RenderError("RENDER_ERROR", "Rendered PDF staging is invalid.")
+        if staged_preview.exists() and not self._is_safe_preview_stage(
+            staged_preview, resolved_stage
+        ):
+            raise RenderError("RENDER_ERROR", "Rendered preview staging is invalid.")
+
+        official_markdown = artifacts.path("resume.md")
+        official_pdf = artifacts.path("resume.pdf")
+        official_preview = artifacts.directory / ".preview"
+        if official_markdown.exists() or official_pdf.exists() or official_preview.exists():
+            raise RenderError("RENDER_ERROR", "Deployable artifacts already exist.")
+        try:
+            staged_markdown.replace(official_markdown)
+            staged_pdf.replace(official_pdf)
+            if staged_preview.exists():
+                staged_preview.replace(official_preview)
+        except OSError:
+            self._remove_deployable_artifacts(artifacts)
+            raise RenderError(
+                "RENDER_ERROR", "Unable to publish deployable artifacts safely."
+            ) from None
+
+    @staticmethod
+    def _is_regular_staged_file(path: Path, stage: Path) -> bool:
+        return (
+            path.is_file()
+            and not path.is_symlink()
+            and path.resolve().parent == stage
+        )
+
+    @staticmethod
+    def _is_safe_preview_stage(path: Path, stage: Path) -> bool:
+        if path.is_symlink() or not path.is_dir() or path.resolve().parent != stage:
+            return False
+        children = list(path.iterdir())
+        return all(
+            child.is_file()
+            and not child.is_symlink()
+            and child.resolve().parent == path.resolve()
+            for child in children
+        )
 
     def _new_lease_expiration(self) -> str:
         return (

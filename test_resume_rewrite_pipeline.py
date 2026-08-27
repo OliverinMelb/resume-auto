@@ -94,6 +94,8 @@ class FakeRenderer:
         self.write_before_error = write_before_error
         self.call_count = 0
         self.markdown = None
+        self.pdf_path = None
+        self.preview_dir = None
 
     def available(self):
         return True
@@ -101,6 +103,8 @@ class FakeRenderer:
     def render(self, markdown, pdf_path, preview_dir):
         self.call_count += 1
         self.markdown = markdown
+        self.pdf_path = Path(pdf_path)
+        self.preview_dir = Path(preview_dir)
         if self.write_before_error:
             pdf_path.write_bytes(b"%PDF-partial")
             preview_dir.mkdir(parents=True, exist_ok=True)
@@ -807,6 +811,49 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual(run["status"], "FAILED")
         self.assertFalse((Path(run["artifact_dir"]) / "resume.pdf").exists())
         self.assertFalse((Path(run["artifact_dir"]) / ".preview").exists())
+
+    def test_renderer_runtime_error_fails_without_staged_or_official_artifacts(self):
+        renderer = FakeRenderer(
+            RuntimeError("private renderer bug"), write_before_error=True
+        )
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), renderer
+        )
+
+        try:
+            run = pipeline.run(self.request())
+        except RuntimeError as error:
+            self.fail(f"ordinary renderer exception escaped pipeline: {error}")
+
+        self.assertEqual((run["status"], run["error_code"]), ("FAILED", "RENDER_ERROR"))
+        self._assert_no_deployable_artifacts(run)
+        artifact_dir = Path(run["artifact_dir"])
+        self.assertFalse((artifact_dir / ".preview").exists())
+        self.assertEqual(list(artifact_dir.glob(".render-stage-*")), [])
+        self.assertEqual(self._audit_events(run)[-1]["event_code"], "RUN_FAILED")
+
+    def test_renderer_receives_isolated_staging_targets_before_atomic_publish(self):
+        renderer = FakeRenderer()
+        result = result_for(self.resume["id"], self.job["id"])
+
+        run = self.make_pipeline(FakeCodexRunner(result), renderer).run(self.request())
+
+        self.assertEqual(run["status"], "READY")
+        artifact_dir = Path(run["artifact_dir"])
+        self.assertNotEqual(renderer.pdf_path, artifact_dir / "resume.pdf")
+        self.assertNotEqual(renderer.preview_dir, artifact_dir / ".preview")
+        self.assertEqual(renderer.pdf_path.name, "resume.pdf")
+        self.assertEqual(renderer.preview_dir.name, "preview")
+        self.assertEqual(renderer.pdf_path.parent, renderer.preview_dir.parent)
+        self.assertEqual(renderer.pdf_path.parent.parent, artifact_dir)
+        self.assertTrue(renderer.pdf_path.parent.name.startswith(".render-stage-"))
+        self.assertFalse(renderer.pdf_path.parent.exists())
+        self.assertEqual(list(artifact_dir.glob(".render-stage-*")), [])
+        self.assertEqual((artifact_dir / "resume.pdf").read_bytes(), b"%PDF-fake")
+        self.assertEqual(
+            (artifact_dir / "resume.md").read_text("utf-8"),
+            result.rewritten_resume_markdown,
+        )
 
     def test_invalid_runner_result_fails_without_publishing_result_json(self):
         run = self.make_pipeline(FakeCodexRunner({"not": "a result"}), FakeRenderer()).run(self.request())
