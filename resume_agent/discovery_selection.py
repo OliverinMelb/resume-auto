@@ -26,15 +26,6 @@ class RejectedJob:
     reason: RejectionReason
 
 
-_AI_TITLE_PATTERNS = (
-    re.compile(r"(?<![a-z0-9])ai(?![a-z0-9])", re.IGNORECASE),
-    re.compile(r"(?<![a-z0-9])agent(?![a-z0-9])", re.IGNORECASE),
-    re.compile(r"(?<![a-z0-9])rag(?![a-z0-9])", re.IGNORECASE),
-    re.compile(r"(?<![a-z0-9])llm(?![a-z0-9])", re.IGNORECASE),
-    re.compile(r"(?<![a-z0-9])workflow(?![a-z0-9])", re.IGNORECASE),
-    re.compile(r"artificial\s+intelligence", re.IGNORECASE),
-    re.compile(r"智能体|大模型|人工智能|机器学习|深度学习|自然语言|工作流", re.IGNORECASE),
-)
 _EXPLICIT_DETAIL_PATTERNS = (
     re.compile(r"(?<![a-z0-9])agent(?![a-z0-9])", re.IGNORECASE),
     re.compile(r"(?<![a-z0-9])rag(?![a-z0-9])", re.IGNORECASE),
@@ -58,11 +49,11 @@ def filter_complete_agent_jobs(
             rejected.append(RejectedJob(item, "partial_detail"))
             continue
         family = known_job_family(item.title)
-        if family is not None and family != "ai_engineering":
-            rejected.append(RejectedJob(item, "cross_family"))
-            continue
-        if _matches(_AI_TITLE_PATTERNS, item.title):
+        if family == "ai_engineering":
             eligible.append(item)
+            continue
+        if family is not None:
+            rejected.append(RejectedJob(item, "cross_family"))
             continue
         if _matches(_EXPLICIT_DETAIL_PATTERNS, item.detail):
             eligible.append(item)

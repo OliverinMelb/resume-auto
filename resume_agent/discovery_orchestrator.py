@@ -287,6 +287,7 @@ class JobDiscoveryOrchestrator:
         run = self.repository.get_discovery_run(run_id)
         artifacts = self._artifacts_for(run)
         if run["status"] == "IMPORTED":
+            self._repair_imported_report_best_effort(run, artifacts)
             return run
         if run["status"] not in {"READY_FOR_IMPORT", "PARTIAL"}:
             raise ValueError("discovery run is not importable")
@@ -298,10 +299,18 @@ class JobDiscoveryOrchestrator:
             minimum=_MINIMUM_JOB_COUNT,
             maximum=_MAXIMUM_JOB_COUNT,
         )
+        planned_outcome = (
+            "FAILED" if len(selected) < _MINIMUM_JOB_COUNT else "IMPORTED"
+        )
         artifacts.write_text(
             "discovery-report.md",
             _redacted_discovery_report(
-                run, saved_jobs, unique_jobs, selected, rejected
+                source_status_before_import=run["status"],
+                saved_jobs=saved_jobs,
+                unique_jobs=unique_jobs,
+                selected=selected,
+                rejected=rejected,
+                planned_outcome=planned_outcome,
             ),
         )
         if len(selected) < _MINIMUM_JOB_COUNT:
@@ -320,6 +329,16 @@ class JobDiscoveryOrchestrator:
                     and failed.get("error_code") == _INSUFFICIENT_AGENT_JOBS
                 ):
                     raise ValueError("discovery import is busy") from None
+            self._write_final_report_best_effort(
+                artifacts,
+                source_status_before_import=run["status"],
+                saved_jobs=saved_jobs,
+                unique_jobs=unique_jobs,
+                selected=selected,
+                rejected=rejected,
+                persisted_outcome=failed["status"],
+                error_code=failed.get("error_code"),
+            )
             self._append_audit_best_effort(
                 artifacts,
                 run_id=run_id,
@@ -349,6 +368,16 @@ class JobDiscoveryOrchestrator:
         except ValueError:
             persisted = self.repository.get_discovery_run(run_id)
             if persisted["status"] == "IMPORTED":
+                self._write_final_report_best_effort(
+                    artifacts,
+                    source_status_before_import=run["status"],
+                    saved_jobs=saved_jobs,
+                    unique_jobs=unique_jobs,
+                    selected=selected,
+                    rejected=rejected,
+                    persisted_outcome=persisted["status"],
+                    error_code=persisted.get("error_code"),
+                )
                 return persisted
             if (
                 persisted["status"] == "FAILED"
@@ -357,6 +386,16 @@ class JobDiscoveryOrchestrator:
                 return persisted
             raise ValueError("discovery import is busy") from None
 
+        self._write_final_report_best_effort(
+            artifacts,
+            source_status_before_import=run["status"],
+            saved_jobs=saved_jobs,
+            unique_jobs=unique_jobs,
+            selected=selected,
+            rejected=rejected,
+            persisted_outcome=imported_run["status"],
+            error_code=imported_run.get("error_code"),
+        )
         self._append_audit_best_effort(
             artifacts,
             run_id=run_id,
@@ -390,6 +429,41 @@ class JobDiscoveryOrchestrator:
                 source_resume_ids=source_resume_ids,
                 output_name=_broad_output_name(candidate),
             )
+        )
+
+    @staticmethod
+    def _write_final_report_best_effort(
+        artifacts: DiscoveryArtifacts, **report: Any
+    ) -> None:
+        try:
+            artifacts.write_text(
+                "discovery-report.md", _redacted_discovery_report(**report)
+            )
+        except Exception:
+            pass
+
+    def _repair_imported_report_best_effort(
+        self, run: dict[str, Any], artifacts: DiscoveryArtifacts
+    ) -> None:
+        try:
+            saved_jobs = self._read_valid_results(artifacts)
+            unique_jobs = deduplicate_discovered_jobs(saved_jobs)
+            selected, rejected = select_representative_jobs(
+                unique_jobs,
+                minimum=_MINIMUM_JOB_COUNT,
+                maximum=_MAXIMUM_JOB_COUNT,
+            )
+        except Exception:
+            return
+        self._write_final_report_best_effort(
+            artifacts,
+            source_status_before_import=_source_status_before_import(run),
+            saved_jobs=saved_jobs,
+            unique_jobs=unique_jobs,
+            selected=selected,
+            rejected=rejected,
+            persisted_outcome="IMPORTED",
+            error_code=run.get("error_code"),
         )
 
     def _validate_requested_adapters(self, sources: list[str]) -> None:
@@ -658,11 +732,15 @@ def _job_payload(candidate_id: str, job: DiscoveredJob) -> dict[str, Any]:
 
 
 def _redacted_discovery_report(
-    run: dict[str, Any],
+    *,
+    source_status_before_import: str,
     saved_jobs: list[DiscoveredJob],
     unique_jobs: list[DiscoveredJob],
     selected: list[DiscoveredJob],
     rejected: list[Any],
+    planned_outcome: str | None = None,
+    persisted_outcome: str | None = None,
+    error_code: str | None = None,
 ) -> str:
     reason_counts: dict[str, int] = {}
     for item in rejected:
@@ -670,15 +748,19 @@ def _redacted_discovery_report(
     lines = [
         "# Discovery Import Report",
         "",
-        f"- Run status: `{run['status']}`",
+        f"- Source run status before import: `{source_status_before_import}`",
         f"- Saved jobs: {len(saved_jobs)}",
         f"- Deduplicated jobs: {len(unique_jobs)}",
-        f"- Eligible jobs: {len(selected)}",
-        f"- Selected jobs: {min(len(selected), _MAXIMUM_JOB_COUNT)}",
-        "",
-        "## Selected identities",
-        "",
+        f"- Eligible jobs: {len(unique_jobs) - len(rejected)}",
+        f"- Selected jobs: {len(selected)}",
     ]
+    if persisted_outcome is not None:
+        lines.append(f"- Persisted import outcome: `{persisted_outcome}`")
+        if error_code is not None:
+            lines.append(f"- Error code: `{error_code}`")
+    elif planned_outcome is not None:
+        lines.append(f"- Planned import outcome (not yet persisted): `{planned_outcome}`")
+    lines.extend(["", "## Selected identities", ""])
     if selected:
         lines.extend(
             f"{index}. `{item.source}:{discovered_job_fingerprint(item)}`"
@@ -705,3 +787,10 @@ def _broad_output_name(candidate: dict[str, Any]) -> str:
     safe_name = " ".join(safe_name.split()).strip(" .") or "候选人"
     suffix = f"-Agent综合版-{datetime.now().strftime('%Y%m%d')}.pdf"
     return f"{safe_name[: 180 - len(suffix)]}{suffix}"
+
+
+def _source_status_before_import(run: dict[str, Any]) -> str:
+    source_statuses = run.get("source_statuses")
+    if isinstance(source_statuses, dict) and "failed" in source_statuses.values():
+        return "PARTIAL"
+    return "READY_FOR_IMPORT"

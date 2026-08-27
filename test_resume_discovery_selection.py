@@ -87,22 +87,44 @@ class DiscoverySelectionTests(unittest.TestCase):
         self.assertEqual(len(eligible), len(signals))
         self.assertEqual(rejected, [])
 
-    def test_explicit_agent_family_title_signals_do_not_need_detail_confirmation(self):
-        signals = ["Agent", "智能体", "RAG", "LLM", "大模型", "workflow", "工作流"]
-
+    def test_only_known_ai_engineering_titles_bypass_detail_confirmation(self):
         eligible, rejected = filter_complete_agent_jobs(
             [
-                job(
-                    f"{signal} Engineer",
-                    number=index,
-                    detail="Own internal systems",
-                )
-                for index, signal in enumerate(signals, start=1)
+                job("AI Engineer", number=1, detail="Own internal systems"),
+                job("LLM Developer", number=2, detail="Own internal systems"),
+                job("Agent Architect", number=3, detail="Own internal systems"),
             ]
         )
 
-        self.assertEqual(len(eligible), len(signals))
+        self.assertEqual(len(eligible), 3)
         self.assertEqual(rejected, [])
+
+    def test_unknown_bare_ai_and_agent_like_titles_require_detail_confirmation(self):
+        eligible, rejected = filter_complete_agent_jobs(
+            [
+                job(
+                    "AI Product Manager",
+                    number=1,
+                    detail="负责增长策略和商业化",
+                ),
+                job("AI Strategy Lead", number=2, detail="Own growth strategy"),
+                job("Agent Platform", number=3, detail="Own internal systems"),
+                job("RAG Specialist", number=4, detail="Own search systems"),
+                job("AI Sales", number=5, detail="Own commercial accounts"),
+            ]
+        )
+
+        self.assertEqual(eligible, [])
+        self.assertEqual(
+            [item.reason for item in rejected],
+            [
+                "unknown_family",
+                "unknown_family",
+                "unknown_family",
+                "unknown_family",
+                "cross_family",
+            ],
+        )
 
     def test_greedy_selection_is_permutation_stable_and_prioritizes_diversity(self):
         jobs = [

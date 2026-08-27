@@ -247,6 +247,56 @@ class JobDiscoveryOrchestratorTests(unittest.TestCase):
         self.assertIn("Saved jobs: 5", report)
         self.assertIn("Deduplicated jobs: 3", report)
 
+    def test_import_report_distinguishes_uncapped_eligibility_and_final_outcome(self):
+        discovered = [
+            job("boss" if number % 2 else "nowcoder", number)
+            for number in range(1, 22)
+        ]
+        orchestrator, _, ready = self.ready_run(discovered)
+
+        imported = orchestrator.import_results(ready["id"])
+
+        self.assertEqual(len(imported["imported_job_ids"]), 20)
+        report = (Path(ready["artifact_dir"]) / "discovery-report.md").read_text(
+            "utf-8"
+        )
+        self.assertIn("Source run status before import: `READY_FOR_IMPORT`", report)
+        self.assertIn("Eligible jobs: 21", report)
+        self.assertIn("Selected jobs: 20", report)
+        self.assertIn("Persisted import outcome: `IMPORTED`", report)
+        self.assertNotIn("Planned import outcome", report)
+        self.assertNotIn("- Run status:", report)
+
+    def test_imported_retry_repairs_a_report_left_at_planned_outcome(self):
+        orchestrator, _, ready = self.ready_run(
+            [job("boss", 1), job("nowcoder", 2), job("boss", 3)]
+        )
+        original_write_text = DiscoveryArtifacts.write_text
+        report_writes = 0
+
+        def fail_first_final_report(artifacts, name, content):
+            nonlocal report_writes
+            if name == "discovery-report.md":
+                report_writes += 1
+                if report_writes == 2:
+                    raise OSError("simulated final report failure")
+            return original_write_text(artifacts, name, content)
+
+        with patch.object(
+            DiscoveryArtifacts, "write_text", new=fail_first_final_report
+        ):
+            imported = orchestrator.import_results(ready["id"])
+        self.assertEqual(imported["status"], "IMPORTED")
+        report_path = Path(ready["artifact_dir"]) / "discovery-report.md"
+        self.assertIn("Planned import outcome", report_path.read_text("utf-8"))
+
+        retried = orchestrator.import_results(ready["id"])
+
+        self.assertEqual(retried, imported)
+        repaired = report_path.read_text("utf-8")
+        self.assertIn("Persisted import outcome: `IMPORTED`", repaired)
+        self.assertNotIn("Planned import outcome", repaired)
+
     def test_insufficient_complete_agent_jobs_fail_without_import_or_rewrite(self):
         discovered = [
             job("boss", 1),
@@ -264,6 +314,15 @@ class JobDiscoveryOrchestratorTests(unittest.TestCase):
         )
         self.assertEqual(failed["imported_job_ids"], [])
         self.assertEqual(self.repository.list_jobs(self.candidate_id), [])
+        report = (Path(ready["artifact_dir"]) / "discovery-report.md").read_text(
+            "utf-8"
+        )
+        self.assertIn("Source run status before import: `READY_FOR_IMPORT`", report)
+        self.assertIn("Eligible jobs: 2", report)
+        self.assertIn("Selected jobs: 2", report)
+        self.assertIn("Persisted import outcome: `FAILED`", report)
+        self.assertIn("Error code: `INSUFFICIENT_COMPLETE_AGENT_JOBS`", report)
+        self.assertNotIn("Planned import outcome", report)
         with self.assertRaisesRegex(ValueError, "not importable"):
             orchestrator.import_results(ready["id"])
 
