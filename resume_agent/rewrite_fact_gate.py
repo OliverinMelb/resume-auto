@@ -130,6 +130,29 @@ SECTION_HEADINGS = {
     "联系方式",
     "求职意向",
 }
+IN_PROGRESS_HEADING = "在建项目（待验收）"
+IN_PROGRESS_MARKERS = ("在建", "正在", "进行中", "开发中", "实现中", "计划验收", "待验收")
+COMPLETED_MARKERS = (
+    "已完成",
+    "完成了",
+    "主导完成",
+    "已上线",
+    "上线",
+    "已落地",
+    "落地",
+    "已交付",
+    "交付",
+    "投入生产",
+    "生产",
+)
+FORBIDDEN_EXTERNAL_ACTORS = ("客户", "甲方", "生产用户")
+BUSINESS_RESULT = re.compile(
+    r"(?:准确率|召回率|成功率|效率|性能|吞吐|qps|成本|耗时|时延|用户数)"
+    r".{0,8}(?:提升|提高|降低|减少|节省|达到|达成|增长)"
+    r"|(?:提升|提高|降低|减少|节省|增长).{0,8}"
+    r"(?:准确率|召回率|成功率|效率|性能|吞吐|qps|成本|耗时|时延|用户数)",
+    re.I,
+)
 MIN_ANSWER_LENGTH = 4
 MIN_SOURCE_NOTE_LENGTH = 6
 HEADING = re.compile(r"^\s{0,3}#{1,6}(?!#)")
@@ -143,6 +166,7 @@ CHECKBOX_PREFIX = re.compile(r"^\[[ xX]\]\s+")
 class FactGateResult:
     blockers: list[MissingInformation]
     audit_markdown: str
+    rewritten_resume_markdown: str
 
 
 class InvalidModelResult(ValueError):
@@ -153,6 +177,13 @@ class InvalidModelResult(ValueError):
 class _DraftLine:
     claim: str
     normalized: str
+    in_progress_section: bool = False
+
+
+@dataclass(frozen=True)
+class _MarkdownStructure:
+    lines: list[_DraftLine]
+    in_progress_heading_count: int
 
 
 @dataclass(frozen=True)
@@ -222,6 +253,127 @@ def render_fact_audit(
     return "\n".join(lines) + "\n"
 
 
+def validate_in_progress_claims(
+    result: CodexRewriteResult,
+) -> list[MissingInformation]:
+    structure = _parse_markdown_structure(result.rewritten_resume_markdown)
+    in_progress_audits = [
+        audit for audit in result.claim_audit if audit.claim_status == "in_progress"
+    ]
+    plans = list(result.gap_acceptance_plans)
+    section_lines = [line for line in structure.lines if line.in_progress_section]
+    if not (
+        structure.in_progress_heading_count
+        or in_progress_audits
+        or plans
+        or section_lines
+    ):
+        return []
+
+    blockers: list[MissingInformation] = []
+    if structure.in_progress_heading_count != 1:
+        blockers.append(
+            _in_progress_blocker(
+                "请保留唯一且独立的 Markdown 标题“在建项目（待验收）”",
+                "在建项目必须位于唯一且明确的独立章节",
+            )
+        )
+    if structure.in_progress_heading_count and not section_lines:
+        blockers.append(
+            _in_progress_blocker(
+                "请在“在建项目（待验收）”章节填写待验收 claim",
+                "在建项目章节不能为空",
+            )
+        )
+
+    normalized_audits = [_normalize_claim(audit.claim) for audit in result.claim_audit]
+    for line in section_lines:
+        matches = [
+            audit
+            for audit, normalized in zip(result.claim_audit, normalized_audits)
+            if normalized == line.normalized
+        ]
+        if len(matches) != 1 or matches[0].claim_status != "in_progress":
+            blockers.append(
+                _in_progress_blocker(
+                    f"请将“{line.claim}”绑定到唯一的 in_progress claim_audit",
+                    "在建项目章节中的每条 claim 都必须标记为 in_progress",
+                )
+            )
+
+    audit_gap_counts: dict[str | None, int] = {}
+    for audit in in_progress_audits:
+        audit_gap_counts[audit.gap_id] = audit_gap_counts.get(audit.gap_id, 0) + 1
+    plan_gap_counts: dict[str, int] = {}
+    for plan in plans:
+        plan_gap_counts[plan.gap_id] = plan_gap_counts.get(plan.gap_id, 0) + 1
+
+    for audit in in_progress_audits:
+        claim = _display_claim(audit.claim)
+        occurrences = [
+            line for line in structure.lines if line.normalized == _normalize_claim(claim)
+        ]
+        if len(occurrences) != 1 or not occurrences[0].in_progress_section:
+            blockers.append(
+                _in_progress_blocker(
+                    f"请只在“在建项目（待验收）”章节保留“{claim}”",
+                    "in_progress claim 必须且只能出现在独立在建项目章节",
+                )
+            )
+        if (
+            audit.gap_id is None
+            or audit_gap_counts.get(audit.gap_id) != 1
+            or plan_gap_counts.get(audit.gap_id) != 1
+        ):
+            blockers.append(
+                _in_progress_blocker(
+                    f"请为“{claim}”绑定一个未复用且完全匹配的 gap plan",
+                    "in_progress claim 与 GapAcceptancePlan 必须一一匹配",
+                )
+            )
+
+        policy_text = _policy_key(claim)
+        if not any(_policy_key(marker) in policy_text for marker in IN_PROGRESS_MARKERS):
+            blockers.append(
+                _in_progress_blocker(
+                    f"请为“{claim}”增加明确的进行中标记",
+                    "在建项目 claim 缺少在建、正在、计划验收或待验收标记",
+                )
+            )
+        forbidden = next(
+            (
+                marker
+                for marker in (*COMPLETED_MARKERS, *FORBIDDEN_EXTERNAL_ACTORS)
+                if _policy_key(marker) in policy_text
+            ),
+            None,
+        )
+        if forbidden is not None:
+            blockers.append(
+                _in_progress_blocker(
+                    f"请移除“{claim}”中的完成态、生产态或外部主体表述",
+                    f"在建项目不得声称完成、上线、交付、生产、客户或甲方事实：{forbidden}",
+                )
+            )
+        if BUSINESS_RESULT.search(policy_text) or extract_business_metrics(claim):
+            blockers.append(
+                _in_progress_blocker(
+                    f"请移除“{claim}”中的未验收业务结果或指标",
+                    "在建项目不得包含不可验证业务结果或指标",
+                )
+            )
+
+    for plan in plans:
+        if audit_gap_counts.get(plan.gap_id) != 1:
+            blockers.append(
+                _in_progress_blocker(
+                    f"请将 gap plan {plan.gap_id} 绑定到唯一 in_progress claim",
+                    "GapAcceptancePlan 与 in_progress claim 必须一一匹配",
+                )
+            )
+    return deduplicate_questions(blockers)
+
+
 def validate_rewrite_facts(
     result: CodexRewriteResult,
     source_resumes: Sequence[Any],
@@ -266,6 +418,7 @@ def validate_rewrite_facts(
             question=item.question,
         )
     ]
+    blockers.extend(validate_in_progress_claims(result))
 
     draft_lines = _substantive_lines(result.rewritten_resume_markdown)
     audit_claims = [_normalize_claim(item.claim) for item in result.claim_audit]
@@ -313,6 +466,8 @@ def validate_rewrite_facts(
         if len(indexes) != 1:
             continue
         audit = result.claim_audit[indexes[0]]
+        if audit.claim_status == "in_progress":
+            continue
         if metrics_by_claim.get(line.normalized):
             continue
 
@@ -352,6 +507,8 @@ def validate_rewrite_facts(
                 continue
 
             audit = result.claim_audit[indexes[0]]
+            if audit.claim_status == "in_progress":
+                continue
             answer = answers.get(question_id)
             answered = (
                 audit.fact_status == "user_confirmed"
@@ -410,6 +567,7 @@ def validate_rewrite_facts(
     return FactGateResult(
         blockers=unique_blockers,
         audit_markdown=render_fact_audit(result, unique_blockers, declared_items),
+        rewritten_resume_markdown=result.rewritten_resume_markdown,
     )
 
 
@@ -568,18 +726,92 @@ def _normalize_claim(value: str) -> str:
 
 
 def _substantive_lines(markdown: str) -> list[_DraftLine]:
+    return _parse_markdown_structure(markdown).lines
+
+
+def _parse_markdown_structure(markdown: str) -> _MarkdownStructure:
     lines: list[_DraftLine] = []
+    in_progress_heading_count = 0
+    in_progress_level: int | None = None
+    fenced = False
     for raw_line in markdown.splitlines():
+        if re.match(r"^\s*```", raw_line):
+            fenced = not fenced
+            continue
         if not raw_line.strip() or STRUCTURAL_MARKDOWN.match(raw_line):
             continue
         is_heading = bool(HEADING.match(raw_line))
         claim = _display_claim(raw_line)
+        if is_heading:
+            claim = re.sub(r"\s+#+\s*$", "", claim).strip()
         normalized = _normalize_claim(claim)
-        if is_heading and normalized in SECTION_HEADINGS:
+        heading_level = _heading_level(raw_line) if is_heading and not fenced else None
+        explicit_in_progress_heading = (
+            heading_level is not None
+            and _is_explicit_in_progress_heading(raw_line, claim)
+        )
+        if heading_level is not None:
+            if in_progress_level is not None and heading_level <= in_progress_level:
+                in_progress_level = None
+            if explicit_in_progress_heading:
+                in_progress_heading_count += 1
+                in_progress_level = heading_level
+        if is_heading and (
+            normalized in SECTION_HEADINGS or explicit_in_progress_heading
+        ):
             continue
         if normalized:
-            lines.append(_DraftLine(claim=claim, normalized=normalized))
-    return lines
+            lines.append(
+                _DraftLine(
+                    claim=claim,
+                    normalized=normalized,
+                    in_progress_section=in_progress_level is not None,
+                )
+            )
+    return _MarkdownStructure(
+        lines=lines,
+        in_progress_heading_count=in_progress_heading_count,
+    )
+
+
+def _heading_level(raw_line: str) -> int | None:
+    match = re.match(r"^\s{0,3}(#{1,6})(?!#)", raw_line)
+    return len(match.group(1)) if match else None
+
+
+def _is_explicit_in_progress_heading(raw_line: str, claim: str) -> bool:
+    strict_heading = re.match(r"^\s{0,3}#{1,6}(?!#)(?:\s+|$)", raw_line)
+    return bool(strict_heading) and _heading_key(claim) == _heading_key(
+        IN_PROGRESS_HEADING
+    )
+
+
+def _heading_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    return "".join(
+        character
+        for character in normalized
+        if not character.isspace()
+        and unicodedata.category(character) != "Cf"
+        and not unicodedata.category(character).startswith("M")
+    ).lower()
+
+
+def _policy_key(value: str) -> str:
+    visible = re.sub(r"!?\[([^\]]*)\]\([^\n)]*\)", r"\1", value)
+    normalized = unicodedata.normalize("NFKC", visible)
+    return "".join(
+        character
+        for character in normalized
+        if not character.isspace()
+        and unicodedata.category(character) != "Cf"
+        and not unicodedata.category(character).startswith("M")
+        and not unicodedata.category(character).startswith("P")
+    ).lower()
+
+
+def _in_progress_blocker(question: str, reason: str) -> MissingInformation:
+    return _gap_blocker(question, reason)
 
 
 def _gap_blocker(question: str, reason: str) -> MissingInformation:

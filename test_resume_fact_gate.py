@@ -1,6 +1,7 @@
 import re
 import unittest
 
+import resume_agent.rewrite_fact_gate as rewrite_fact_gate
 from resume_agent.rewrite_fact_gate import (
     InvalidModelResult,
     extract_business_metrics,
@@ -94,12 +95,203 @@ def result_for_claim(claim, *, status, quote=None, basis=None):
     )
 
 
+def in_progress_result(
+    claim,
+    *,
+    markdown=None,
+    gap_id="gap-aaaaaaaaaaaa",
+    test_commands=None,
+):
+    return CodexRewriteResult.model_validate(
+        {
+            "verdict": "匹配",
+            "scorecard": [],
+            "risks": [],
+            "missing_information": [],
+            "rewritten_resume_markdown": (
+                markdown
+                if markdown is not None
+                else f"## 在建项目（待验收）\n- {claim}"
+            ),
+            "rewrite_reasons": [],
+            "depth_recommendations": [],
+            "interviewer_probes": [],
+            "claim_audit": [
+                {
+                    "claim": claim,
+                    "source_resume_ids": [],
+                    "source_quotes": [],
+                    "job_ids": ["job_1"],
+                    "change_type": "strengthened",
+                    "fact_status": "unverified",
+                    "measurement_basis": None,
+                    "claim_status": "in_progress",
+                    "gap_id": gap_id,
+                    "acceptance_id": None,
+                }
+            ],
+            "gap_acceptance_plans": [
+                {
+                    "gap_id": gap_id,
+                    "jd_requirements": ["LangGraph 多 Agent 路由"],
+                    "project_scope": "实现本地路由原型并以固定回归集验收",
+                    "required_artifacts": ["代码仓库", "回归报告"],
+                    "test_commands": test_commands or ["python -m unittest -v"],
+                    "acceptance_metrics": ["固定回归集全部通过"],
+                    "interview_topics": ["路由设计"],
+                }
+            ],
+        }
+    )
+
+
 class FactGateTests(unittest.TestCase):
     def setUp(self):
         self.resumes = [
             {"id": "source_resume_1", "content": "工具调用成功率达到 86%"}
         ]
         self.jobs = [{"id": "job_1"}]
+
+    def assertInProgressBlocked(self, gate):
+        self.assertTrue(gate.blockers)
+        self.assertTrue(
+            any("在建" in item.reason or "in_progress" in item.reason for item in gate.blockers),
+            [item.reason for item in gate.blockers],
+        )
+
+    def test_validate_in_progress_claims_is_a_public_gate_helper(self):
+        self.assertTrue(
+            callable(getattr(rewrite_fact_gate, "validate_in_progress_claims", None))
+        )
+
+    def test_in_progress_claim_language_table(self):
+        cases = [
+            ("在建：正在实现LangGraph多Agent路由，计划以回归集验收", True),
+            ("主导LangGraph多Agent平台上线", False),
+            ("为客户上线RAG系统", False),
+            ("准确率提升到92%", False),
+            ("节省人工成本40%", False),
+            ("项目现\u200b已\u3000完 成并交 付", False),
+            ("面向甲\u200b方生产用户部署", False),
+            ("在建：正在为[客](https://example.test)户实现RAG，计划验收", False),
+            ("在建：项目已完\ufe0f成，待验收", False),
+        ]
+        for claim, allowed in cases:
+            with self.subTest(claim=claim):
+                gate = validate_rewrite_facts(
+                    in_progress_result(claim), self.resumes, self.jobs, []
+                )
+                if allowed:
+                    self.assertEqual(gate.blockers, [])
+                else:
+                    self.assertInProgressBlocked(gate)
+
+    def test_in_progress_heading_is_unique_explicit_and_level_scoped(self):
+        claim = "在建：正在实现LangGraph多Agent路由，计划以回归集验收"
+        cases = [
+            (f"在建项目（待验收）\n- {claim}", False),
+            (f"## 项目经历中的在建项目（待验收）说明\n- {claim}", False),
+            (f"### 在建项目（待验收）\n## 项目经历\n- {claim}", False),
+            (
+                f"## 在建项目（待验收）\n- {claim}\n"
+                f"### 在 建 项目（ 待 验收 ）\n- 说明",
+                False,
+            ),
+            (f"###\u3000在 建 项目（ 待 验收 ）\n- {claim}", True),
+            (f"## 在建项目（待验收） ##\n- {claim}", True),
+        ]
+        for markdown, allowed in cases:
+            with self.subTest(markdown=markdown):
+                gate = validate_rewrite_facts(
+                    in_progress_result(claim, markdown=markdown),
+                    self.resumes,
+                    self.jobs,
+                    [],
+                )
+                if allowed:
+                    self.assertEqual(gate.blockers, [])
+                else:
+                    self.assertInProgressBlocked(gate)
+
+    def test_in_progress_claim_repeated_outside_section_is_blocked(self):
+        claim = "在建：正在实现LangGraph多Agent路由，计划以回归集验收"
+        markdown = (
+            f"## 在建项目（待验收）\n- {claim}\n"
+            f"## 项目经历\n- {claim}"
+        )
+
+        gate = validate_rewrite_facts(
+            in_progress_result(claim, markdown=markdown), self.resumes, self.jobs, []
+        )
+
+        self.assertInProgressBlocked(gate)
+
+    def test_in_progress_section_rejects_non_in_progress_audit(self):
+        claim = "在建：正在实现LangGraph多Agent路由，计划以回归集验收"
+        result = in_progress_result(claim)
+        verified_audit = result.claim_audit[0].model_copy(
+            update={
+                "claim_status": "verified",
+                "gap_id": None,
+                "source_resume_ids": ["source_resume_1"],
+                "source_quotes": [claim],
+                "fact_status": "source_verified",
+            }
+        )
+        result = result.model_copy(
+            update={"claim_audit": [verified_audit], "gap_acceptance_plans": []}
+        )
+        resumes = [{"id": "source_resume_1", "content": claim}]
+
+        gate = validate_rewrite_facts(result, resumes, self.jobs, [])
+
+        self.assertInProgressBlocked(gate)
+
+    def test_in_progress_claim_requires_one_distinct_matching_gap_plan(self):
+        claim = "在建：正在实现LangGraph多Agent路由，计划以回归集验收"
+        result = in_progress_result(claim)
+        mismatched_plan = result.gap_acceptance_plans[0].model_copy(
+            update={"gap_id": "gap-bbbbbbbbbbbb"}
+        )
+        mismatched = result.model_copy(update={"gap_acceptance_plans": [mismatched_plan]})
+        duplicate_audit = result.claim_audit[0].model_copy(
+            update={"claim": "正在实现固定回归集并计划验收"}
+        )
+        reused = result.model_copy(
+            update={
+                "rewritten_resume_markdown": (
+                    f"## 在建项目（待验收）\n- {claim}\n"
+                    "- 正在实现固定回归集并计划验收"
+                ),
+                "claim_audit": [result.claim_audit[0], duplicate_audit],
+            }
+        )
+
+        for candidate in (mismatched, reused):
+            with self.subTest(candidate=candidate):
+                gate = validate_rewrite_facts(candidate, self.resumes, self.jobs, [])
+                self.assertInProgressBlocked(gate)
+
+    def test_fact_answer_cannot_unlock_invalid_in_progress_claim(self):
+        claim = "实现LangGraph多Agent路由"
+        result = in_progress_result(claim)
+        first = validate_rewrite_facts(result, self.resumes, self.jobs, [])
+        self.assertInProgressBlocked(first)
+        answer = FactAnswer(
+            question_id=first.blockers[0].question_id,
+            answer=claim,
+            source_note="本地代码仓库记录，候选人确认",
+        )
+
+        answered = validate_rewrite_facts(
+            result, self.resumes, self.jobs, [answer]
+        )
+
+        self.assertInProgressBlocked(answered)
+        self.assertEqual(
+            [item.question_id for item in answered.blockers],
+            [item.question_id for item in first.blockers],
+        )
 
     def test_source_text_without_measurement_basis_needs_facts(self):
         gate = validate_rewrite_facts(

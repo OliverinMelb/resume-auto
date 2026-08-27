@@ -92,11 +92,15 @@ class FakeRenderer:
         self.error = error
         self.page_count = page_count
         self.write_before_error = write_before_error
+        self.call_count = 0
+        self.markdown = None
 
     def available(self):
         return True
 
     def render(self, markdown, pdf_path, preview_dir):
+        self.call_count += 1
+        self.markdown = markdown
         if self.write_before_error:
             pdf_path.write_bytes(b"%PDF-partial")
             preview_dir.mkdir(parents=True, exist_ok=True)
@@ -152,6 +156,32 @@ def metric_result(resume_id, job_id):
             "measurement_basis": None, "claim_status": "verified",
         }],
         "gap_acceptance_plans": [],
+    })
+
+
+def in_progress_result(resume_id, job_id, *, claim=None, test_commands=None):
+    claim = claim or "在建：正在实现LangGraph多Agent路由，计划以回归集验收"
+    return CodexRewriteResult.model_validate({
+        "verdict": "match", "scorecard": [], "risks": [],
+        "missing_information": [],
+        "rewritten_resume_markdown": f"## 在建项目（待验收）\n- {claim}",
+        "rewrite_reasons": [], "depth_recommendations": [], "interviewer_probes": [],
+        "claim_audit": [{
+            "claim": claim, "source_resume_ids": [], "source_quotes": [],
+            "job_ids": [job_id], "change_type": "strengthened",
+            "fact_status": "unverified", "measurement_basis": None,
+            "claim_status": "in_progress", "gap_id": "gap-aaaaaaaaaaaa",
+            "acceptance_id": None,
+        }],
+        "gap_acceptance_plans": [{
+            "gap_id": "gap-aaaaaaaaaaaa",
+            "jd_requirements": ["LangGraph 多 Agent 路由"],
+            "project_scope": "实现本地路由原型并以固定回归集验收",
+            "required_artifacts": ["代码仓库", "回归报告"],
+            "test_commands": test_commands or ["python -m unittest -v"],
+            "acceptance_metrics": ["固定回归集全部通过"],
+            "interview_topics": ["路由设计"],
+        }],
     })
 
 
@@ -719,6 +749,45 @@ class RewritePipelineTests(unittest.TestCase):
             ["RUN_CREATED", "RUN_STARTED", "RUN_FAILED"],
         )
         self.assertTrue(all(event.get("timestamp_utc") for event in events))
+
+    def test_valid_in_progress_gate_publishes_exact_validated_markdown(self):
+        result = in_progress_result(self.resume["id"], self.job["id"])
+        renderer = FakeRenderer()
+
+        run = self.make_pipeline(FakeCodexRunner(result), renderer).run(self.request())
+
+        self.assertEqual(run["status"], "READY")
+        markdown_path = Path(run["artifact_dir"]) / "resume.md"
+        self.assertEqual(markdown_path.read_text("utf-8"), result.rewritten_resume_markdown)
+        self.assertEqual(renderer.markdown, result.rewritten_resume_markdown)
+        self.assertEqual(renderer.call_count, 1)
+
+    def test_invalid_in_progress_gate_needs_facts_without_deployable_artifacts(self):
+        result = in_progress_result(
+            self.resume["id"], self.job["id"], claim="为客户上线RAG系统"
+        )
+        renderer = FakeRenderer()
+
+        run = self.make_pipeline(FakeCodexRunner(result), renderer).run(self.request())
+
+        self.assertEqual(run["status"], "NEEDS_FACTS")
+        self.assertTrue(run["blocking_questions"])
+        self._assert_no_deployable_artifacts(run)
+        self.assertEqual(renderer.call_count, 0)
+
+    def test_gap_plan_test_commands_are_data_and_never_executed(self):
+        marker = Path(self.temp_dir.name) / "model-command-was-executed"
+        command = f"Set-Content -LiteralPath '{marker}' -Value unsafe"
+        result = in_progress_result(
+            self.resume["id"], self.job["id"], test_commands=[command]
+        )
+
+        run = self.make_pipeline(FakeCodexRunner(result), FakeRenderer()).run(
+            self.request()
+        )
+
+        self.assertEqual(run["status"], "READY")
+        self.assertFalse(marker.exists())
 
     def test_temporary_runner_output_is_removed_when_runner_raises(self):
         run = self.make_pipeline(TempOutputFailureRunner(None), FakeRenderer()).run(self.request())

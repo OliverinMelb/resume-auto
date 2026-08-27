@@ -293,14 +293,15 @@ class ResumeRewritePipeline:
                     expected_owner_token=self._owner_token,
                 )
                 return self._decorate_run(updated)
-            artifacts.write_text("resume.md", result.rewritten_resume_markdown)
+            validated_markdown = gate.rewritten_resume_markdown
+            artifacts.write_text("resume.md", validated_markdown)
             render_result = self.renderer.render(
-                result.rewritten_resume_markdown, artifacts.path("resume.pdf"),
+                validated_markdown, artifacts.path("resume.pdf"),
                 artifacts.directory / ".preview",
             )
             artifacts.append_audit(
                 run_id=run["id"], status="RUNNING", event_code="RENDER_COMPLETED",
-                content_hash=_hash_text(result.rewritten_resume_markdown),
+                content_hash=_hash_text(validated_markdown),
                 page_count=render_result.page_count,
                 source_ids=[
                     item["id"] for item in materials["resumes"] + materials["jobs"]
