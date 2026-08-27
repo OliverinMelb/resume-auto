@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,7 +14,9 @@ from resume_agent.discovery_schemas import (
     DiscoveryRequest,
     DiscoveredJob,
     deduplicate_discovered_jobs,
+    discovered_job_fingerprint,
 )
+from resume_agent.discovery_selection import select_representative_jobs
 from resume_agent.discovery_sources import (
     DiscoverySourceAdapter,
     SourceCheckpoint,
@@ -21,6 +24,7 @@ from resume_agent.discovery_sources import (
     SourcePollResult,
 )
 from resume_agent.repository import Repository, new_id
+from resume_agent.rewrite_schemas import RewriteRequest
 
 
 _SOURCE_STATUSES = {"collecting", "completed", "interaction_required", "failed"}
@@ -33,6 +37,8 @@ _SAFE_SOURCE_ERROR_CODES = {
 }
 _POLLABLE_RUN_STATUSES = {"COLLECTING", "READY_FOR_IMPORT", "PARTIAL"}
 _MINIMUM_JOB_COUNT = 3
+_MAXIMUM_JOB_COUNT = 20
+_INSUFFICIENT_AGENT_JOBS = "INSUFFICIENT_COMPLETE_AGENT_JOBS"
 
 
 class JobDiscoveryOrchestrator:
@@ -276,6 +282,115 @@ class JobDiscoveryOrchestrator:
         run = self.repository.get_discovery_run(run_id)
         self._artifacts_for(run)
         return run
+
+    def import_results(self, run_id: str) -> dict[str, Any]:
+        run = self.repository.get_discovery_run(run_id)
+        artifacts = self._artifacts_for(run)
+        if run["status"] == "IMPORTED":
+            return run
+        if run["status"] not in {"READY_FOR_IMPORT", "PARTIAL"}:
+            raise ValueError("discovery run is not importable")
+
+        saved_jobs = self._read_valid_results(artifacts)
+        unique_jobs = deduplicate_discovered_jobs(saved_jobs)
+        selected, rejected = select_representative_jobs(
+            unique_jobs,
+            minimum=_MINIMUM_JOB_COUNT,
+            maximum=_MAXIMUM_JOB_COUNT,
+        )
+        artifacts.write_text(
+            "discovery-report.md",
+            _redacted_discovery_report(
+                run, saved_jobs, unique_jobs, selected, rejected
+            ),
+        )
+        if len(selected) < _MINIMUM_JOB_COUNT:
+            try:
+                failed = self.repository.transition_discovery_run(
+                    run_id,
+                    {run["status"]},
+                    "FAILED",
+                    imported_job_ids=[],
+                    error_code=_INSUFFICIENT_AGENT_JOBS,
+                )
+            except ValueError:
+                failed = self.repository.get_discovery_run(run_id)
+                if not (
+                    failed["status"] == "FAILED"
+                    and failed.get("error_code") == _INSUFFICIENT_AGENT_JOBS
+                ):
+                    raise ValueError("discovery import is busy") from None
+            self._append_audit_best_effort(
+                artifacts,
+                run_id=run_id,
+                status="FAILED",
+                event_code="RUN_FAILED",
+                count=len(selected),
+                error_code="INSUFFICIENT_JOBS",
+            )
+            return failed
+
+        imported_job_ids: list[str] = []
+        for item in selected:
+            fingerprint = discovered_job_fingerprint(item)
+            imported, _ = self.repository.create_job_if_absent(
+                _job_payload(run["candidate_id"], item), fingerprint
+            )
+            imported_job_ids.append(imported["id"])
+
+        try:
+            imported_run = self.repository.transition_discovery_run(
+                run_id,
+                {run["status"]},
+                "IMPORTED",
+                imported_job_ids=imported_job_ids,
+                error_code=None,
+            )
+        except ValueError:
+            persisted = self.repository.get_discovery_run(run_id)
+            if persisted["status"] == "IMPORTED":
+                return persisted
+            if (
+                persisted["status"] == "FAILED"
+                and persisted.get("error_code") == _INSUFFICIENT_AGENT_JOBS
+            ):
+                return persisted
+            raise ValueError("discovery import is busy") from None
+
+        self._append_audit_best_effort(
+            artifacts,
+            run_id=run_id,
+            status="IMPORTED",
+            event_code="RUN_IMPORTED",
+            count=len(imported_job_ids),
+        )
+        return imported_run
+
+    def build_broad_rewrite(
+        self,
+        run_id: str,
+        candidate_id: str,
+        source_resume_ids: list[str],
+        pipeline: Any,
+    ) -> dict:
+        current = self.repository.get_discovery_run(run_id)
+        if current["candidate_id"] != candidate_id:
+            raise ValueError("discovery run candidate mismatch")
+        imported = self.import_results(run_id)
+        job_ids = imported["imported_job_ids"]
+        if not _MINIMUM_JOB_COUNT <= len(job_ids) <= _MAXIMUM_JOB_COUNT:
+            raise ValueError(
+                "broad rewrite requires at least 3 and at most 20 complete jobs"
+            )
+        candidate = self.repository.get_candidate(candidate_id)
+        return pipeline.run(
+            RewriteRequest(
+                candidate_id=candidate_id,
+                job_ids=list(job_ids),
+                source_resume_ids=source_resume_ids,
+                output_name=_broad_output_name(candidate),
+            )
+        )
 
     def _validate_requested_adapters(self, sources: list[str]) -> None:
         for source in sources:
@@ -522,3 +637,71 @@ def _resolve_discovery_status(
     if statuses and all(status == "completed" for status in statuses):
         return "READY_FOR_IMPORT"
     return "FAILED"
+
+
+def _job_payload(candidate_id: str, job: DiscoveredJob) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "external_job_id": job.source_job_id,
+        "source": job.source,
+        "title": job.title,
+        "salary": job.salary_raw or "",
+        "detail": job.detail,
+        "company": job.company,
+        "score": job.score,
+        "qualified": job.qualified,
+        "search_keyword": job.search_keyword,
+        "source_logged_at": job.verified_at.astimezone(timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+    }
+
+
+def _redacted_discovery_report(
+    run: dict[str, Any],
+    saved_jobs: list[DiscoveredJob],
+    unique_jobs: list[DiscoveredJob],
+    selected: list[DiscoveredJob],
+    rejected: list[Any],
+) -> str:
+    reason_counts: dict[str, int] = {}
+    for item in rejected:
+        reason_counts[item.reason] = reason_counts.get(item.reason, 0) + 1
+    lines = [
+        "# Discovery Import Report",
+        "",
+        f"- Run status: `{run['status']}`",
+        f"- Saved jobs: {len(saved_jobs)}",
+        f"- Deduplicated jobs: {len(unique_jobs)}",
+        f"- Eligible jobs: {len(selected)}",
+        f"- Selected jobs: {min(len(selected), _MAXIMUM_JOB_COUNT)}",
+        "",
+        "## Selected identities",
+        "",
+    ]
+    if selected:
+        lines.extend(
+            f"{index}. `{item.source}:{discovered_job_fingerprint(item)}`"
+            for index, item in enumerate(selected, start=1)
+        )
+    else:
+        lines.append("None")
+    lines.extend(["", "## Rejection reasons", ""])
+    if reason_counts:
+        lines.extend(
+            f"- `{reason}`: {reason_counts[reason]}"
+            for reason in sorted(reason_counts)
+        )
+    else:
+        lines.append("- None")
+    return "\n".join(lines) + "\n"
+
+
+def _broad_output_name(candidate: dict[str, Any]) -> str:
+    display_name = candidate.get("display_name")
+    if not isinstance(display_name, str) or not display_name.strip():
+        display_name = "候选人"
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", display_name)
+    safe_name = " ".join(safe_name.split()).strip(" .") or "候选人"
+    suffix = f"-Agent综合版-{datetime.now().strftime('%Y%m%d')}.pdf"
+    return f"{safe_name[: 180 - len(suffix)]}{suffix}"

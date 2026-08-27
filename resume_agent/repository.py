@@ -294,6 +294,63 @@ class Repository:
             )
         return self.get_job(job_id)
 
+    def create_job_if_absent(
+        self, payload: dict[str, Any], fingerprint: str
+    ) -> tuple[dict[str, Any], bool]:
+        candidate_id = payload.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise ValueError("candidate_id is required")
+        if (
+            not isinstance(fingerprint, str)
+            or not fingerprint
+            or len(fingerprint) > 128
+        ):
+            raise ValueError("invalid job fingerprint")
+        self.get_candidate(candidate_id)
+        job_id = new_id("job")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE candidate_id = ? AND job_fingerprint = ?
+                ORDER BY created_at, id
+                LIMIT 1
+                """,
+                (candidate_id, fingerprint),
+            ).fetchone()
+            if row is not None:
+                return dict(row), False
+            connection.execute(
+                """
+                INSERT INTO jobs(
+                    id, candidate_id, external_job_id, source, title,
+                    salary, detail, company, score, qualified, search_keyword,
+                    job_fingerprint, source_logged_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    candidate_id,
+                    payload.get("external_job_id"),
+                    payload["source"],
+                    payload["title"],
+                    payload.get("salary", ""),
+                    payload["detail"],
+                    payload.get("company", ""),
+                    payload.get("score"),
+                    payload.get("qualified"),
+                    payload.get("search_keyword"),
+                    fingerprint,
+                    payload.get("source_logged_at"),
+                    utc_now(),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            return dict(row), True
+
     def get_job(self, job_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(

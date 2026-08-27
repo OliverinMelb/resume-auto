@@ -6,10 +6,14 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from resume_agent.discovery_artifacts import DiscoveryArtifacts
-from resume_agent.discovery_schemas import DiscoveryRequest, DiscoveredJob
+from resume_agent.discovery_schemas import (
+    DiscoveryRequest,
+    DiscoveredJob,
+    discovered_job_fingerprint,
+)
 from resume_agent.discovery_sources import SourceCheckpoint, SourcePollResult
 from resume_agent.repository import Repository
 
@@ -28,20 +32,24 @@ def discovery_request(candidate_id, **overrides):
     return DiscoveryRequest(**payload)
 
 
-def job(source, number, *, url_number=None, title=None):
+def job(source, number, *, url_number=None, title=None, **overrides):
     url_number = number if url_number is None else url_number
     host = "www.zhipin.com/job_detail" if source == "boss" else "www.nowcoder.com/jobs/detail"
     suffix = ".html" if source == "boss" else ""
+    payload = {
+        "source": source,
+        "source_job_id": f"{source}-{number}",
+        "canonical_url": f"https://{host}/{url_number}{suffix}",
+        "title": title or f"AI Engineer {number}",
+        "company": f"Company {number}",
+        "detail": f"Build agent system {number}",
+        "detail_status": "complete",
+        "search_keyword": "AI Agent",
+        "verified_at": datetime(2026, 8, 26, tzinfo=timezone.utc),
+    }
+    payload.update(overrides)
     return DiscoveredJob(
-        source=source,
-        source_job_id=f"{source}-{number}",
-        canonical_url=f"https://{host}/{url_number}{suffix}",
-        title=title or f"AI Engineer {number}",
-        company=f"Company {number}",
-        detail=f"Build agent system {number}",
-        detail_status="complete",
-        search_keyword="AI Agent",
-        verified_at=datetime(2026, 8, 26, tzinfo=timezone.utc),
+        **payload
     )
 
 
@@ -147,6 +155,286 @@ class JobDiscoveryOrchestratorTests(unittest.TestCase):
             discovery_request(self.candidate_id, **request_overrides)
         )
         return orchestrator, started, orchestrator.poll(started["id"])
+
+    def ready_run(self, jobs):
+        by_source = {
+            source: [item for item in jobs if item.source == source]
+            for source in ("boss", "nowcoder")
+        }
+        return self.start_and_poll(
+            {
+                "boss": completed("boss", by_source["boss"]),
+                "nowcoder": completed("nowcoder", by_source["nowcoder"]),
+            }
+        )
+
+    def test_import_results_maps_without_invention_and_is_idempotent(self):
+        discovered = [
+            job(
+                "boss",
+                1,
+                salary_raw="20-30K",
+                score=91.5,
+                qualified=True,
+                search_keyword="Agent",
+            ),
+            job("nowcoder", 2, qualified=False),
+            job("boss", 3, company="", qualified=None),
+        ]
+        orchestrator, _, ready = self.ready_run(discovered)
+
+        imported = orchestrator.import_results(ready["id"])
+        retried = orchestrator.import_results(ready["id"])
+
+        self.assertEqual(imported, retried)
+        self.assertEqual(imported["status"], "IMPORTED")
+        self.assertEqual(len(imported["imported_job_ids"]), 3)
+        rows = self.repository.get_jobs(imported["imported_job_ids"])
+        by_external_id = {row["external_job_id"]: row for row in rows}
+        first = by_external_id["boss-1"]
+        self.assertEqual(first["source"], "boss")
+        self.assertEqual(first["title"], discovered[0].title)
+        self.assertEqual(first["detail"], discovered[0].detail)
+        self.assertEqual(first["company"], discovered[0].company)
+        self.assertEqual(first["salary"], "20-30K")
+        self.assertEqual(first["score"], 91.5)
+        self.assertEqual(first["qualified"], 1)
+        self.assertEqual(first["search_keyword"], "Agent")
+        self.assertEqual(
+            first["source_logged_at"], "2026-08-26T00:00:00+00:00"
+        )
+        self.assertEqual(
+            first["job_fingerprint"], discovered_job_fingerprint(discovered[0])
+        )
+        self.assertEqual(len(self.repository.list_jobs(self.candidate_id)), 3)
+        artifact_dir = Path(imported["artifact_dir"])
+        source_results = (artifact_dir / "source-results.json").read_text("utf-8")
+        report = (artifact_dir / "discovery-report.md").read_text("utf-8")
+        self.assertIn(discovered[0].canonical_url, source_results)
+        self.assertNotIn(discovered[0].canonical_url, report)
+        self.assertNotIn(discovered[0].detail, report)
+
+    def test_import_results_rejects_invalid_saved_results_without_mutation(self):
+        orchestrator, _, ready = self.ready_run(
+            [job("boss", 1), job("nowcoder", 2), job("boss", 3)]
+        )
+        artifact_dir = Path(ready["artifact_dir"])
+        (artifact_dir / "source-results.json").write_text("{}", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "results artifact"):
+            orchestrator.import_results(ready["id"])
+
+        self.assertEqual(
+            self.repository.get_discovery_run(ready["id"])["status"],
+            "READY_FOR_IMPORT",
+        )
+        self.assertEqual(self.repository.list_jobs(self.candidate_id), [])
+        self.assertFalse((artifact_dir / "discovery-report.md").exists())
+
+    def test_import_results_defensively_deduplicates_valid_saved_results(self):
+        discovered = [job("boss", 1), job("nowcoder", 2), job("boss", 3)]
+        orchestrator, _, ready = self.ready_run(discovered)
+        artifacts = DiscoveryArtifacts.open(self.runs_root, ready["id"])
+        artifacts.write_results([discovered[0], *discovered, discovered[1]])
+
+        imported = orchestrator.import_results(ready["id"])
+
+        self.assertEqual(len(imported["imported_job_ids"]), 3)
+        self.assertEqual(len(self.repository.list_jobs(self.candidate_id)), 3)
+        report = (Path(ready["artifact_dir"]) / "discovery-report.md").read_text(
+            "utf-8"
+        )
+        self.assertIn("Saved jobs: 5", report)
+        self.assertIn("Deduplicated jobs: 3", report)
+
+    def test_insufficient_complete_agent_jobs_fail_without_import_or_rewrite(self):
+        discovered = [
+            job("boss", 1),
+            job("nowcoder", 2),
+            job("boss", 3, detail_status="partial"),
+        ]
+        orchestrator, _, ready = self.ready_run(discovered)
+        pipeline = Mock()
+
+        failed = orchestrator.import_results(ready["id"])
+
+        self.assertEqual(failed["status"], "FAILED")
+        self.assertEqual(
+            failed["error_code"], "INSUFFICIENT_COMPLETE_AGENT_JOBS"
+        )
+        self.assertEqual(failed["imported_job_ids"], [])
+        self.assertEqual(self.repository.list_jobs(self.candidate_id), [])
+        with self.assertRaisesRegex(ValueError, "not importable"):
+            orchestrator.import_results(ready["id"])
+
+        second_orchestrator, _, second_ready = self.ready_run(
+            [
+                job("boss", 11),
+                job("nowcoder", 12),
+                job("boss", 13, detail_status="partial"),
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "at least 3"):
+            second_orchestrator.build_broad_rewrite(
+                second_ready["id"], self.candidate_id, ["resume-1"], pipeline
+            )
+        pipeline.run.assert_not_called()
+
+    def test_create_job_if_absent_serializes_concurrent_retries(self):
+        payload = {
+            "candidate_id": self.candidate_id,
+            "external_job_id": "boss-1",
+            "source": "boss",
+            "title": "AI Agent Engineer",
+            "salary": "",
+            "detail": "Build Agent systems",
+            "company": "Company",
+            "qualified": True,
+            "search_keyword": "Agent",
+            "source_logged_at": "2026-08-26T00:00:00+00:00",
+        }
+        fingerprint = "a" * 64
+        barrier = threading.Barrier(6)
+        results = []
+        errors = []
+
+        def create(repository):
+            try:
+                barrier.wait(timeout=5)
+                results.append(
+                    repository.create_job_if_absent(payload, fingerprint)
+                )
+            except Exception as error:
+                errors.append(error)
+
+        threads = [
+            threading.Thread(
+                target=create,
+                args=(Repository(self.repository.database_path),),
+            )
+            for _ in range(6)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(sum(created for _, created in results), 1)
+        self.assertEqual(len({row["id"] for row, _ in results}), 1)
+        self.assertEqual(len(self.repository.list_jobs(self.candidate_id)), 1)
+        with self.repository._connect() as connection:
+            indexes = connection.execute("PRAGMA index_list(jobs)").fetchall()
+        self.assertFalse(
+            any(
+                row["name"] == "idx_jobs_fingerprint" and row["unique"]
+                for row in indexes
+            )
+        )
+
+    def test_concurrent_imports_converge_without_duplicate_jobs_or_ids(self):
+        discovered = [job("boss", 1), job("nowcoder", 2), job("boss", 3)]
+        orchestrator, _, ready = self.ready_run(discovered)
+        barrier = threading.Barrier(2)
+
+        class GatedRepository(Repository):
+            def create_job_if_absent(self, payload, fingerprint):
+                barrier.wait(timeout=5)
+                return super().create_job_if_absent(payload, fingerprint)
+
+        contenders = [
+            self.orchestrator(
+                {},
+                repository=GatedRepository(self.repository.database_path),
+            )
+            for _ in range(2)
+        ]
+        results = []
+        errors = []
+
+        def import_run(contender):
+            try:
+                results.append(contender.import_results(ready["id"]))
+            except Exception as error:
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=import_run, args=(contender,))
+            for contender in contenders
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(
+            [run["status"] for run in results], ["IMPORTED", "IMPORTED"]
+        )
+        self.assertEqual(
+            results[0]["imported_job_ids"], results[1]["imported_job_ids"]
+        )
+        self.assertEqual(len(self.repository.list_jobs(self.candidate_id)), 3)
+
+    def test_broad_rewrite_checks_candidate_then_preserves_selected_order(self):
+        discovered = [job("boss", 1), job("nowcoder", 2), job("boss", 3)]
+        orchestrator, _, ready = self.ready_run(discovered)
+        other_candidate = self.repository.create_candidate(
+            "Other", ["AI Engineer"], ""
+        )["id"]
+        mismatch_pipeline = Mock()
+
+        with patch.object(orchestrator, "import_results") as import_results:
+            with self.assertRaisesRegex(ValueError, "candidate"):
+                orchestrator.build_broad_rewrite(
+                    ready["id"], other_candidate, ["resume-1"], mismatch_pipeline
+                )
+        import_results.assert_not_called()
+        mismatch_pipeline.run.assert_not_called()
+
+        pipeline = Mock()
+        pipeline.run.return_value = {"id": "rewrite-1"}
+        rewrite = orchestrator.build_broad_rewrite(
+            ready["id"], self.candidate_id, ["resume-1"], pipeline
+        )
+        imported = self.repository.get_discovery_run(ready["id"])
+
+        self.assertEqual(rewrite, {"id": "rewrite-1"})
+        pipeline.run.assert_called_once()
+        request = pipeline.run.call_args.args[0]
+        self.assertEqual(request.job_ids, imported["imported_job_ids"])
+        self.assertEqual(request.candidate_id, self.candidate_id)
+        self.assertEqual(request.source_resume_ids, ["resume-1"])
+        self.assertRegex(
+            request.output_name, r"^Candidate-Agent综合版-\d{8}\.pdf$"
+        )
+
+    def test_broad_rewrite_uses_safe_fallback_for_missing_display_name(self):
+        candidate = self.repository.create_candidate(None, ["AI Engineer"], "")
+        discovered = [job("boss", 11), job("nowcoder", 12), job("boss", 13)]
+        by_source = {
+            source: [item for item in discovered if item.source == source]
+            for source in ("boss", "nowcoder")
+        }
+        orchestrator = self.orchestrator(
+            {
+                "boss": completed("boss", by_source["boss"]),
+                "nowcoder": completed("nowcoder", by_source["nowcoder"]),
+            }
+        )
+        started = orchestrator.start(discovery_request(candidate["id"]))
+        ready = orchestrator.poll(started["id"])
+        pipeline = Mock(return_value={"id": "rewrite-2"})
+        pipeline.run.return_value = {"id": "rewrite-2"}
+
+        orchestrator.build_broad_rewrite(
+            ready["id"], candidate["id"], ["resume-2"], pipeline
+        )
+
+        output_name = pipeline.run.call_args.args[0].output_name
+        self.assertRegex(output_name, r"^候选人-Agent综合版-\d{8}\.pdf$")
 
     def test_poll_status_matrix(self):
         cases = [
