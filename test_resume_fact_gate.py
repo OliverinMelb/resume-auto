@@ -170,6 +170,7 @@ class FactGateTests(unittest.TestCase):
             ("在建：正在实现路由，计划以上线前回归集验收", True),
             ("在建：正在实现路由，计划验收交付物完整性", True),
             ("在建：正在实现路由，计划以100条固定回归集验收", True),
+            ("计划成功发布候选构建后验收，正在实现发布流程", True),
             ("主导LangGraph多Agent平台上线", False),
             ("为客户上线RAG系统", False),
             ("准确率提升到92%", False),
@@ -190,6 +191,12 @@ class FactGateTests(unittest.TestCase):
             ("在建：日活增长一倍，待验收", False),
             ("在建：已&#23436;&#25104;核心模块，待验收", False),
             ("在建：已<span></span>完成核心模块，待验收", False),
+            ("核心模块开发完成，正在补充测试", False),
+            ("核心能力已实现，正在补充测试", False),
+            ("已经部署至线上环境，正在补充测试", False),
+            ("效率翻倍，正在优化", False),
+            ("成本减半，正在验证", False),
+            ("计划已上线的系统继续迭代，正在实现新路由", False),
         ]
         for claim, allowed in cases:
             with self.subTest(claim=claim):
@@ -253,6 +260,10 @@ class FactGateTests(unittest.TestCase):
                 f"[{visible}](https://example.test/pending)",
             ),
             (
+                f"[{visible}](https://example.test/a_(b))",
+                visible,
+            ),
+            (
                 "在建：正在实现LangGraph多&#65;gent路由，计划验收",
                 visible,
             ),
@@ -287,6 +298,7 @@ class FactGateTests(unittest.TestCase):
         claim = "在建：正在实现LangGraph多Agent路由，计划验收"
         headings = [
             "[在建项目（待验收）](https://example.test/section)",
+            "[在建项目（待验收）](https://example.test/a_(b))",
             "在建项目（待&#39564;收）",
             "在建项\u200b目（待验收）",
         ]
@@ -315,6 +327,31 @@ class FactGateTests(unittest.TestCase):
                 gate = validate_rewrite_facts(result, resumes, self.jobs, [])
 
                 self.assertInProgressBlocked(gate)
+
+    def test_source_evidence_identity_preserves_link_target_and_html_facts(self):
+        cases = [
+            (
+                "访问[项目主页](https://evil.test/a_(b))",
+                "访问[项目主页](https://trusted.test/a_(b))",
+            ),
+            ("使用 List<Foo> 处理请求", "使用 List<Bar> 处理请求"),
+        ]
+        for claim, source_quote in cases:
+            with self.subTest(claim=claim):
+                result = result_for_claim(
+                    claim, status="source_verified", quote=source_quote
+                )
+                resumes = [
+                    {"id": "source_resume_1", "content": source_quote}
+                ]
+
+                gate = validate_rewrite_facts(result, resumes, self.jobs, [])
+
+                self.assertTrue(gate.blockers)
+                self.assertTrue(
+                    any("source_verified" in item.reason for item in gate.blockers),
+                    [item.reason for item in gate.blockers],
+                )
 
     def test_in_progress_section_rejects_non_in_progress_audit(self):
         claim = "在建：正在实现LangGraph多Agent路由，计划以回归集验收"

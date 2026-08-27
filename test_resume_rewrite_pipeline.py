@@ -67,6 +67,15 @@ class InsertionFailingRepository(Repository):
         raise sqlite3.IntegrityError("private database detail")
 
 
+class ReadyTransitionFailingRepository(Repository):
+    def transition_rewrite_run(self, run_id, expected_statuses, new_status, **changes):
+        if new_status == "READY":
+            raise sqlite3.OperationalError("private ready transition failure")
+        return super().transition_rewrite_run(
+            run_id, expected_statuses, new_status, **changes
+        )
+
+
 class ReadyBeforeRecoveryClaimRepository(Repository):
     def __init__(self, database_path, artifacts):
         super().__init__(database_path)
@@ -112,7 +121,42 @@ class FakeRenderer:
         if self.error:
             raise self.error
         pdf_path.write_bytes(b"%PDF-fake")
-        return RenderResult(self.page_count, markdown, [])
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_paths = []
+        for page in range(1, self.page_count + 1):
+            preview_path = preview_dir / f"page-{page}.png"
+            preview_path.write_bytes(b"fake-preview")
+            preview_paths.append(preview_path)
+        return RenderResult(self.page_count, markdown, preview_paths)
+
+
+class DerivedOfficialPathInterruptRenderer(FakeRenderer):
+    def render(self, markdown, pdf_path, preview_dir):
+        stage = Path(pdf_path).parent
+        official_dir = stage.parent
+        self.official_dir = official_dir
+        (official_dir / "resume.md").write_text(markdown, encoding="utf-8")
+        (official_dir / "resume.pdf").write_bytes(b"%PDF-derived")
+        official_preview = official_dir / ".preview"
+        official_preview.mkdir(parents=True, exist_ok=True)
+        (official_preview / "page-1.png").write_bytes(b"derived-preview")
+        pdf_path.write_bytes(b"%PDF-staged")
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        (preview_dir / "page-1.png").write_bytes(b"staged-preview")
+        raise self.error
+
+
+class InvalidPreviewContractRenderer(FakeRenderer):
+    def __init__(self, *, missing_declared_preview=False):
+        super().__init__()
+        self.missing_declared_preview = missing_declared_preview
+
+    def render(self, markdown, pdf_path, preview_dir):
+        pdf_path.write_bytes(b"%PDF-fake")
+        declared = preview_dir / "page-1.png"
+        if self.missing_declared_preview:
+            return RenderResult(1, markdown, [declared])
+        return RenderResult(1, markdown, [])
 
 
 class PublishAfterRecoveryRenderer(FakeRenderer):
@@ -223,6 +267,9 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual(run["status"], "READY")
         for name in ["input-snapshot.json", "jd-evidence.md", "codex-task.md", "result.json", "audit.md", "resume.md", "resume.pdf"]:
             self.assertTrue((Path(run["artifact_dir"]) / name).exists(), name)
+        self.assertTrue(
+            (Path(run["artifact_dir"]) / ".preview" / "page-1.png").is_file()
+        )
         self.assertFalse((Path(run["artifact_dir"]) / ".codex-output.tmp").exists())
         self.assertEqual(run["attempt_count"], 1)
 
@@ -854,6 +901,72 @@ class RewritePipelineTests(unittest.TestCase):
             (artifact_dir / "resume.md").read_text("utf-8"),
             result.rewritten_resume_markdown,
         )
+
+    def test_ready_transition_error_fails_and_removes_published_artifacts(self):
+        repository = ReadyTransitionFailingRepository(
+            self.repository.database_path
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+
+        run = pipeline.run(self.request())
+
+        self.assertEqual((run["status"], run["error_code"]), ("FAILED", "RENDER_ERROR"))
+        self._assert_no_deployable_artifacts(run)
+        artifact_dir = Path(run["artifact_dir"])
+        self.assertFalse((artifact_dir / ".preview").exists())
+        self.assertEqual(list(artifact_dir.glob(".render-stage-*")), [])
+        self.assertEqual(self._audit_events(run)[-1]["event_code"], "RUN_FAILED")
+
+    def test_renderer_base_exception_cleans_derived_official_paths_then_reraises(self):
+        for interrupt in (KeyboardInterrupt("stop"), SystemExit("stop")):
+            with self.subTest(interrupt=type(interrupt).__name__):
+                renderer = DerivedOfficialPathInterruptRenderer(interrupt)
+                pipeline = self.make_pipeline(
+                    FakeCodexRunner(
+                        result_for(self.resume["id"], self.job["id"])
+                    ),
+                    renderer,
+                )
+
+                with self.assertRaises(type(interrupt)) as caught:
+                    pipeline.run(self.request())
+
+                self.assertIs(caught.exception, interrupt)
+                artifact_dir = renderer.official_dir
+                for name in ("resume.md", "resume.pdf"):
+                    self.assertFalse((artifact_dir / name).exists())
+                self.assertFalse((artifact_dir / ".preview").exists())
+                self.assertEqual(list(artifact_dir.glob(".render-stage-*")), [])
+
+    def test_renderer_preview_contract_rejects_zero_or_missing_declared_previews(self):
+        renderers = (
+            InvalidPreviewContractRenderer(),
+            InvalidPreviewContractRenderer(missing_declared_preview=True),
+        )
+        for renderer in renderers:
+            with self.subTest(missing=renderer.missing_declared_preview):
+                run = self.make_pipeline(
+                    FakeCodexRunner(
+                        result_for(self.resume["id"], self.job["id"])
+                    ),
+                    renderer,
+                ).run(self.request())
+
+                self.assertEqual(
+                    (run["status"], run["error_code"]),
+                    ("FAILED", "RENDER_ERROR"),
+                )
+                self._assert_no_deployable_artifacts(run)
+                artifact_dir = Path(run["artifact_dir"])
+                self.assertFalse((artifact_dir / ".preview").exists())
+                self.assertEqual(list(artifact_dir.glob(".render-stage-*")), [])
 
     def test_invalid_runner_result_fails_without_publishing_result_json(self):
         run = self.make_pipeline(FakeCodexRunner({"not": "a result"}), FakeRenderer()).run(self.request())

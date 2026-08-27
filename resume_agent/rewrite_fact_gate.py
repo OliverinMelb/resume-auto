@@ -160,14 +160,22 @@ BUSINESS_RESULT = re.compile(
     r"|(?:显著|明显|大幅)?(?:提升|提高|降低|减少|节省|增长).{0,12}"
     r"(?:准确率|召回率|成功率|转化率|可用性|效率|性能|吞吐|qps|成本|"
     r"耗时|时延|用户数|日活|月活|收入|业务量)"
+    r"|(?:效率|性能|吞吐|qps|用户数|日活|月活|收入|业务量).{0,8}"
+    r"(?:翻倍|倍增)"
+    r"|(?:成本|耗时|时延).{0,8}(?:减半|折半)"
     r"|(?:达到四个九|增长一倍)",
     re.I,
 )
-COMPLETED_ASSERTION = re.compile(
+EXPLICIT_COMPLETED_ASSERTION = re.compile(
     r"(?:已|已经|现已).{0,6}(?:完成|完工|上线|落地|交付|投入使用|投产|发布|"
-    r"通过|达标)"
-    r"|(?:成功|正式).{0,4}(?:发布|上线|投产|交付|投入使用)"
+    r"通过|达标|实现|部署)"
+    r"|(?:已经|现已).{0,8}(?:部署|运行).{0,6}(?:线上|生产)",
+    re.I,
+)
+COMPLETED_ASSERTION = re.compile(
+    r"(?:成功|正式).{0,4}(?:发布|上线|投产|交付|投入使用)"
     r"|(?:稳定运行|投入生产|服务真实用户|服务生产用户)"
+    r"|(?:开发|研发|构建|建设).{0,8}(?:完成|完工|实现|上线|落地|交付)"
     r"|(?:主导|负责|为客户).{0,16}(?:上线|落地|交付|投产|发布)",
     re.I,
 )
@@ -175,7 +183,6 @@ BARE_COMPLETION_TERMS = ("上线", "落地", "交付", "生产")
 FUTURE_TERMS = ("计划", "待", "目标", "拟", "预计", "准备", "将", "验收")
 TEST_CONTEXT_TERMS = ("回归", "测试", "用例", "样本", "验收")
 HTML_MARKUP = re.compile(r"<!--[\s\S]*?-->|<[^>\n]*>")
-MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^\n)]*\)")
 MIN_ANSWER_LENGTH = 4
 MIN_SOURCE_NOTE_LENGTH = 6
 HEADING = re.compile(r"^\s{0,3}#{1,6}(?!#)")
@@ -200,6 +207,7 @@ class InvalidModelResult(ValueError):
 class _DraftLine:
     claim: str
     normalized: str
+    visual_key: str
     in_progress_section: bool = False
 
 
@@ -309,12 +317,14 @@ def validate_in_progress_claims(
             )
         )
 
-    normalized_audits = [_normalize_claim(audit.claim) for audit in result.claim_audit]
+    normalized_audits = [
+        _visual_claim_key(audit.claim) for audit in result.claim_audit
+    ]
     for line in section_lines:
         matches = [
             audit
             for audit, normalized in zip(result.claim_audit, normalized_audits)
-            if normalized == line.normalized
+            if normalized == line.visual_key
         ]
         if len(matches) != 1 or matches[0].claim_status != "in_progress":
             blockers.append(
@@ -332,9 +342,11 @@ def validate_in_progress_claims(
         plan_gap_counts[plan.gap_id] = plan_gap_counts.get(plan.gap_id, 0) + 1
 
     for audit in in_progress_audits:
-        claim = _display_claim(audit.claim)
+        claim = _visual_claim(audit.claim)
         occurrences = [
-            line for line in structure.lines if line.normalized == _normalize_claim(claim)
+            line
+            for line in structure.lines
+            if line.visual_key == _visual_claim_key(claim)
         ]
         if len(occurrences) != 1 or not occurrences[0].in_progress_section:
             blockers.append(
@@ -729,15 +741,27 @@ def _basis_has_evidence(
 
 
 def _display_claim(raw_line: str) -> str:
+    return _rendered_fact_text(_strip_markdown_structure(raw_line))
+
+
+def _visual_claim(raw_line: str) -> str:
+    return _rendered_visible_text(_strip_markdown_structure(raw_line))
+
+
+def _strip_markdown_structure(raw_line: str) -> str:
     value = raw_line.strip()
     value = HEADING_PREFIX.sub("", value)
     value = LIST_PREFIX.sub("", value)
     value = CHECKBOX_PREFIX.sub("", value)
-    return _rendered_visible_text(value)
+    return value
 
 
 def _normalize_claim(value: str) -> str:
     return _normalize_for_hash(_display_claim(value))
+
+
+def _visual_claim_key(value: str) -> str:
+    return _normalize_for_hash(_visual_claim(value))
 
 
 def _substantive_lines(markdown: str) -> list[_DraftLine]:
@@ -757,13 +781,16 @@ def _parse_markdown_structure(markdown: str) -> _MarkdownStructure:
             continue
         is_heading = bool(HEADING.match(raw_line))
         claim = _display_claim(raw_line)
+        visual_claim = _visual_claim(raw_line)
         if is_heading:
             claim = re.sub(r"\s+#+\s*$", "", claim).strip()
+            visual_claim = re.sub(r"\s+#+\s*$", "", visual_claim).strip()
         normalized = _normalize_claim(claim)
+        visual_key = _visual_claim_key(visual_claim)
         heading_level = _heading_level(raw_line) if is_heading and not fenced else None
         explicit_in_progress_heading = (
             heading_level is not None
-            and _is_explicit_in_progress_heading(raw_line, claim)
+            and _is_explicit_in_progress_heading(raw_line)
         )
         if heading_level is not None:
             if in_progress_level is not None and heading_level <= in_progress_level:
@@ -772,7 +799,7 @@ def _parse_markdown_structure(markdown: str) -> _MarkdownStructure:
                 in_progress_heading_count += 1
                 in_progress_level = heading_level
         if is_heading and (
-            normalized in SECTION_HEADINGS or explicit_in_progress_heading
+            visual_key in SECTION_HEADINGS or explicit_in_progress_heading
         ):
             continue
         if normalized:
@@ -780,6 +807,7 @@ def _parse_markdown_structure(markdown: str) -> _MarkdownStructure:
                 _DraftLine(
                     claim=claim,
                     normalized=normalized,
+                    visual_key=visual_key,
                     in_progress_section=in_progress_level is not None,
                 )
             )
@@ -794,15 +822,16 @@ def _heading_level(raw_line: str) -> int | None:
     return len(match.group(1)) if match else None
 
 
-def _is_explicit_in_progress_heading(raw_line: str, claim: str) -> bool:
+def _is_explicit_in_progress_heading(raw_line: str) -> bool:
     strict_heading = re.match(r"^\s{0,3}#{1,6}(?!#)(?:\s+|$)", raw_line)
-    return bool(strict_heading) and _heading_key(claim) == _heading_key(
+    return bool(strict_heading) and _heading_key(raw_line) == _heading_key(
         IN_PROGRESS_HEADING
     )
 
 
 def _heading_key(value: str) -> str:
-    return re.sub(r"\s+", "", _normalize_claim(value))
+    visual = re.sub(r"\s+#+\s*$", "", _visual_claim(value)).strip()
+    return re.sub(r"\s+", "", _normalize_for_hash(visual))
 
 
 def _policy_key(value: str) -> str:
@@ -822,14 +851,87 @@ def _rendered_visible_text(value: str) -> str:
         if decoded == visible:
             break
         visible = decoded
+    visible = _replace_markdown_links(visible, include_url=False)
     visible = HTML_MARKUP.sub("", visible)
-    visible = MARKDOWN_LINK.sub(lambda match: match.group(1), visible)
     visible = unicodedata.normalize("NFKC", visible)
     visible = "".join(
         character for character in visible if not _is_default_ignorable(character)
     )
     visible = re.sub(r"[*_`]+", "", visible)
     return re.sub(r"\s+", " ", visible).strip()
+
+
+def _rendered_fact_text(value: str) -> str:
+    rendered = _replace_markdown_links(value, include_url=True)
+    rendered = unicodedata.normalize("NFKC", rendered)
+    rendered = "".join(
+        character for character in rendered if not _is_default_ignorable(character)
+    )
+    return re.sub(r"\s+", " ", rendered).strip()
+
+
+def _replace_markdown_links(value: str, *, include_url: bool) -> str:
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(value):
+        image = (
+            value[cursor] == "!"
+            and cursor + 1 < len(value)
+            and value[cursor + 1] == "["
+        )
+        label_start = cursor + 1 if image else cursor
+        if value[label_start] != "[" or _is_escaped(value, label_start):
+            output.append(value[cursor])
+            cursor += 1
+            continue
+        label_end = _balanced_end(value, label_start, "[", "]")
+        if (
+            label_end is None
+            or label_end + 1 >= len(value)
+            or value[label_end + 1] != "("
+        ):
+            output.append(value[cursor])
+            cursor += 1
+            continue
+        url_end = _balanced_end(value, label_end + 1, "(", ")")
+        if url_end is None:
+            output.append(value[cursor])
+            cursor += 1
+            continue
+        label = value[label_start + 1:label_end]
+        url = value[label_end + 2:url_end]
+        if include_url:
+            prefix = "!" if image else ""
+            output.append(f"{prefix}{label} ({url})")
+        else:
+            output.append(label)
+        cursor = url_end + 1
+    return "".join(output)
+
+
+def _balanced_end(
+    value: str, start: int, opening: str, closing: str
+) -> int | None:
+    depth = 0
+    for index in range(start, len(value)):
+        if _is_escaped(value, index):
+            continue
+        if value[index] == opening:
+            depth += 1
+        elif value[index] == closing:
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _is_escaped(value: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and value[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return backslashes % 2 == 1
 
 
 def _is_default_ignorable(character: str) -> bool:
@@ -858,9 +960,12 @@ def _forbidden_in_progress_state(claim: str) -> str | None:
         )
         if external is not None:
             return external
-        completed = COMPLETED_ASSERTION.search(clause)
-        if completed:
-            return completed.group(0)
+        explicit_completed = EXPLICIT_COMPLETED_ASSERTION.search(clause)
+        if explicit_completed:
+            return explicit_completed.group(0)
+        for completed in COMPLETED_ASSERTION.finditer(clause):
+            if not _has_future_target_before(clause, completed.start()):
+                return completed.group(0)
         for term in BARE_COMPLETION_TERMS:
             start = clause.find(term)
             while start >= 0:
@@ -871,12 +976,16 @@ def _forbidden_in_progress_state(claim: str) -> str | None:
 
 
 def _is_future_or_artifact_reference(clause: str, term: str, start: int) -> bool:
-    prefix = clause[max(0, start - 12):start]
     suffix = clause[start + len(term):start + len(term) + 4]
     if term == "上线" and suffix.startswith("前"):
         return True
     if term == "交付" and suffix.startswith("物"):
         return True
+    return _has_future_target_before(clause, start)
+
+
+def _has_future_target_before(clause: str, event_start: int) -> bool:
+    prefix = clause[:event_start]
     return any(marker in prefix for marker in FUTURE_TERMS)
 
 

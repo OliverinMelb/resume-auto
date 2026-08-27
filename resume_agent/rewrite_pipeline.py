@@ -295,9 +295,25 @@ class ResumeRewritePipeline:
                 )
                 return self._decorate_run(updated)
             validated_markdown = gate.rewritten_resume_markdown
-            render_result = self._render_and_publish(
-                artifacts, validated_markdown
+            return self._render_publish_and_mark_ready(
+                run, artifacts, materials, result, validated_markdown
             )
+        except (CodexRunError, InvalidModelResult, RenderError, ValidationError) as error:
+            self._fail(run, artifacts, error)
+            return self.get(run["id"])
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _render_publish_and_mark_ready(
+        self,
+        run: dict,
+        artifacts: RunArtifacts,
+        materials: dict[str, Any],
+        result: CodexRewriteResult,
+        validated_markdown: str,
+    ) -> dict:
+        try:
+            render_result = self._render_and_publish(artifacts, validated_markdown)
             artifacts.append_audit(
                 run_id=run["id"], status="RUNNING", event_code="RENDER_COMPLETED",
                 content_hash=_hash_text(validated_markdown),
@@ -314,18 +330,24 @@ class ResumeRewritePipeline:
                     expected_owner_token=self._owner_token,
                 )
             except ValueError:
-                self._remove_deployable_artifacts(artifacts)
-                return self.get(run["id"])
+                current = self.repository.get_rewrite_run(run["id"])
+                if (
+                    current["status"] != "RUNNING"
+                    or current.get("owner_token") != self._owner_token
+                ):
+                    self._best_effort_remove_publication_artifacts(artifacts)
+                    return self._decorate_run(current)
+                raise
             artifacts.append_audit(
                 run_id=run["id"], status="READY", event_code="RUN_READY",
                 source_ids=[item["id"] for item in materials["resumes"] + materials["jobs"]],
             )
             return self._decorate_run(updated)
-        except (CodexRunError, InvalidModelResult, RenderError, ValidationError) as error:
-            self._fail(run, artifacts, error)
-            return self.get(run["id"])
-        finally:
-            temporary.unlink(missing_ok=True)
+        except (KeyboardInterrupt, SystemExit):
+            self._best_effort_remove_publication_artifacts(artifacts)
+            raise
+        except Exception as error:
+            return self._fail_publication_best_effort(run, artifacts, error)
 
     def _fail_validation(self, run: dict, artifacts: RunArtifacts) -> None:
         self._fail(
@@ -402,6 +424,60 @@ class ResumeRewritePipeline:
                 raise ValueError("preview directory escapes run artifacts")
             shutil.rmtree(resolved_preview)
 
+    def _best_effort_remove_publication_artifacts(
+        self, artifacts: RunArtifacts
+    ) -> None:
+        targets = [
+            artifacts.directory / "resume.md",
+            artifacts.directory / "resume.pdf",
+            artifacts.directory / ".preview",
+            *artifacts.directory.glob(".render-stage-*"),
+        ]
+        for target in targets:
+            try:
+                if target.is_symlink():
+                    target.unlink(missing_ok=True)
+                elif target.is_dir():
+                    if target.resolve().parent == artifacts.directory.resolve():
+                        shutil.rmtree(target)
+                elif target.exists():
+                    target.unlink()
+            except Exception:
+                continue
+
+    def _fail_publication_best_effort(
+        self, run: dict, artifacts: RunArtifacts, error: Exception
+    ) -> dict:
+        self._best_effort_remove_publication_artifacts(artifacts)
+        code = _publication_error_code(error)
+        try:
+            artifacts.append_audit(
+                run_id=run["id"],
+                status="FAILED",
+                event_code="RUN_FAILED",
+                error_code=code,
+                error_safe_hash=_hash_text(code),
+            )
+        except Exception:
+            pass
+        try:
+            current = self.repository.get_rewrite_run(run["id"])
+            if current["status"] in {"QUEUED", "RUNNING", "READY"}:
+                self.repository.transition_rewrite_run(
+                    run["id"],
+                    {current["status"]},
+                    "FAILED",
+                    error_code=code,
+                    expected_owner_token=(
+                        self._owner_token
+                        if current["status"] == "RUNNING"
+                        else None
+                    ),
+                )
+        except Exception:
+            pass
+        return self._decorate_run(self.repository.get_rewrite_run(run["id"]))
+
     def _render_and_publish(
         self, artifacts: RunArtifacts, validated_markdown: str
     ):
@@ -427,7 +503,7 @@ class ResumeRewritePipeline:
                     raise RenderError(
                         "RENDER_ERROR", "Unable to render the resume safely."
                     ) from None
-                self._publish_staged_deployables(artifacts, stage)
+                self._publish_staged_deployables(artifacts, stage, render_result)
                 return render_result
         except RenderError:
             raise
@@ -437,7 +513,7 @@ class ResumeRewritePipeline:
             ) from None
 
     def _publish_staged_deployables(
-        self, artifacts: RunArtifacts, stage: Path
+        self, artifacts: RunArtifacts, stage: Path, render_result: Any
     ) -> None:
         expected_parent = artifacts.directory.resolve()
         resolved_stage = stage.resolve()
@@ -455,10 +531,9 @@ class ResumeRewritePipeline:
             raise RenderError("RENDER_ERROR", "Rendered Markdown staging is invalid.")
         if not self._is_regular_staged_file(staged_pdf, resolved_stage):
             raise RenderError("RENDER_ERROR", "Rendered PDF staging is invalid.")
-        if staged_preview.exists() and not self._is_safe_preview_stage(
-            staged_preview, resolved_stage
-        ):
-            raise RenderError("RENDER_ERROR", "Rendered preview staging is invalid.")
+        self._validate_staged_previews(
+            render_result, staged_preview, resolved_stage
+        )
 
         official_markdown = artifacts.path("resume.md")
         official_pdf = artifacts.path("resume.pdf")
@@ -468,8 +543,7 @@ class ResumeRewritePipeline:
         try:
             staged_markdown.replace(official_markdown)
             staged_pdf.replace(official_pdf)
-            if staged_preview.exists():
-                staged_preview.replace(official_preview)
+            staged_preview.replace(official_preview)
         except OSError:
             self._remove_deployable_artifacts(artifacts)
             raise RenderError(
@@ -495,6 +569,37 @@ class ResumeRewritePipeline:
             and child.resolve().parent == path.resolve()
             for child in children
         )
+
+    @classmethod
+    def _validate_staged_previews(
+        cls, render_result: Any, preview_dir: Path, stage: Path
+    ) -> None:
+        page_count = getattr(render_result, "page_count", None)
+        preview_paths = getattr(render_result, "preview_paths", None)
+        if (
+            type(page_count) is not int
+            or page_count < 1
+            or not isinstance(preview_paths, (list, tuple))
+            or len(preview_paths) != page_count
+            or not cls._is_safe_preview_stage(preview_dir, stage)
+        ):
+            raise RenderError("RENDER_ERROR", "Rendered preview contract is invalid.")
+        try:
+            declared = [Path(path) for path in preview_paths]
+        except TypeError:
+            raise RenderError(
+                "RENDER_ERROR", "Rendered preview contract is invalid."
+            ) from None
+        resolved_preview = preview_dir.resolve()
+        if any(
+            not cls._is_regular_staged_file(path, resolved_preview)
+            for path in declared
+        ):
+            raise RenderError("RENDER_ERROR", "Rendered preview contract is invalid.")
+        declared_paths = {path.resolve() for path in declared}
+        actual_paths = {path.resolve() for path in preview_dir.iterdir()}
+        if len(declared_paths) != page_count or declared_paths != actual_paths:
+            raise RenderError("RENDER_ERROR", "Rendered preview contract is invalid.")
 
     def _new_lease_expiration(self) -> str:
         return (
@@ -565,3 +670,9 @@ def _safe_error_code(error: Exception) -> str:
     if isinstance(error, RenderError):
         return "RENDER_ERROR" if error.code == "RENDER_ERROR" else "RENDER_VALIDATION_ERROR"
     return "INVALID_MODEL_RESULT"
+
+
+def _publication_error_code(error: Exception) -> str:
+    if isinstance(error, RenderError):
+        return _safe_error_code(error)
+    return "RENDER_ERROR"
