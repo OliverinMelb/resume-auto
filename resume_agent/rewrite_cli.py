@@ -32,6 +32,31 @@ _EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _PHONE = re.compile(r"(?<![\w])(?:\+?\d[\d()\s.-]{6,}\d)(?![\w])")
 
 
+def read_target_jd_file(path: Path) -> str:
+    """Read one safe UTF-8 Markdown/text JD at the CLI boundary."""
+    if not isinstance(path, Path):
+        raise ValueError("target JD file path is invalid")
+    if path.suffix.lower() not in _TEXT_RESUME_SUFFIXES:
+        raise ValueError("target JD file must be .md or .txt")
+    if _is_reparse_point(path):
+        raise ValueError("target JD file is unsafe")
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ValueError("target JD file is unavailable") from None
+    if not resolved.is_file():
+        raise ValueError("target JD file is unavailable")
+    try:
+        content = resolved.read_text(encoding="utf-8-sig").strip()
+    except (OSError, UnicodeError):
+        raise ValueError("target JD file is unavailable") from None
+    if not content:
+        raise ValueError("target JD file is empty")
+    if len(content) > 100_000:
+        raise ValueError("target JD file exceeds 100000 characters")
+    return content
+
+
 class _InputAction(argparse.Action):
     """Collect repeatable ID/path inputs in the order the user supplied them."""
 
