@@ -95,6 +95,19 @@ class RewriteReason(StrictModel):
     job_ids: list[str]
 
 
+ClaimStatus = Literal["verified", "reframed", "in_progress"]
+
+
+class GapAcceptancePlan(StrictModel):
+    gap_id: str = Field(pattern=r"^gap-[0-9a-f]{12}$")
+    jd_requirements: list[str] = Field(min_length=1, max_length=20)
+    project_scope: str = Field(min_length=1, max_length=2000)
+    required_artifacts: list[str] = Field(min_length=1, max_length=50)
+    test_commands: list[str] = Field(min_length=1, max_length=20)
+    acceptance_metrics: list[str] = Field(min_length=1, max_length=20)
+    interview_topics: list[str] = Field(default_factory=list, max_length=50)
+
+
 class ClaimAudit(StrictModel):
     claim: str
     source_resume_ids: list[str]
@@ -103,6 +116,23 @@ class ClaimAudit(StrictModel):
     change_type: Literal["unchanged", "compressed", "reordered", "strengthened"]
     fact_status: Literal["source_verified", "user_confirmed", "unverified"]
     measurement_basis: str | None = None
+    claim_status: ClaimStatus
+    gap_id: str | None = Field(default=None, pattern=r"^gap-[0-9a-f]{12}$")
+    acceptance_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_experience_status(self):
+        if self.claim_status == "in_progress":
+            if self.gap_id is None:
+                raise ValueError("in_progress claim must include gap_id")
+            if self.acceptance_id is not None:
+                raise ValueError("in_progress claim cannot include acceptance_id")
+        elif (self.gap_id is None) != (self.acceptance_id is None):
+            raise ValueError(
+                "verified or reframed claim must include both gap_id and "
+                "acceptance_id when promoted from an accepted gap"
+            )
+        return self
 
 
 class CodexRewriteResult(StrictModel):
@@ -115,3 +145,20 @@ class CodexRewriteResult(StrictModel):
     depth_recommendations: list[str]
     interviewer_probes: list[str]
     claim_audit: list[ClaimAudit]
+    gap_acceptance_plans: list[GapAcceptancePlan]
+
+    @model_validator(mode="after")
+    def validate_gap_acceptance_plans(self):
+        in_progress_gap_ids = {
+            audit.gap_id
+            for audit in self.claim_audit
+            if audit.claim_status == "in_progress"
+        }
+        plan_gap_ids = [plan.gap_id for plan in self.gap_acceptance_plans]
+        if len(plan_gap_ids) != len(set(plan_gap_ids)):
+            raise ValueError("gap_acceptance_plans must contain unique gap_id values")
+        if set(plan_gap_ids) != in_progress_gap_ids:
+            raise ValueError(
+                "gap_acceptance_plans must match in_progress claim gap_id values"
+            )
+        return self

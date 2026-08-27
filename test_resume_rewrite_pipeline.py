@@ -133,8 +133,9 @@ def result_for(resume_id, job_id):
             "claim": claim, "source_resume_ids": [resume_id],
             "source_quotes": [claim], "job_ids": [job_id],
             "change_type": "unchanged", "fact_status": "source_verified",
-            "measurement_basis": None,
+            "measurement_basis": None, "claim_status": "verified",
         }],
+        "gap_acceptance_plans": [],
     })
 
 
@@ -148,8 +149,9 @@ def metric_result(resume_id, job_id):
             "claim": claim, "source_resume_ids": [resume_id],
             "source_quotes": [claim], "job_ids": [job_id],
             "change_type": "unchanged", "fact_status": "user_confirmed",
-            "measurement_basis": None,
+            "measurement_basis": None, "claim_status": "verified",
         }],
+        "gap_acceptance_plans": [],
     })
 
 
@@ -762,9 +764,10 @@ class RewritePipelineTests(unittest.TestCase):
             "rewritten_resume_markdown": "# Candidate\n- Built LangGraph agent workflows",
             "rewrite_reasons": [], "depth_recommendations": [], "interviewer_probes": [],
             "claim_audit": [
-                {"claim": "Candidate", "source_resume_ids": [self.resume["id"]], "source_quotes": ["Candidate"], "job_ids": [self.job["id"]], "change_type": "unchanged", "fact_status": "source_verified", "measurement_basis": None},
-                {"claim": "Built LangGraph agent workflows", "source_resume_ids": [self.resume["id"]], "source_quotes": ["Built LangGraph agent workflows"], "job_ids": [self.job["id"]], "change_type": "unchanged", "fact_status": "source_verified", "measurement_basis": None},
+                {"claim": "Candidate", "source_resume_ids": [self.resume["id"]], "source_quotes": ["Candidate"], "job_ids": [self.job["id"]], "change_type": "unchanged", "fact_status": "source_verified", "measurement_basis": None, "claim_status": "verified"},
+                {"claim": "Built LangGraph agent workflows", "source_resume_ids": [self.resume["id"]], "source_quotes": ["Built LangGraph agent workflows"], "job_ids": [self.job["id"]], "change_type": "unchanged", "fact_status": "source_verified", "measurement_basis": None, "claim_status": "verified"},
             ],
+            "gap_acceptance_plans": [],
         })
         run = self.make_pipeline(FakeCodexRunner(result), FakeRenderer()).run(self.request())
         self.assertEqual(run["status"], "READY")

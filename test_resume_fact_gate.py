@@ -41,8 +41,10 @@ def result_with_metric(status="unverified", basis=None):
                     "change_type": "unchanged",
                     "fact_status": status,
                     "measurement_basis": basis,
+                    "claim_status": "verified",
                 }
             ],
+            "gap_acceptance_plans": [],
         }
     )
 
@@ -59,6 +61,7 @@ def empty_result(*, markdown="", missing_information=None):
             "depth_recommendations": [],
             "interviewer_probes": [],
             "claim_audit": [],
+            "gap_acceptance_plans": [],
         }
     )
 
@@ -83,8 +86,10 @@ def result_for_claim(claim, *, status, quote=None, basis=None):
                     "change_type": "unchanged",
                     "fact_status": status,
                     "measurement_basis": basis,
+                    "claim_status": "verified",
                 }
             ],
+            "gap_acceptance_plans": [],
         }
     )
 

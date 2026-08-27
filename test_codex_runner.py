@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from resume_agent.codex_runner import CodexCliAdapter, CodexRunError
 from resume_agent.rewrite_schemas import CodexRewriteResult
 
@@ -19,6 +21,7 @@ VALID_RESULT = {
     "depth_recommendations": [],
     "interviewer_probes": [],
     "claim_audit": [],
+    "gap_acceptance_plans": [],
 }
 
 REQUIRED_RESULT_FIELDS = {
@@ -31,7 +34,39 @@ REQUIRED_RESULT_FIELDS = {
     "depth_recommendations",
     "interviewer_probes",
     "claim_audit",
+    "gap_acceptance_plans",
 }
+
+
+def pending_result_payload():
+    return {
+        **VALID_RESULT,
+        "claim_audit": [
+            {
+                "claim": "构建本地 Agent 评测集",
+                "source_resume_ids": [],
+                "source_quotes": [],
+                "job_ids": ["job_" + "b" * 32],
+                "change_type": "strengthened",
+                "fact_status": "unverified",
+                "measurement_basis": None,
+                "claim_status": "in_progress",
+                "gap_id": "gap-123456789abc",
+                "acceptance_id": None,
+            }
+        ],
+        "gap_acceptance_plans": [
+            {
+                "gap_id": "gap-123456789abc",
+                "jd_requirements": ["Agent评测"],
+                "project_scope": "构建本地评测集",
+                "required_artifacts": ["tests/eval_cases.json"],
+                "test_commands": ["python -m unittest -v"],
+                "acceptance_metrics": ["保存逐案例通过记录"],
+                "interview_topics": ["评测集设计"],
+            }
+        ],
+    }
 
 
 class CodexRunnerTests(unittest.TestCase):
@@ -203,6 +238,75 @@ class CodexRunnerTests(unittest.TestCase):
 
 
 class CodexSchemaTests(unittest.TestCase):
+    def test_codex_result_requires_claim_status_and_gap_plans(self):
+        payload = pending_result_payload()
+
+        result = CodexRewriteResult.model_validate(payload)
+
+        self.assertEqual(result.claim_audit[0].claim_status, "in_progress")
+        self.assertEqual(result.gap_acceptance_plans[0].gap_id, "gap-123456789abc")
+
+        without_claim_status = pending_result_payload()
+        without_claim_status["claim_audit"][0].pop("claim_status")
+        without_gap_plans = pending_result_payload()
+        without_gap_plans.pop("gap_acceptance_plans")
+        for incomplete in (without_claim_status, without_gap_plans):
+            with self.subTest(incomplete=incomplete):
+                with self.assertRaises(ValidationError):
+                    CodexRewriteResult.model_validate(incomplete)
+
+    def test_in_progress_claim_requires_gap_and_forbids_acceptance(self):
+        for changes in (
+            {"gap_id": None},
+            {"acceptance_id": "gap_acceptance_" + "c" * 32},
+        ):
+            with self.subTest(changes=changes):
+                payload = pending_result_payload()
+                payload["claim_audit"][0].update(changes)
+                with self.assertRaises(ValidationError):
+                    CodexRewriteResult.model_validate(payload)
+
+    def test_completed_claim_gap_references_are_both_empty_or_accepted(self):
+        payload = pending_result_payload()
+        payload["claim_audit"][0].update(
+            {
+                "claim_status": "verified",
+                "acceptance_id": "gap_acceptance_" + "c" * 32,
+            }
+        )
+        payload["gap_acceptance_plans"] = []
+        accepted = CodexRewriteResult.model_validate(payload)
+        self.assertEqual(
+            accepted.claim_audit[0].acceptance_id,
+            "gap_acceptance_" + "c" * 32,
+        )
+
+        for changes in (
+            {"gap_id": "gap-123456789abc", "acceptance_id": None},
+            {"gap_id": None, "acceptance_id": "gap_acceptance_" + "c" * 32},
+        ):
+            with self.subTest(changes=changes):
+                payload = pending_result_payload()
+                payload["claim_audit"][0].update(
+                    {"claim_status": "reframed", **changes}
+                )
+                payload["gap_acceptance_plans"] = []
+                with self.assertRaises(ValidationError):
+                    CodexRewriteResult.model_validate(payload)
+
+    def test_gap_plans_match_in_progress_gap_ids_exactly_once(self):
+        mismatched = pending_result_payload()
+        mismatched["gap_acceptance_plans"][0]["gap_id"] = "gap-aaaaaaaaaaaa"
+        duplicate = pending_result_payload()
+        duplicate["gap_acceptance_plans"].append(
+            dict(duplicate["gap_acceptance_plans"][0])
+        )
+
+        for payload in (mismatched, duplicate):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValidationError):
+                    CodexRewriteResult.model_validate(payload)
+
     def test_checked_in_schema_matches_the_strict_pydantic_contract(self):
         schema_path = Path(__file__).parent / "resume_agent" / "codex_resume_result.schema.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -213,6 +317,18 @@ class CodexSchemaTests(unittest.TestCase):
         self.assertEqual(schema, CodexRewriteResult.model_json_schema())
         self.assertEqual(set(schema["required"]), REQUIRED_RESULT_FIELDS)
         self.assertEqual(set(schema["properties"]), REQUIRED_RESULT_FIELDS)
+        self.assertIn("claim_status", schema["$defs"]["ClaimAudit"]["required"])
+        self.assertEqual(
+            set(schema["$defs"]["GapAcceptancePlan"]["required"]),
+            {
+                "gap_id",
+                "jd_requirements",
+                "project_scope",
+                "required_artifacts",
+                "test_commands",
+                "acceptance_metrics",
+            },
+        )
         self._assert_all_objects_forbid_extra_properties(schema)
 
     def _assert_all_objects_forbid_extra_properties(self, value):

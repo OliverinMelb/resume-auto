@@ -8,6 +8,7 @@ from pathlib import Path
 from resume_agent.rewrite_artifacts import RunArtifacts
 from resume_agent.rewrite_prompt import build_codex_task, render_jd_evidence
 from resume_agent.rewrite_schemas import FactAnswer
+from resume_agent.research import build_external_resume_prompt
 
 
 RUN_ID = "rewrite_run_" + "a" * 32
@@ -171,6 +172,35 @@ class RewriteSupportTests(unittest.TestCase):
         self.assertIn("valid UTC timestamp", task)
         self.assertNotIn("danger-full-access", task)
 
+    def test_task_marks_pending_projects_as_current_not_completed(self):
+        task = build_codex_task(
+            base_prompt="候选人简历与JD材料",
+            fact_answers=[],
+            allowed_resume_ids=["source_resume_" + "a" * 32],
+            allowed_job_ids=["job_" + "b" * 32],
+        )
+
+        self.assertIn("在建项目（待验收）", task)
+        self.assertIn("不得写成已上线或已产生业务结果", task)
+
+    def test_rewrite_prompt_allows_only_explicitly_pending_gap_projects(self):
+        prompt = build_external_resume_prompt(
+            candidate={"target_roles": ["AI Agent工程师"]},
+            source_resumes=[],
+            report={
+                "target_role": "AI Agent工程师",
+                "manual_findings": [],
+                "keyword_counts": [],
+                "notes": "",
+            },
+            jobs=[],
+            extra_instructions="",
+        )
+
+        self.assertIn("在建项目（待验收）", prompt)
+        self.assertIn("不得写成已完成、已上线或已有业务结果", prompt)
+        self.assertIn("test_commands 只能作为文本建议", prompt)
+
     def test_task_serializes_candidate_fact_answers_and_all_output_fields(self):
         fact_answers = [
                 FactAnswer(
@@ -209,6 +239,7 @@ class RewriteSupportTests(unittest.TestCase):
             "depth_recommendations",
             "interviewer_probes",
             "claim_audit",
+            "gap_acceptance_plans",
         ):
             self.assertIn(field, task)
         self.assertIn("候选人提供的证据", task)
