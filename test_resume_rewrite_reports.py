@@ -118,6 +118,70 @@ class RewriteReportTests(unittest.TestCase):
                 self.assertIn("[REDACTED_CREDENTIAL]", sanitized)
                 self.assertNotIn("cli-secret", sanitized.casefold())
 
+    def test_report_sanitizer_redacts_sensitive_values_to_current_line_end(self):
+        cases = (
+            (
+                "Authorization: Basic dXNlcjpwYXNz auth-tail\nordinary next line",
+                ("dXNlcjpwYXNz", "auth-tail"),
+            ),
+            (
+                "HTTP_AUTHORIZATION=Basic ZW52OnNlY3JldA== env-tail\nordinary next line",
+                ("ZW52OnNlY3JldA==", "env-tail"),
+            ),
+            (
+                "--auth Basic Y2xpOnNlY3JldA== cli-tail\nordinary next line",
+                ("Y2xpOnNlY3JldA==", "cli-tail"),
+            ),
+            (
+                "Cookie: session=first; tracking=second; final=third\nordinary next line",
+                ("first", "second", "third"),
+            ),
+            (
+                "session_id=first; refresh_token=second\nordinary next line",
+                ("first", "second"),
+            ),
+            (
+                "Bearer YmVhcmVyOnNlY3JldA== bearer-tail\nordinary next line",
+                ("YmVhcmVyOnNlY3JldA==", "bearer-tail"),
+            ),
+        )
+
+        for value, secrets in cases:
+            with self.subTest(value=value):
+                sanitized = sanitize_report_text(value)
+                self.assertIn("[REDACTED_CREDENTIAL]", sanitized)
+                self.assertIn("ordinary next line", sanitized)
+                for secret in secrets:
+                    self.assertNotIn(secret.casefold(), sanitized.casefold())
+
+    def test_report_sanitizer_redacts_explicit_secret_key_env_suffixes_only(self):
+        sensitive = (
+            "DJANGO_SECRET_KEY=django-secret",
+            "Django_Secret_Key=mixed-secret",
+            "AWS_SECRET_ACCESS_KEY=aws-secret",
+            "SSH_PRIVATE_KEY=private-secret",
+            "SERVICE_ACCESS_KEY=access-secret",
+            "AWS_ACCESS_KEY_ID=identifier-secret",
+            "PRIVATE_KEY=bare-private-secret",
+            "ACCESS_KEY=bare-access-secret",
+        )
+        for value in sensitive:
+            with self.subTest(value=value):
+                sanitized = sanitize_report_text(value)
+                self.assertEqual(sanitized, "[REDACTED_CREDENTIAL]")
+                self.assertNotIn("secret", sanitized.casefold())
+
+        ordinary = (
+            "DJANGO_KEY=ordinary-value",
+            "KEY=ordinary-value",
+            "MONKEY=ordinary-value",
+            "PUBLIC_KEY=ordinary-value",
+            "access keyboard",
+        )
+        for value in ordinary:
+            with self.subTest(value=value):
+                self.assertEqual(sanitize_report_text(value), value)
+
     def test_report_sanitizer_decodes_percent_encoding_and_fails_closed(self):
         cases = (
             ("contact%40example.com", "[REDACTED_EMAIL]"),

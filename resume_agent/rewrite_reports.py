@@ -38,6 +38,8 @@ JWT_PATTERN = re.compile(
     r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
 )
 CREDENTIAL_LABEL_SOURCE = (
+    r"(?:[A-Za-z][A-Za-z0-9]*_)*(?:secret_access_key|secret_key|"
+    r"private_key|access_key(?:_id)?)|"
     r"(?:[A-Za-z][A-Za-z0-9]*_)+(?:authorization|token|"
     r"session(?:_id)?|api_key|secret|password|passwd|cookie)|"
     r"auth|authorization|proxy-authorization|cookie|set-cookie|token|"
@@ -47,18 +49,16 @@ CREDENTIAL_LABEL_SOURCE = (
 )
 CREDENTIAL_PATTERN = re.compile(
     rf"(?i)(?<![A-Za-z0-9_])(?:{CREDENTIAL_LABEL_SOURCE})"
-    r"(?![A-Za-z0-9_])\s*(?::|=)\s*"
-    r"(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;，；]+)"
+    r"(?![A-Za-z0-9_])[ \t]*(?::|=)[^\r\n]*"
 )
 BEARER_SECRET_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])bearer\s+"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+    r"(?i)(?<![A-Za-z0-9_])bearer[ \t]+[^\r\n]+"
 )
 COMMAND_SECRET_PATTERN = re.compile(
     r"(?i)(--?(?:auth|authorization|cookie|set-cookie|access[_-]?token|"
     r"refresh[_-]?token|token|session(?:[_-]?id)?|api[_-]?key|"
     r"client[_-]?secret|password|passwd|secret))"
-    r"(?:\s+|=)(?:\"[^\"]*\"|'[^']*'|[^\s,;，；]+)"
+    r"(?:[ \t]+|=)[^\r\n]*"
 )
 KNOWN_SECRET_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{16,}|"
