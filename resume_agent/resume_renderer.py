@@ -154,11 +154,9 @@ class ReportLabAdapter:
         """Publish both output targets as a rollback-capable filesystem transaction."""
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         preview_dir.parent.mkdir(parents=True, exist_ok=True)
-        transaction_id = uuid.uuid4().hex[:24]
-        pdf_stage = pdf_path.parent / f".rp-{transaction_id}"
-        preview_stage = preview_dir.parent / f".rv-{transaction_id}"
-        pdf_backup = pdf_path.parent / f".rb-{transaction_id}"
-        preview_backup = preview_dir.parent / f".rd-{transaction_id}"
+        pdf_stage, preview_stage, pdf_backup, preview_backup = (
+            _allocate_transaction_paths(pdf_path, preview_dir)
+        )
         transaction = PublicationTransaction(
             pdf_path=pdf_path,
             preview_dir=preview_dir,
@@ -172,7 +170,6 @@ class ReportLabAdapter:
 
         try:
             shutil.copyfile(selected_pdf, pdf_stage)
-            preview_stage.mkdir()
             for preview_file in preview_files:
                 shutil.copyfile(preview_file, preview_stage / preview_file.name)
 
@@ -265,6 +262,7 @@ class ReportLabAdapter:
                 raise RenderError("UNSUPPORTED_MARKDOWN", "HTML is not supported.")
             if IMAGE.search(line):
                 raise RenderError("UNSUPPORTED_MARKDOWN", "Images are not supported.")
+            _strip_inline_bold(line)
         if not _normalized_markdown_lines(markdown):
             raise RenderError("EMPTY_CONTENT", "Resume Markdown must contain text.")
 
@@ -449,7 +447,7 @@ def _paragraph_markup(text: str) -> str:
         return f"{label} ({url})"
 
     linked = LINK.sub(replace_link, text)
-    return escape(INLINE_BOLD.sub(lambda match: match.group(1), linked))
+    return escape(_strip_inline_bold(linked))
 
 
 def _normalized_markdown_lines(markdown: str) -> list[str]:
@@ -464,7 +462,7 @@ def _normalized_markdown_lines(markdown: str) -> list[str]:
             if bullet:
                 text = bullet.group(1)
         text = LINK.sub(lambda match: f"{match.group(1)} ({match.group(2)})", text)
-        text = INLINE_BOLD.sub(lambda match: match.group(1), text)
+        text = _strip_inline_bold(text)
         normalized = _normalize_plain_text(text)
         if normalized:
             lines.append(normalized)
@@ -473,3 +471,50 @@ def _normalized_markdown_lines(markdown: str) -> list[str]:
 
 def _normalize_plain_text(text: str) -> str:
     return WHITESPACE.sub(" ", text).strip()
+
+
+def _strip_inline_bold(text: str) -> str:
+    if "****" in text:
+        raise RenderError(
+            "UNSUPPORTED_MARKDOWN", "Malformed inline bold Markdown is not supported."
+        )
+    rendered = INLINE_BOLD.sub(lambda match: match.group(1), text)
+    if "**" in rendered:
+        raise RenderError(
+            "UNSUPPORTED_MARKDOWN", "Malformed inline bold Markdown is not supported."
+        )
+    return rendered
+
+
+def _allocate_transaction_paths(
+    pdf_path: Path, preview_dir: Path
+) -> tuple[Path, Path, Path, Path]:
+    """Exclusively reserve short stage names no longer than their final targets."""
+    if len(pdf_path.name) < 3 or len(preview_dir.name) < 3:
+        raise OSError("publication target names are too short")
+    for _ in range(128):
+        token = uuid.uuid4().hex
+        pdf_token = token[: len(pdf_path.name) - 2]
+        preview_token = token[: len(preview_dir.name) - 2]
+        pdf_stage = pdf_path.parent / f".p{pdf_token}"
+        preview_stage = preview_dir.parent / f".v{preview_token}"
+        pdf_backup = pdf_path.parent / f".b{pdf_token}"
+        preview_backup = preview_dir.parent / f".d{preview_token}"
+        reserved: tuple[Path, ...] = ()
+        try:
+            with pdf_stage.open("xb"):
+                pass
+            reserved = (pdf_stage,)
+            preview_stage.mkdir()
+            reserved = (pdf_stage, preview_stage)
+        except FileExistsError:
+            _try_remove_transaction_paths(reserved)
+            continue
+        except OSError:
+            _try_remove_transaction_paths(reserved)
+            raise
+        if pdf_backup.exists() or preview_backup.exists():
+            _remove_transaction_paths(reserved)
+            continue
+        return pdf_stage, preview_stage, pdf_backup, preview_backup
+    raise OSError("unable to reserve publication transaction paths")

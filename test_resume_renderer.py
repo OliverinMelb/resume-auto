@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +44,21 @@ class ResumeRendererTests(unittest.TestCase):
 
         self.assertIn("Target: AI Agent Engineer", result.extracted_text)
         self.assertNotIn("**", result.extracted_text)
+
+    def test_malformed_inline_bold_markers_are_rejected(self):
+        for malformed in (
+            "**Target",
+            "****",
+            "**outer **inner**",
+            "**one****two**",
+        ):
+            with self.subTest(markdown=malformed):
+                with self.assertRaisesRegex(RenderError, "UNSUPPORTED_MARKDOWN"):
+                    self.renderer.render(
+                        f"# Resume\n{malformed}",
+                        self.root / "resume.pdf",
+                        self.root / "preview",
+                    )
 
     def test_markdown_table_is_rejected(self):
         with self.assertRaisesRegex(RenderError, "UNSUPPORTED_MARKDOWN"):
@@ -167,7 +183,7 @@ class ResumeRendererTests(unittest.TestCase):
                 stage_publish_failed
                 and not restore_failed
                 and target_path == destination
-                and source_path.name.startswith(".rb-")
+                and source_path.name.startswith(".b")
             ):
                 restore_failed = True
                 raise PermissionError(f"private backup path: {self.root}")
@@ -183,7 +199,7 @@ class ResumeRendererTests(unittest.TestCase):
         self.assertTrue(restore_failed)
         self.assertEqual(raised.exception.code, "RENDER_RECOVERY_REQUIRED")
         self.assertNotIn(str(self.root), raised.exception.safe_message)
-        backups = list(self.root.glob(".rb-*"))
+        backups = list(self.root.glob(".b*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_bytes(), b"old-pdf")
 
@@ -200,11 +216,11 @@ class ResumeRendererTests(unittest.TestCase):
         def fail_after_pdf_backup_cleanup(path):
             nonlocal pdf_backup_deleted, preview_cleanup_failed
             candidate = Path(path)
-            if candidate.name.startswith(".rb-"):
+            if candidate.name.startswith(".b"):
                 original_remove(candidate)
                 pdf_backup_deleted = True
                 return
-            if pdf_backup_deleted and candidate.name.startswith(".rd-"):
+            if pdf_backup_deleted and candidate.name.startswith(".d"):
                 preview_cleanup_failed = True
                 raise PermissionError(f"private cleanup path: {self.root}")
             original_remove(candidate)
@@ -226,8 +242,8 @@ class ResumeRendererTests(unittest.TestCase):
         self.assertTrue(destination.exists())
         self.assertNotEqual(destination.read_bytes(), b"old-pdf")
         self.assertTrue((preview / "page-1.png").exists())
-        self.assertEqual(list(self.root.glob(".rb-*")), [])
-        preview_backups = list(self.root.glob(".rd-*"))
+        self.assertEqual(list(self.root.glob(".b*")), [])
+        preview_backups = list(self.root.glob(".d*"))
         self.assertEqual(len(preview_backups), 1)
         self.assertEqual(
             (preview_backups[0] / "page-1.png").read_bytes(), b"old-preview"
@@ -246,7 +262,7 @@ class ResumeRendererTests(unittest.TestCase):
             [
                 path
                 for path in self.root.iterdir()
-                if path.name.startswith((".rp-", ".rv-", ".rb-", ".rd-"))
+                if path.name.startswith((".p", ".v", ".b", ".d"))
             ],
             [],
         )
@@ -260,24 +276,29 @@ class ResumeRendererTests(unittest.TestCase):
         selected_pdf.write_bytes(b"new-pdf")
         selected_preview_dir.mkdir()
         selected_preview.write_bytes(b"new-preview")
-        observed_transaction_names = set()
+        observed_pdf_transaction_names = set()
+        observed_preview_transaction_names = set()
         original_copyfile = resume_renderer.shutil.copyfile
         original_replace = resume_renderer.os.replace
+
+        def capture_transaction_name(candidate):
+            if candidate.parent != self.root or not candidate.name.startswith("."):
+                return
+            if candidate.name.startswith((".rp-", ".rb-", ".p", ".b")):
+                observed_pdf_transaction_names.add(candidate.name)
+            elif candidate.name.startswith((".rv-", ".rd-", ".v", ".d")):
+                observed_preview_transaction_names.add(candidate.name)
 
         def capture_copyfile(source, target):
             target_path = Path(target)
             candidates = (target_path, target_path.parent)
-            observed_transaction_names.update(
-                candidate.name
-                for candidate in candidates
-                if candidate.parent == self.root and candidate.name.startswith(".")
-            )
+            for candidate in candidates:
+                capture_transaction_name(candidate)
             return original_copyfile(source, target)
 
         def capture_replace(source, target):
             for candidate in (Path(source), Path(target)):
-                if candidate.parent == self.root and candidate.name.startswith("."):
-                    observed_transaction_names.add(candidate.name)
+                capture_transaction_name(candidate)
             return original_replace(source, target)
 
         with (
@@ -293,8 +314,40 @@ class ResumeRendererTests(unittest.TestCase):
                 selected_pdf, [selected_preview], destination, preview
             )
 
-        self.assertTrue(observed_transaction_names)
-        self.assertLessEqual(max(map(len, observed_transaction_names)), 32)
+        self.assertTrue(observed_pdf_transaction_names)
+        self.assertTrue(observed_preview_transaction_names)
+        self.assertLessEqual(
+            max(map(len, observed_pdf_transaction_names)), len(destination.name)
+        )
+        self.assertLessEqual(
+            max(map(len, observed_preview_transaction_names)), len(preview.name)
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows path-limit regression")
+    def test_publication_succeeds_when_final_preview_fits_near_windows_limit(self):
+        long_parent = self.root
+        while len(str(long_parent)) < 223:
+            remaining = 223 - len(str(long_parent)) - 1
+            if remaining <= 0:
+                break
+            long_parent /= "x" * min(30, remaining)
+        long_parent.mkdir(parents=True)
+        selected_pdf = self.root / "selected.pdf"
+        selected_preview_dir = self.root / "selected-preview"
+        selected_preview = selected_preview_dir / "page-1.png"
+        selected_pdf.write_bytes(b"new-pdf")
+        selected_preview_dir.mkdir()
+        selected_preview.write_bytes(b"new-preview")
+        destination = long_parent / "resume.pdf"
+        preview = long_parent / "preview"
+
+        published = self.renderer._publish(
+            selected_pdf, [selected_preview], destination, preview
+        )
+
+        self.assertEqual(published, [preview / "page-1.png"])
+        self.assertEqual(destination.read_bytes(), b"new-pdf")
+        self.assertEqual(published[0].read_bytes(), b"new-preview")
 
     def test_real_document_width_keeps_a_bullet_that_fits_on_one_page_together(self):
         preset = PRESETS[0]

@@ -27,8 +27,8 @@ PHONE_CANDIDATE_PATTERN = re.compile(
     r"[0-9 ().-]{8,38}[0-9](?![A-Za-z0-9_])"
 )
 RESUME_DATE_RANGE_PATTERN = re.compile(
-    r"\d{4}[.-](?:0[1-9]|1[0-2])\s*-\s*"
-    r"\d{4}[.-](?:0[1-9]|1[0-2])"
+    r"\d{4}[.-](?:0?[1-9]|1[0-2])\s*-\s*"
+    r"\d{4}[.-](?:0?[1-9]|1[0-2])"
 )
 URL_PATTERN = re.compile(r"(?i)\bhttps?://[^\s<>()]+")
 WINDOWS_PATH_PATTERN = re.compile(

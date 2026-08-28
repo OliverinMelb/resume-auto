@@ -219,7 +219,12 @@ class RewriteReportTests(unittest.TestCase):
         )
 
     def test_report_sanitizer_preserves_resume_date_ranges(self):
-        for date_range in ("2025.06 - 2025.09", "2026-03 - 2026-06"):
+        for date_range in (
+            "2025.06 - 2025.09",
+            "2026-03 - 2026-06",
+            "2025.6 - 2025.9",
+            "2026-3 - 2026-6",
+        ):
             with self.subTest(date_range=date_range):
                 self.assertEqual(sanitize_report_text(date_range), date_range)
 
