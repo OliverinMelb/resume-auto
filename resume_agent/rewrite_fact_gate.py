@@ -247,9 +247,12 @@ HTML_STANDARD_TAG = re.compile(
     r")\b(?:\s+[^<>\n]*?)?\s*/?>",
     re.I,
 )
+HTML_HYPHENATED_CUSTOM_TAG = re.compile(
+    r"<(?P<closing>/)?[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9.-]+"
+    r"\s*(?P<self_closing>/)?>"
+)
 HTML_CUSTOM_TAG_WITH_ATTRIBUTES = re.compile(
-    r"</?[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9.-]+\s*/?>"
-    r"|<[A-Za-z][A-Za-z0-9.-]*"
+    r"<[A-Za-z][A-Za-z0-9.-]*"
     r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
     r"(?:\s*=\s*(?:\"[^\"<>]*\"|'[^'<>]*'|[^\s'\"=<>`]+))?)+"
     r"\s*/?>",
@@ -1054,6 +1057,21 @@ def _contains_raw_html(value: str) -> bool:
         HTML_COMMENT.search(masked)
         or HTML_STANDARD_TAG.search(masked)
         or HTML_CUSTOM_TAG_WITH_ATTRIBUTES.search(masked)
+        or any(
+            not _is_compact_comparison_tag(masked, match)
+            for match in HTML_HYPHENATED_CUSTOM_TAG.finditer(masked)
+        )
+    )
+
+
+def _is_compact_comparison_tag(value: str, match: re.Match) -> bool:
+    if match.group("closing") or match.group("self_closing"):
+        return False
+    if match.start() == 0 or match.end() == len(value):
+        return False
+    return bool(
+        re.match(r"\w", value[match.start() - 1])
+        and re.match(r"\w", value[match.end()])
     )
 
 
@@ -1062,6 +1080,12 @@ def _strip_raw_html(value: str) -> str:
     masked = HTML_COMMENT.sub("", masked)
     masked = HTML_STANDARD_TAG.sub("", masked)
     masked = HTML_CUSTOM_TAG_WITH_ATTRIBUTES.sub("", masked)
+    masked = HTML_HYPHENATED_CUSTOM_TAG.sub(
+        lambda match: (
+            match.group(0) if _is_compact_comparison_tag(masked, match) else ""
+        ),
+        masked,
+    )
     return _restore_markdown_angle_literals(masked, protected)
 
 

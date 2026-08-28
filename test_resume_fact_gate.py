@@ -652,6 +652,9 @@ class FactGateTests(unittest.TestCase):
     def test_promoted_claim_html_detection_preserves_code_generics_and_autolinks(self):
         safe_claims = [
             "Used List<Foo> in the local evaluator",
+            "Used Map<String, Foo> in the local evaluator",
+            "Validated x<y-z>0 in local tests",
+            "Checked left_value<right-value>result locally",
             "Documented `<span data-mode=\"safe\">` parser behavior",
             "See <https://example.test/evaluator> for local documentation",
         ]
@@ -674,6 +677,10 @@ class FactGateTests(unittest.TestCase):
             "<X-EVALUATOR>",
             "<x-evaluator>Implemented locally</x-evaluator>",
             "Implemented locally</x-evaluator>",
+            "before <x-evaluator> after",
+            "a</x-evaluator>b",
+            "a<x-evaluator/>b",
+            '<span data-mode="safe">Implemented locally</span>',
             "See <https://example.test/%63%6C%69%65%6E%74> for documentation",
         ]
         for claim in forbidden_claims:
