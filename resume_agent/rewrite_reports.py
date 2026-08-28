@@ -22,13 +22,9 @@ EMAIL_PATTERN = re.compile(
     r"(?:[\w-]+\.)+[A-Za-z]{2,63}(?![\w.-])",
     re.IGNORECASE,
 )
-CN_PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
-CONTINUOUS_PHONE_PATTERN = re.compile(r"(?<!\d)\d{10,15}(?!\d)")
-INTERNATIONAL_PHONE_PATTERN = re.compile(
-    r"(?<![\w])\+\d(?:[\d ().-]{7,}\d)(?![\w])"
-)
-SEPARATED_PHONE_PATTERN = re.compile(
-    r"(?<![\w])(?:\(\d{2,4}\)|\d{2,4})[ .-]\d{3,4}[ .-]\d{4}(?![\w])"
+PHONE_CANDIDATE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:\+[ ]*|\()?[0-9]"
+    r"[0-9 ().-]{8,38}[0-9](?![A-Za-z0-9_])"
 )
 URL_PATTERN = re.compile(r"(?i)\bhttps?://[^\s<>()]+")
 WINDOWS_PATH_PATTERN = re.compile(
@@ -41,19 +37,27 @@ JWT_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\."
     r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
 )
-CREDENTIAL_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])(?:"
-    r"(?:[A-Za-z][A-Za-z0-9]*_)+(?:token|access_token|refresh_token|"
-    r"session(?:_id)?|api_key|client_secret|password|passwd|secret)|"
-    r"authorization|proxy-authorization|cookie|set-cookie|token|"
+CREDENTIAL_LABEL_SOURCE = (
+    r"(?:[A-Za-z][A-Za-z0-9]*_)+(?:authorization|token|"
+    r"session(?:_id)?|api_key|secret|password|passwd|cookie)|"
+    r"auth|authorization|proxy-authorization|cookie|set-cookie|token|"
     r"access(?:[ _-]?token)|refresh(?:[ _-]?token)|"
     r"session(?:[ _-]?id)?|api(?:[ _-]?key)|client(?:[ _-]?secret)|"
-    r"password|passwd|secret)(?![A-Za-z0-9_])\s*(?::|=)\s*"
+    r"password|passwd|secret"
+)
+CREDENTIAL_PATTERN = re.compile(
+    rf"(?i)(?<![A-Za-z0-9_])(?:{CREDENTIAL_LABEL_SOURCE})"
+    r"(?![A-Za-z0-9_])\s*(?::|=)\s*"
     r"(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;，；]+)"
 )
+BEARER_SECRET_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])bearer\s+"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
 COMMAND_SECRET_PATTERN = re.compile(
-    r"(?i)(--?(?:access[_-]?token|refresh[_-]?token|token|session(?:[_-]?id)?|"
-    r"api[_-]?key|client[_-]?secret|password|passwd|secret))"
+    r"(?i)(--?(?:auth|authorization|cookie|set-cookie|access[_-]?token|"
+    r"refresh[_-]?token|token|session(?:[_-]?id)?|api[_-]?key|"
+    r"client[_-]?secret|password|passwd|secret))"
     r"(?:\s+|=)(?:\"[^\"]*\"|'[^']*'|[^\s,;，；]+)"
 )
 KNOWN_SECRET_PATTERN = re.compile(
@@ -65,6 +69,22 @@ PERCENT_ESCAPE_PATTERN = re.compile(r"%[0-9A-Fa-f]{2}")
 MALFORMED_PERCENT_PATTERN = re.compile(
     r"%(?![0-9A-Fa-f]{2})(?=[0-9A-Za-z]{1,2})"
 )
+OBFUSCATED_CREDENTIAL_DELIMITER_PATTERN = re.compile(
+    rf"(?i)(?<![A-Za-z0-9_])(?:{CREDENTIAL_LABEL_SOURCE})"
+    r"(?![A-Za-z0-9_])"
+    r"[^\sA-Za-z0-9:=]{1,8}(?::|=)"
+)
+CREDENTIAL_DELIMITER_TRANSLATION = str.maketrans(
+    {
+        "∶": ":",
+        "꞉": ":",
+        "︓": ":",
+        "﹕": ":",
+        "：": ":",
+        "﹦": "=",
+        "＝": "=",
+    }
+)
 
 
 class ReportValidationError(ValueError):
@@ -75,7 +95,9 @@ class ReportValidationError(ValueError):
 
 
 def _normalize_report_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value)
+    normalized = unicodedata.normalize("NFKC", value).translate(
+        CREDENTIAL_DELIMITER_TRANSLATION
+    )
     return "".join(
         character
         for character in normalized
@@ -102,29 +124,41 @@ def _decode_percent_escapes(value: str) -> str | None:
     return decoded
 
 
+def _redact_phone_candidate(match: re.Match[str]) -> str:
+    candidate = match.group(0)
+    digit_count = sum(character in "0123456789" for character in candidate)
+    if 10 <= digit_count <= 15:
+        return "[REDACTED_PHONE]"
+    return candidate
+
+
 def sanitize_report_text(value: str) -> str:
     """Redact PII, credentials, URLs, paths and digests from report prose."""
     if not isinstance(value, str):
         raise ReportValidationError()
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        return "[REDACTED_UNSAFE]"
     normalized = _decode_percent_escapes(_normalize_report_text(value))
     if normalized is None:
         return "[REDACTED_UNSAFE]"
+    if OBFUSCATED_CREDENTIAL_DELIMITER_PATTERN.search(normalized):
+        return "[REDACTED_UNSAFE]"
     normalized = CREDENTIAL_PATTERN.sub("[REDACTED_CREDENTIAL]", normalized)
+    normalized = BEARER_SECRET_PATTERN.sub(
+        "[REDACTED_CREDENTIAL]", normalized
+    )
     normalized = COMMAND_SECRET_PATTERN.sub(
         lambda match: f"{match.group(1)}=[REDACTED_CREDENTIAL]", normalized
     )
     normalized = KNOWN_SECRET_PATTERN.sub("[REDACTED_CREDENTIAL]", normalized)
     normalized = JWT_PATTERN.sub("[REDACTED_CREDENTIAL]", normalized)
     normalized = EMAIL_PATTERN.sub("[REDACTED_EMAIL]", normalized)
-    normalized = CN_PHONE_PATTERN.sub("[REDACTED_PHONE]", normalized)
-    normalized = CONTINUOUS_PHONE_PATTERN.sub("[REDACTED_PHONE]", normalized)
-    normalized = INTERNATIONAL_PHONE_PATTERN.sub("[REDACTED_PHONE]", normalized)
-    normalized = SEPARATED_PHONE_PATTERN.sub("[REDACTED_PHONE]", normalized)
+    normalized = DIGEST_PATTERN.sub("[REDACTED_DIGEST]", normalized)
+    normalized = PHONE_CANDIDATE_PATTERN.sub(_redact_phone_candidate, normalized)
     normalized = URL_PATTERN.sub("[REDACTED_URL]", normalized)
     normalized = WINDOWS_PATH_PATTERN.sub("[REDACTED_PATH]", normalized)
     normalized = USER_PATH_PATTERN.sub("[REDACTED_PATH]", normalized)
     normalized = UNIX_PATH_PATTERN.sub("[REDACTED_PATH]", normalized)
-    normalized = DIGEST_PATTERN.sub("[REDACTED_DIGEST]", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     if not normalized:
         raise ReportValidationError()

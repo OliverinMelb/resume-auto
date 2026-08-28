@@ -76,9 +76,54 @@ class RewriteReportTests(unittest.TestCase):
             "tokenizer=topsecret; token budget",
         )
 
+    def test_report_sanitizer_redacts_auth_headers_env_suffixes_and_bearer(self):
+        cases = (
+            "HTTP_AUTHORIZATION=Bearer http-secret",
+            "HTTP_PROXY_AUTHORIZATION=Bearer proxy-secret",
+            "HTTP_COOKIE=cookie-secret",
+            "Token∶ unicode-secret",
+            "API Key﹦equal-secret",
+            "Auth: Bearer auth-secret",
+            "Bearer bearer-secret",
+        )
+
+        for value in cases:
+            with self.subTest(value=value):
+                sanitized = sanitize_report_text(value)
+                self.assertEqual(sanitized, "[REDACTED_CREDENTIAL]")
+                self.assertNotIn("secret", sanitized.casefold())
+
+    def test_report_sanitizer_fails_closed_for_obfuscated_delimiters_and_surrogates(self):
+        cases = (
+            "token%=percent-secret",
+            "token%_=underscore-secret",
+            "token%!=bang-secret",
+            "plain\ud800surrogate-secret",
+        )
+
+        for value in cases:
+            with self.subTest(value=value):
+                sanitized = sanitize_report_text(value)
+                self.assertEqual(sanitized, "[REDACTED_UNSAFE]")
+                self.assertNotIn("secret", sanitized.casefold())
+
+    def test_report_sanitizer_redacts_auth_and_cookie_cli_options(self):
+        for value in (
+            "--authorization Bearer cli-secret",
+            "--auth=cli-secret",
+            "--cookie cli-secret",
+        ):
+            with self.subTest(value=value):
+                sanitized = sanitize_report_text(value)
+                self.assertIn("[REDACTED_CREDENTIAL]", sanitized)
+                self.assertNotIn("cli-secret", sanitized.casefold())
+
     def test_report_sanitizer_decodes_percent_encoding_and_fails_closed(self):
         cases = (
+            ("contact%40example.com", "[REDACTED_EMAIL]"),
             ("contact%2540example.com", "[REDACTED_EMAIL]"),
+            ("contact%252540example.com", "[REDACTED_EMAIL]"),
+            ("contact%25252540example.com", "[REDACTED_EMAIL]"),
             (
                 "https%3A%2F%2Fexample.com%2Fprivate%3Ftoken%3Dtopsecret",
                 "[REDACTED_URL]",
@@ -107,6 +152,34 @@ class RewriteReportTests(unittest.TestCase):
         self.assertEqual(
             sanitize_report_text("invoice 1234567890123456"),
             "invoice 1234567890123456",
+        )
+
+    def test_report_sanitizer_bounds_phone_candidates_and_prioritizes_digests(self):
+        for number in (
+            "1381234 5678",
+            "13812-345678",
+            "+1(415) 555-2671",
+        ):
+            with self.subTest(number=number):
+                self.assertEqual(
+                    sanitize_report_text(f"call {number}"),
+                    "call [REDACTED_PHONE]",
+                )
+
+        self.assertEqual(
+            sanitize_report_text("build1234567890artifact"),
+            "build1234567890artifact",
+        )
+        self.assertEqual(
+            sanitize_report_text("invoice 1234567890123456"),
+            "invoice 1234567890123456",
+        )
+
+        digest = "a" * 20 + "1234567890" + "b" * 34
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(
+            sanitize_report_text(f"digest {digest}"),
+            "digest [REDACTED_DIGEST]",
         )
 
     def test_claim_ledger_contains_only_the_restricted_contract(self):
