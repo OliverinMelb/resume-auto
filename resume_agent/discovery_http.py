@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from typing import Protocol
 from urllib.error import HTTPError
-from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+from .settings import normalize_discovery_endpoint
 
 
 class JsonTransport(Protocol):
@@ -55,17 +56,9 @@ class LocalJsonClient:
     """A JSON client that cannot be pointed at anything except loopback HTTP."""
 
     def __init__(self, base_url: str, *, timeout_seconds: int = 30, transport=None):
-        parsed = urlsplit(base_url)
-        if (
-            parsed.scheme != "http"
-            or not _is_loopback_host(parsed.hostname)
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("discovery endpoint must be loopback HTTP")
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_discovery_endpoint(base_url)
+        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120:
+            raise ValueError("discovery timeout must be between 1 and 120 seconds")
         self.timeout_seconds = timeout_seconds
         self.transport: JsonTransport = transport or UrllibJsonTransport()
 
@@ -75,13 +68,6 @@ class LocalJsonClient:
         return self.transport.request_json(
             method, self.base_url + path, payload, self.timeout_seconds
         )
-
-
-def _is_loopback_host(hostname: str | None) -> bool:
-    return hostname is not None and (
-        hostname.casefold() == "localhost" or hostname in {"127.0.0.1", "::1"}
-    )
-
 
 class _NoRedirectHandler(HTTPRedirectHandler):
     """Reject redirects instead of creating a request to a new destination."""

@@ -1,5 +1,4 @@
 import os
-import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -75,22 +74,34 @@ def get_settings() -> ResumeAgentSettings:
 
 
 def _discovery_endpoint(name: str, default: str) -> str:
-    value = os.getenv(name) or default
+    return normalize_discovery_endpoint(os.getenv(name) or default)
+
+
+def normalize_discovery_endpoint(value: str) -> str:
+    """Validate and normalize one root-only local discovery endpoint."""
     try:
+        if not isinstance(value, str):
+            raise TypeError
         parsed = urlsplit(value)
-        host = ipaddress.ip_address(parsed.hostname or "")
+        hostname = (parsed.hostname or "").casefold()
         port = parsed.port
         valid = (
             parsed.scheme == "http"
-            and host.is_loopback
+            and hostname in {"localhost", "127.0.0.1", "::1"}
             and (port is None or 1 <= port <= 65535)
             and parsed.username is None
             and parsed.password is None
+            and parsed.path in {"", "/"}
             and not parsed.query
             and not parsed.fragment
+            and not parsed.netloc.endswith(":")
+            and "?" not in value
+            and "#" not in value
         )
     except (TypeError, ValueError):
         valid = False
     if not valid:
         raise ValueError("discovery endpoint must be loopback HTTP")
-    return value.rstrip("/")
+    rendered_host = f"[{hostname}]" if hostname == "::1" else hostname
+    rendered_port = f":{port}" if port is not None else ""
+    return f"http://{rendered_host}{rendered_port}"

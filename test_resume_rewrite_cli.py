@@ -9,8 +9,14 @@ from os import environ
 from pathlib import Path
 from unittest.mock import patch
 
-from resume_agent.repository import Repository
-from resume_agent.rewrite_cli import _print_result, bootstrap_request, export_ready_pdf, main
+from resume_agent.repository import Repository, new_id
+from resume_agent.rewrite_cli import (
+    _print_result,
+    _redact_nested,
+    bootstrap_request,
+    export_ready_pdf,
+    main,
+)
 from resume_agent.rewrite_schemas import FactAnswer
 
 
@@ -209,6 +215,30 @@ class RewriteCliTests(unittest.TestCase):
         self.assertIn("[REDACTED_PHONE]", payload["exported_path"])
         self.assertEqual(run, original)
 
+    def test_redaction_preserves_only_exact_current_business_ids(self):
+        identifiers = [
+            new_id(prefix) for prefix in (
+                "candidate", "job", "source_resume", "gap_acceptance",
+                "discovery_run", "rewrite_run",
+            )
+        ]
+        ordinary_digest = "a" * 64
+        unsafe_prefixed_digest = f"custom_{'b' * 32}"
+        rendered = _redact_nested({
+            "ids": identifiers,
+            "by_id": {identifiers[0]: identifiers[1]},
+            "ordinary_digest": ordinary_digest,
+            "unsafe_prefixed_digest": unsafe_prefixed_digest,
+        })
+        self.assertEqual(rendered["ids"], identifiers)
+        self.assertEqual(
+            rendered["by_id"], {identifiers[0]: identifiers[1]}
+        )
+        self.assertEqual(rendered["ordinary_digest"], "[REDACTED_DIGEST]")
+        self.assertNotEqual(
+            rendered["unsafe_prefixed_digest"], unsafe_prefixed_digest
+        )
+
     def test_resume_requires_exact_fact_answer_array_and_status_codes(self):
         facts = self.root / "facts.json"
         facts.write_text(json.dumps([{
@@ -357,10 +387,13 @@ class RewriteCliTests(unittest.TestCase):
         return code, json.loads(stdout.getvalue()), stdout.getvalue() + stderr.getvalue(), pipeline
 
     def test_discover_and_poll_use_stable_status_codes(self):
+        discovery_run_id = new_id("discovery_run")
+        candidate = self.repository.create_candidate("Candidate", ["Agent"], "")
+
         class Orchestrator:
             def start(self, request):
                 self.request = request
-                return {"id": "discovery_run_1", "status": "COLLECTING"}
+                return {"id": discovery_run_id, "status": "COLLECTING"}
 
             def poll(self, run_id):
                 self.run_id = run_id
@@ -368,26 +401,45 @@ class RewriteCliTests(unittest.TestCase):
 
         orchestrator = Orchestrator()
         code, payload, _, _ = self._linked_cli([
-            "discover", "--candidate-id", "candidate_1",
+            "discover", "--candidate-id", candidate["id"],
             "--sources", "boss", "nowcoder", "--keyword", "AI Agent",
             "--boss-project-id", "boss-project", "--city", "上海", "--limit", "10",
         ], orchestrator=orchestrator)
         self.assertEqual(code, 3)
+        self.assertEqual(payload["id"], discovery_run_id)
         self.assertEqual(payload["status"], "COLLECTING")
         self.assertEqual(orchestrator.request.sources, ["boss", "nowcoder"])
         self.assertEqual(orchestrator.request.keywords, ["AI Agent"])
 
         code, payload, _, _ = self._linked_cli([
-            "poll-discovery", "--discovery-run-id", "discovery_run_1"
+            "poll-discovery", "--discovery-run-id", discovery_run_id
         ], orchestrator=orchestrator)
         self.assertEqual(code, 0)
+        self.assertEqual(payload["id"], discovery_run_id)
         self.assertEqual(payload["status"], "PARTIAL")
+        self.assertEqual(orchestrator.run_id, discovery_run_id)
 
     def test_broad_imports_once_and_hands_jobs_to_one_rewrite(self):
+        candidate = self.repository.create_candidate("Candidate", ["Agent"], "")
+        resume = self.repository.create_source_resume(
+            candidate["id"], "resume.md", "resume"
+        )
+        job_ids = [
+            self.repository.create_job({
+                "candidate_id": candidate["id"],
+                "source": "test",
+                "title": f"Agent {index}",
+                "detail": "Build agents",
+            })["id"]
+            for index in range(3)
+        ]
+        discovery_run_id = new_id("discovery_run")
+        rewrite_run_id = new_id("rewrite_run")
+
         class Orchestrator:
             def build_broad_rewrite(self, run_id, candidate_id, source_resume_ids, pipeline):
                 self.call = (run_id, candidate_id, source_resume_ids, pipeline)
-                pipeline.request = SimpleNamespace(job_ids=["job_1", "job_2", "job_3"])
+                pipeline.request = SimpleNamespace(job_ids=job_ids)
                 return pipeline.result
 
         orchestrator = Orchestrator()
@@ -395,18 +447,19 @@ class RewriteCliTests(unittest.TestCase):
         artifact_dir.mkdir()
         (artifact_dir / "resume.pdf").write_bytes(b"pdf")
         pipeline = FakePipeline({
-            "id": "rewrite_run_broad", "status": "READY",
+            "id": rewrite_run_id, "status": "READY",
             "artifact_dir": str(artifact_dir), "output_name": "broad.pdf",
         })
         code, payload, _, _ = self._linked_cli([
-            "broad", "--discovery-run-id", "discovery_run_1",
-            "--candidate-id", "candidate_1", "--source-resume-id", "resume_1",
+            "broad", "--discovery-run-id", discovery_run_id,
+            "--candidate-id", candidate["id"],
+            "--source-resume-id", resume["id"],
         ], orchestrator=orchestrator, pipeline=pipeline)
         self.assertEqual(code, 0)
-        self.assertEqual(payload["id"], "rewrite_run_broad")
-        self.assertEqual(pipeline.request.job_ids, ["job_1", "job_2", "job_3"])
+        self.assertEqual(payload["id"], rewrite_run_id)
+        self.assertEqual(pipeline.request.job_ids, job_ids)
         self.assertEqual(orchestrator.call[:3], (
-            "discovery_run_1", "candidate_1", ["resume_1"]
+            discovery_run_id, candidate["id"], [resume["id"]]
         ))
 
     def test_targeted_requires_exactly_one_target_at_parser_and_runtime(self):

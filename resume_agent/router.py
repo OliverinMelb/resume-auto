@@ -93,6 +93,12 @@ def _raise_api_error(error: Exception):
             raise _api_exception(409, "SOURCE_INTERACTION_REQUIRED") from error
         if message == "PARTIAL_JD":
             raise _api_exception(409, "PARTIAL_JD") from error
+        if message in {
+            "SOURCE_ADAPTER_UNAVAILABLE", "SOURCE_ADAPTER_MISMATCH",
+            "SOURCE_RESOLUTION_FAILED", "SOURCE_RESULT_INVALID",
+            "SOURCE_RESULT_MISMATCH",
+        }:
+            raise _api_exception(502, "SOURCE_UNAVAILABLE") from error
         if any(token in message.casefold() for token in (
             "conflict", "mismatch", "not pollable", "busy",
         )):
@@ -102,12 +108,6 @@ def _raise_api_error(error: Exception):
                 else "RESOURCE_CONFLICT"
             )
             raise _api_exception(409, detail) from error
-        if message in {
-            "SOURCE_ADAPTER_UNAVAILABLE", "SOURCE_ADAPTER_MISMATCH",
-            "SOURCE_RESOLUTION_FAILED", "SOURCE_RESULT_INVALID",
-            "SOURCE_RESULT_MISMATCH",
-        }:
-            raise _api_exception(502, "SOURCE_UNAVAILABLE") from error
         raise _api_exception(400, "INVALID_REQUEST") from error
     raise _api_exception(502, "WORKFLOW_FAILED") from error
 

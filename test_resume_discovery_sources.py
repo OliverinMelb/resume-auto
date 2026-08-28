@@ -80,6 +80,9 @@ class LocalJsonClientTests(unittest.TestCase):
             "http://127.0.0.2:8000",
             "http://127.12.34.56:8000",
             "http://[::ffff:127.0.0.1]:8000",
+            "http://localhost:8000/base",
+            "http://localhost:8000?",
+            "http://localhost:8000#",
         ):
             with self.subTest(endpoint=endpoint):
                 with self.assertRaisesRegex(ValueError, "loopback"):
@@ -93,6 +96,13 @@ class LocalJsonClientTests(unittest.TestCase):
         ):
             with self.subTest(endpoint=endpoint):
                 LocalJsonClient(endpoint)
+
+        for timeout in (0, 121, True):
+            with self.subTest(timeout=timeout):
+                with self.assertRaisesRegex(ValueError, "timeout"):
+                    LocalJsonClient(
+                        "http://127.0.0.1:8000", timeout_seconds=timeout
+                    )
 
     def test_local_client_passes_injected_transport_an_absolute_local_path(self):
         transport = FakeTransport({("POST", "/tasks?mode=research"): {"ok": True}})

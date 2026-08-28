@@ -44,6 +44,10 @@ _EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _PHONE = re.compile(r"(?<![\w])(?:\+?\d[\d()\s.-]{6,}\d)(?![\w])")
 _TARGET_JD_MAX_CHARACTERS = 100_000
 _JSON_MAX_CHARACTERS = 200_000
+_SAFE_BUSINESS_ID = re.compile(
+    r"^(?:candidate|job|source_resume|research|rewrite_run|gap_acceptance|"
+    r"delivery_event|discovery_run)_[0-9a-f]{32}$"
+)
 
 
 def read_target_jd_file(path: Path) -> str:
@@ -754,6 +758,8 @@ def _print_linked_result(run: dict) -> None:
 def _redact_nested(value):
     if isinstance(value, str):
         if not value:
+            return value
+        if _SAFE_BUSINESS_ID.fullmatch(value):
             return value
         try:
             return sanitize_report_text(value)

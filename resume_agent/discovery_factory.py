@@ -9,7 +9,7 @@ from .discovery_orchestrator import JobDiscoveryOrchestrator
 from .discovery_sources import BossResearchAdapter, NowcoderResearchAdapter
 from .repository import Repository
 from .rewrite_factory import create_rewrite_pipeline
-from .settings import ResumeAgentSettings
+from .settings import ResumeAgentSettings, normalize_discovery_endpoint
 from .targeted_jobs import TargetedJobResolver
 
 
@@ -33,16 +33,22 @@ def create_discovery_dependencies(
         or not 1 <= settings.discovery_timeout_seconds <= 120
     ):
         raise ValueError("discovery timeout must be between 1 and 120 seconds")
+    boss_endpoint = normalize_discovery_endpoint(
+        settings.boss_research_endpoint
+    )
+    nowcoder_endpoint = normalize_discovery_endpoint(
+        settings.nowcoder_research_endpoint
+    )
     owned_repository = repository or Repository(settings.database_path)
     pipeline = rewrite_pipeline or create_rewrite_pipeline(
         owned_repository, settings
     )
     boss = BossResearchAdapter(LocalJsonClient(
-        settings.boss_research_endpoint,
+        boss_endpoint,
         timeout_seconds=settings.discovery_timeout_seconds,
     ))
     nowcoder = NowcoderResearchAdapter(LocalJsonClient(
-        settings.nowcoder_research_endpoint,
+        nowcoder_endpoint,
         timeout_seconds=settings.discovery_timeout_seconds,
     ))
     adapters = {"boss": boss, "nowcoder": nowcoder}

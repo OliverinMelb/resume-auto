@@ -3,30 +3,37 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from main import app
-from resume_agent.repository import Repository
+from resume_agent.repository import Repository, new_id
 
 
 class FakePipeline:
     def __init__(self):
         self.requests = []
+        self.run_id = new_id("rewrite_run")
 
     def run(self, request):
         self.requests.append(request)
-        return {"id": "rewrite_run_1", "status": "READY"}
+        return {"id": self.run_id, "status": "READY"}
 
 
 class FakeOrchestrator:
     def __init__(self):
         self.start_calls = 0
+        self.run_id = new_id("discovery_run")
 
     def start(self, request):
         self.start_calls += 1
         self.request = request
-        return {"id": "discovery_run_1", "status": "COLLECTING"}
+        return {
+            "id": self.run_id,
+            "candidate_id": request.candidate_id,
+            "status": "COLLECTING",
+        }
 
     def get(self, run_id):
         return {"id": run_id, "status": "COLLECTING"}
@@ -36,15 +43,20 @@ class FakeOrchestrator:
 
     def build_broad_rewrite(self, run_id, candidate_id, source_resume_ids, pipeline):
         self.broad_call = (run_id, candidate_id, source_resume_ids, pipeline)
-        return {"id": "rewrite_run_broad", "status": "READY"}
+        return {"id": pipeline.run_id, "status": "READY"}
 
 
 class FakeResolver:
+    def __init__(self, job_id):
+        self.job_id = job_id
+
     def resolve(self, target, candidate_id):
         self.call = (target, candidate_id)
         if target.jd_url and "interaction" in target.jd_url:
             raise ValueError("SOURCE_INTERACTION_REQUIRED")
-        return "job_targeted"
+        if target.jd_url and "source-mismatch" in target.jd_url:
+            raise ValueError("SOURCE_RESULT_MISMATCH")
+        return self.job_id
 
 
 class DiscoveryApiTests(unittest.TestCase):
@@ -56,8 +68,14 @@ class DiscoveryApiTests(unittest.TestCase):
         self.resume = self.repository.create_source_resume(
             self.candidate["id"], "resume.md", "resume"
         )
+        self.job = self.repository.create_job({
+            "candidate_id": self.candidate["id"],
+            "source": "test",
+            "title": "Agent",
+            "detail": "Build agents",
+        })
         self.orchestrator = FakeOrchestrator()
-        self.resolver = FakeResolver()
+        self.resolver = FakeResolver(self.job["id"])
         self.pipeline = FakePipeline()
         self.dependencies = SimpleNamespace(
             repository=self.repository,
@@ -121,9 +139,66 @@ class DiscoveryApiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "discovery timeout"):
             create_discovery_dependencies(invalid, rewrite_pipeline=pipeline)
 
+    def test_factory_validates_all_settings_before_filesystem_side_effects(self):
+        from resume_agent.discovery_factory import create_discovery_dependencies
+        from resume_agent.settings import ResumeAgentSettings
+
+        invalid_settings = (
+            {"boss_research_endpoint": "http://127.0.0.2:8011"},
+            {"nowcoder_research_endpoint": "http://localhost:8012/base"},
+            {"discovery_timeout_seconds": 121},
+        )
+        for index, changes in enumerate(invalid_settings):
+            with self.subTest(changes=changes):
+                root = self.root / f"invalid-{index}"
+                database = root / "bad.db"
+                runs = root / "runs"
+                settings = ResumeAgentSettings(
+                    database_path=database,
+                    legacy_action_log_path=root / "actions.jsonl",
+                    legacy_decision_log_path=root / "decisions.jsonl",
+                    allow_remote=False,
+                    runs_root=runs,
+                    codex_timeout_seconds=30,
+                    **changes,
+                )
+                with patch(
+                    "resume_agent.discovery_factory.create_rewrite_pipeline"
+                ) as pipeline_factory, self.assertRaisesRegex(
+                    ValueError, "discovery (?:endpoint|timeout)"
+                ):
+                    create_discovery_dependencies(settings)
+                pipeline_factory.assert_not_called()
+                self.assertFalse(database.exists())
+                self.assertFalse(runs.exists())
+
+        local_settings = ResumeAgentSettings(
+            database_path=self.root / "local.db",
+            legacy_action_log_path=self.root / "actions.jsonl",
+            legacy_decision_log_path=self.root / "decisions.jsonl",
+            allow_remote=False,
+            runs_root=self.root / "local-runs",
+            codex_timeout_seconds=30,
+            boss_research_endpoint="http://localhost:8011/",
+            nowcoder_research_endpoint="http://[::1]:8012/",
+        )
+        built = create_discovery_dependencies(
+            local_settings, rewrite_pipeline=FakePipeline()
+        )
+        self.assertEqual(
+            built.orchestrator.adapters["boss"].client.base_url,
+            "http://localhost:8011",
+        )
+        self.assertEqual(
+            built.orchestrator.adapters["nowcoder"].client.base_url,
+            "http://[::1]:8012",
+        )
+
     def test_discovery_routes_are_local_and_share_core_orchestrator(self):
         response = self.client.post("/resume-agent/v1/discovery-runs", json=self.payload)
         self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["id"], self.orchestrator.run_id)
+        self.assertEqual(response.json()["candidate_id"], self.candidate["id"])
         self.assertEqual(response.json()["status"], "COLLECTING")
         self.assertEqual(self.orchestrator.start_calls, 1)
 
@@ -145,10 +220,11 @@ class DiscoveryApiTests(unittest.TestCase):
         )
 
     def test_discovery_get_poll_and_broad_routes_use_injected_orchestrator(self):
-        fetched = self.client.get("/resume-agent/v1/discovery-runs/discovery_run_1")
-        polled = self.client.post("/resume-agent/v1/discovery-runs/discovery_run_1/poll")
+        run_id = self.orchestrator.run_id
+        fetched = self.client.get(f"/resume-agent/v1/discovery-runs/{run_id}")
+        polled = self.client.post(f"/resume-agent/v1/discovery-runs/{run_id}/poll")
         broad = self.client.post(
-            "/resume-agent/v1/discovery-runs/discovery_run_1/broad-rewrite",
+            f"/resume-agent/v1/discovery-runs/{run_id}/broad-rewrite",
             json={
                 "candidate_id": self.candidate["id"],
                 "source_resume_ids": [self.resume["id"]],
@@ -157,8 +233,11 @@ class DiscoveryApiTests(unittest.TestCase):
         self.assertEqual(fetched.status_code, 200)
         self.assertEqual(polled.status_code, 200)
         self.assertEqual(broad.status_code, 200)
+        self.assertEqual(fetched.json()["id"], run_id)
+        self.assertEqual(polled.json()["id"], run_id)
+        self.assertEqual(broad.json()["id"], self.pipeline.run_id)
         self.assertEqual(self.orchestrator.broad_call[:3], (
-            "discovery_run_1", self.candidate["id"], [self.resume["id"]]
+            run_id, self.candidate["id"], [self.resume["id"]]
         ))
         self.assertIs(self.orchestrator.broad_call[3], self.pipeline)
 
@@ -182,8 +261,9 @@ class DiscoveryApiTests(unittest.TestCase):
             **base, "jd_text": "# 职位名称\nAgent\n\n# 职位描述\nBuild agents",
         })
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], self.pipeline.run_id)
         self.assertEqual(self.resolver.call[0].jd_text.splitlines()[0], "# 职位名称")
-        self.assertEqual(self.pipeline.requests[0].job_ids, ["job_targeted"])
+        self.assertEqual(self.pipeline.requests[0].job_ids, [self.job["id"]])
         self.assertEqual(self.pipeline.requests[0].candidate_id, self.candidate["id"])
 
     def test_interaction_required_and_conflicts_have_stable_safe_mapping(self):
@@ -194,6 +274,14 @@ class DiscoveryApiTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"], "SOURCE_INTERACTION_REQUIRED")
+
+        source_mismatch = self.client.post("/resume-agent/v1/targeted-rewrite", json={
+            "candidate_id": self.candidate["id"],
+            "source_resume_ids": [self.resume["id"]],
+            "jd_url": "https://www.nowcoder.com/jobs/detail/source-mismatch",
+        })
+        self.assertEqual(source_mismatch.status_code, 502)
+        self.assertEqual(source_mismatch.json()["detail"], "SOURCE_UNAVAILABLE")
 
     def test_gap_acceptance_is_candidate_scoped_and_conflict_maps_409(self):
         evidence = {

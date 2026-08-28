@@ -174,6 +174,16 @@ class RewriteApiTests(unittest.TestCase):
         self.assertEqual(settings.nowcoder_research_endpoint, "http://127.0.0.1:8012")
         self.assertEqual(settings.discovery_timeout_seconds, 30)
 
+        for endpoint, normalized in (
+            ("http://localhost:8011/", "http://localhost:8011"),
+            ("http://127.0.0.1:8011", "http://127.0.0.1:8011"),
+            ("http://[::1]:8011/", "http://[::1]:8011"),
+        ):
+            with self.subTest(endpoint=endpoint), patch.dict(os.environ, {
+                "RESUME_AGENT_BOSS_RESEARCH_ENDPOINT": endpoint,
+            }, clear=False):
+                self.assertEqual(get_settings().boss_research_endpoint, normalized)
+
         for value in ("0", "121", "not-a-number"):
             with self.subTest(value=value), patch.dict(os.environ, {
                 "RESUME_AGENT_DISCOVERY_TIMEOUT_SECONDS": value,
@@ -195,6 +205,22 @@ class RewriteApiTests(unittest.TestCase):
         }, clear=False):
             with self.assertRaisesRegex(ValueError, "loopback HTTP"):
                 get_settings()
+
+        for endpoint in (
+            "http://127.0.0.2:8011",
+            "http://localhost:8011/base",
+            "http://user:password@localhost:8011",
+            "http://localhost:8011?token=secret",
+            "http://localhost:8011/#session",
+            "http://localhost:8011?",
+            "http://localhost:8011#",
+            "https://localhost:8011",
+        ):
+            with self.subTest(endpoint=endpoint), patch.dict(os.environ, {
+                "RESUME_AGENT_BOSS_RESEARCH_ENDPOINT": endpoint,
+            }, clear=False):
+                with self.assertRaisesRegex(ValueError, "loopback HTTP"):
+                    get_settings()
 
 
 if __name__ == "__main__":
