@@ -175,14 +175,22 @@ EXPLICIT_COMPLETED_ASSERTION = re.compile(
 COMPLETED_ASSERTION = re.compile(
     r"(?:成功|正式).{0,4}(?:发布|上线|投产|交付|投入使用)"
     r"|(?:稳定运行|投入生产|服务真实用户|服务生产用户)"
-    r"|(?:开发|研发|构建|建设).{0,8}"
-    r"(?:完成|完工|完毕|实现|上线|落地|交付)"
-    r"|(?:完成了|(?:已经|已)?做完|(?:开发|研发|构建|建设|实现)完)"
-    r"(?=[，。；、\s]|$)"
-    r"|实现.{0,4}(?:完成|完毕)"
+    r"|(?:开发|研发|构建|建设)(?!.{0,6}(?:未|待)完成).{0,8}"
+    r"(?:完成(?!度)|完工|完毕|实现|上线|落地|交付)"
+    r"|(?<!未)(?<!待)(?<!未能)完成(?!度)(?:了)?"
+    r"|(?:已经|已)?做完"
+    r"|(?:开发|研发|构建|建设|实现)完(?!成|整)"
+    r"|实现(?!.{0,4}(?:未|待)完成).{0,4}(?:完成(?!度)|完毕)"
     r"|(?:系统|服务|应用|平台|模块|能力).{0,8}"
     r"(?:运行于|部署(?:在|于)).{0,4}(?:线上|生产)"
     r"|(?:主导|负责|为客户).{0,16}(?:上线|落地|交付|投产|发布)",
+    re.I,
+)
+COMPLETION_EVENT = re.compile(
+    r"完成(?!度)|完工|完毕|做完|"
+    r"(?:开发|研发|构建|建设|实现)完(?!成|整)|"
+    r"投入使用|投入生产|稳定运行|运行于|部署|发布|上线|投产|"
+    r"交付(?!物)|落地|实现|服务",
     re.I,
 )
 BARE_COMPLETION_TERMS = ("上线", "落地", "交付", "生产")
@@ -983,7 +991,8 @@ def _forbidden_in_progress_state(claim: str) -> str | None:
         if explicit_completed:
             return explicit_completed.group(0)
         for completed in COMPLETED_ASSERTION.finditer(clause):
-            if not _has_future_target_before(clause, completed.start()):
+            event_start = _completion_event_start(completed)
+            if not _has_future_target_before(clause, event_start):
                 return completed.group(0)
         for term in BARE_COMPLETION_TERMS:
             start = clause.find(term)
@@ -992,6 +1001,13 @@ def _forbidden_in_progress_state(claim: str) -> str | None:
                     return term
                 start = clause.find(term, start + len(term))
     return None
+
+
+def _completion_event_start(completed: re.Match[str]) -> int:
+    event_offsets = [
+        event.start() for event in COMPLETION_EVENT.finditer(completed.group(0))
+    ]
+    return completed.start() + max(event_offsets, default=0)
 
 
 def _is_future_or_artifact_reference(clause: str, term: str, start: int) -> bool:
