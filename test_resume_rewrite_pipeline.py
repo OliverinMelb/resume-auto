@@ -59,6 +59,22 @@ class OfficialArtifactWritingRunner(FakeCodexRunner):
         return super().run(task, schema_path, output_path, project_root)
 
 
+class OfficialArtifactFailureRunner(FakeCodexRunner):
+    def __init__(self, error):
+        super().__init__(None)
+        self.error = error
+
+    def run(self, task, schema_path, output_path, project_root):
+        self.run_count += 1
+        official_dir = Path(output_path).parent
+        (official_dir / "resume.md").write_text("stale", encoding="utf-8")
+        (official_dir / "resume.pdf").write_bytes(b"%PDF-stale")
+        preview = official_dir / ".preview"
+        preview.mkdir(parents=True, exist_ok=True)
+        (preview / "page-1.png").write_bytes(b"stale-preview")
+        raise self.error
+
+
 class BlockingCodexRunner(FakeCodexRunner):
     def __init__(self, result):
         super().__init__(result)
@@ -110,6 +126,18 @@ class CommitThenReadyErrorRepository(Repository):
         if changes["new_status"] == "READY":
             raise self.error
         return updated
+
+
+class MutationThenCommitFailureRepository(Repository):
+    def __init__(self, database_path, failing_statuses):
+        super().__init__(database_path)
+        self.failing_statuses = set(failing_statuses)
+
+    def fenced_rewrite_transition(self, run_id, **changes):
+        if changes["new_status"] in self.failing_statuses:
+            changes["mutate_artifacts"]()
+            raise sqlite3.OperationalError("private commit failure")
+        return super().fenced_rewrite_transition(run_id, **changes)
 
 
 class FencedMutationRaceRepository(Repository):
@@ -956,6 +984,159 @@ class RewritePipelineTests(unittest.TestCase):
         )
         self.assertTrue(all(event.get("timestamp_utc") for event in events))
 
+    def test_runner_unexpected_exception_fails_safely_and_cleans_official_artifacts(self):
+        pipeline = self.make_pipeline(
+            OfficialArtifactFailureRunner(RuntimeError("private runner bug")),
+            FakeRenderer(),
+        )
+
+        try:
+            run = pipeline.run(self.request())
+        except RuntimeError as error:
+            self.fail(f"unexpected runner exception escaped pipeline: {error}")
+
+        self.assertEqual(
+            (run["status"], run["error_code"]),
+            ("FAILED", "CODEX_PROCESS_ERROR"),
+        )
+        self._assert_no_deployable_artifacts(run)
+        self.assertFalse((Path(run["artifact_dir"]) / ".preview").exists())
+        audit_text = (Path(run["artifact_dir"]) / "audit.md").read_text("utf-8")
+        self.assertNotIn("private runner bug", audit_text)
+        self.assertEqual(self._audit_events(run)[-1]["event_code"], "RUN_FAILED")
+
+    def test_runner_base_exception_cleans_official_artifacts_then_reraises(self):
+        for interrupt in (KeyboardInterrupt("stop runner"), SystemExit("stop runner")):
+            with self.subTest(interrupt=type(interrupt).__name__):
+                pipeline = self.make_pipeline(
+                    OfficialArtifactFailureRunner(interrupt), FakeRenderer()
+                )
+
+                with self.assertRaises(type(interrupt)) as caught:
+                    pipeline.run(self.request())
+
+                self.assertIs(caught.exception, interrupt)
+                run = self._latest_run()
+                self.assertEqual(
+                    (run["status"], run["error_code"]),
+                    ("FAILED", "CODEX_PROCESS_ERROR"),
+                )
+                self._assert_no_deployable_artifacts(run)
+                self.assertFalse((Path(run["artifact_dir"]) / ".preview").exists())
+
+    def test_runner_cleanup_failure_keeps_owned_run_running_without_terminal_audit(self):
+        pipeline = self.make_pipeline(
+            OfficialArtifactFailureRunner(RuntimeError("private runner bug")),
+            FakeRenderer(),
+        )
+        original_unlink = Path.unlink
+
+        def locked_official_pdf(path, missing_ok=False):
+            if path.name == "resume.pdf" and path.parent.name.startswith(
+                "rewrite_run_"
+            ):
+                raise OSError("official PDF is locked")
+            return original_unlink(path, missing_ok=missing_ok)
+
+        with patch.object(Path, "unlink", locked_official_pdf):
+            try:
+                run = pipeline.run(self.request())
+            except RuntimeError as error:
+                self.fail(f"unexpected runner exception escaped pipeline: {error}")
+
+        self.assertEqual((run["status"], run["error_code"]), ("RUNNING", None))
+        self.assertIsNotNone(run["owner_token"])
+        self.assertIsNotNone(run["lease_expires_at"])
+        self.assertTrue((Path(run["artifact_dir"]) / "resume.pdf").exists())
+        self.assertNotIn(
+            "RUN_FAILED",
+            [event["event_code"] for event in self._audit_events(run)],
+        )
+
+    def test_needs_facts_commit_failure_does_not_write_terminal_audit(self):
+        repository = MutationThenCommitFailureRepository(
+            self.repository.database_path, {"NEEDS_FACTS"}
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner(
+                in_progress_result(
+                    self.resume["id"], self.job["id"], claim="为客户上线RAG系统"
+                )
+            ),
+            FakeRenderer(),
+        )
+
+        run = pipeline.run(self.request())
+
+        self.assertEqual(run["status"], "RUNNING")
+        self.assertNotIn(
+            "FACTS_REQUIRED",
+            [event["event_code"] for event in self._audit_events(run)],
+        )
+
+    def test_failed_commit_failure_does_not_write_terminal_audit(self):
+        repository = MutationThenCommitFailureRepository(
+            self.repository.database_path, {"FAILED"}
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner(
+                CodexRunError("CODEX_PROCESS_ERROR", "private runner detail")
+            ),
+            FakeRenderer(),
+        )
+
+        run = pipeline.run(self.request())
+
+        self.assertEqual(run["status"], "RUNNING")
+        self.assertNotIn(
+            "RUN_FAILED",
+            [event["event_code"] for event in self._audit_events(run)],
+        )
+
+    def test_recovery_commit_failure_does_not_write_terminal_audit(self):
+        run_id = "rewrite_run_" + "e" * 32
+        artifacts = RunArtifacts.create(self.runs_root, run_id)
+        run = self.repository.create_rewrite_run_with_id(
+            run_id, self.request().model_dump(), str(artifacts.directory)
+        )
+        expired_lease = "2000-01-01T00:00:00+00:00"
+        self.repository.transition_rewrite_run(
+            run_id,
+            {"QUEUED"},
+            "RUNNING",
+            increment_attempt=True,
+            owner_token="stale-owner",
+            lease_expires_at=expired_lease,
+        )
+        repository = MutationThenCommitFailureRepository(
+            self.repository.database_path, {"FAILED"}
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner({}),
+            FakeRenderer(),
+        )
+
+        self.assertEqual(pipeline.recover_interrupted_runs(), 0)
+
+        current = repository.get_rewrite_run(run_id)
+        self.assertEqual(current["status"], "RUNNING")
+        self.assertNotIn(
+            "RUN_RECOVERED",
+            [event["event_code"] for event in self._audit_events(current)],
+        )
+
     def test_valid_in_progress_gate_publishes_exact_validated_markdown(self):
         result = in_progress_result(self.resume["id"], self.job["id"])
         renderer = FakeRenderer()
@@ -1190,6 +1371,32 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertTrue((artifact_dir / "resume.md").is_file())
         self.assertTrue((artifact_dir / "resume.pdf").is_file())
         self.assertTrue((artifact_dir / ".preview" / "page-1.png").is_file())
+
+    def test_post_ready_render_audit_failure_preserves_delivery(self):
+        original_append_audit = RunArtifacts.append_audit
+
+        def fail_render_audit(artifacts, **event):
+            if event.get("event_code") == "RENDER_COMPLETED":
+                raise OSError("private audit write failure")
+            return original_append_audit(artifacts, **event)
+
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+
+        with patch.object(RunArtifacts, "append_audit", fail_render_audit):
+            run = pipeline.run(self.request())
+
+        self.assertEqual((run["status"], run["error_code"]), ("READY", None))
+        artifact_dir = Path(run["artifact_dir"])
+        self.assertTrue((artifact_dir / "resume.md").is_file())
+        self.assertTrue((artifact_dir / "resume.pdf").is_file())
+        self.assertTrue((artifact_dir / ".preview" / "page-1.png").is_file())
+        self.assertNotIn(
+            "RUN_FAILED",
+            [event["event_code"] for event in self._audit_events(run)],
+        )
 
     def test_publication_cleanup_failure_keeps_owned_run_running(self):
         renderer = DerivedOfficialPathInterruptRenderer(

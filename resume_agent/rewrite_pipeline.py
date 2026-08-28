@@ -69,29 +69,42 @@ class ResumeRewritePipeline:
             if not claimed:
                 continue
             try:
-                self.repository.fenced_rewrite_transition(
+                updated = self.repository.fenced_rewrite_transition(
                     run["id"],
                     expected_owner_token=self._owner_token,
                     expected_lease_expires_at=recovery_lease,
                     new_status="FAILED",
                     error_code="INTERRUPTED",
                     error_summary="上次进程在运行期间中断",
-                    mutate_artifacts=lambda: self._cleanup_and_audit_recovery(
-                        run, artifacts
+                    mutate_artifacts=lambda: self._remove_deployable_artifacts(
+                        artifacts
                     ),
                 )
             except Exception:
-                try:
-                    self.repository.transition_rewrite_run(
-                        run["id"], {"RUNNING"}, "RUNNING",
-                        owner_token=self._owner_token,
-                        lease_expires_at=run["lease_expires_at"],
-                        expected_owner_token=self._owner_token,
-                        expected_lease_expires_at=recovery_lease,
-                    )
-                except Exception:
-                    pass
-                continue
+                updated = self._authoritative_run(run["id"])
+                if not (
+                    updated
+                    and updated["status"] == "FAILED"
+                    and updated["error_code"] == "INTERRUPTED"
+                ):
+                    try:
+                        self.repository.transition_rewrite_run(
+                            run["id"], {"RUNNING"}, "RUNNING",
+                            owner_token=self._owner_token,
+                            lease_expires_at=run["lease_expires_at"],
+                            expected_owner_token=self._owner_token,
+                            expected_lease_expires_at=recovery_lease,
+                        )
+                    except Exception:
+                        pass
+                    continue
+            self._append_audit_best_effort(
+                artifacts,
+                run_id=run["id"],
+                status="FAILED",
+                event_code="RUN_RECOVERED",
+                error_code="INTERRUPTED",
+            )
             recovered += 1
         return recovered
 
@@ -247,7 +260,12 @@ class ResumeRewritePipeline:
     ) -> dict:
         blockers = materials["preflight_blockers"]
         artifacts.remove_if_exists("result.json")
-        artifacts.append_audit(
+        updated = self.repository.transition_rewrite_run(
+            run["id"], {"QUEUED"}, "NEEDS_FACTS",
+            blocking_questions=blockers,
+        )
+        self._append_audit_best_effort(
+            artifacts,
             run_id=run["id"], status="NEEDS_FACTS", event_code="FACTS_REQUIRED",
             question_ids=[blocker["question_id"] for blocker in blockers],
             source_ids=[
@@ -255,10 +273,6 @@ class ResumeRewritePipeline:
             ],
             gate_outcome="BLOCKED",
             claim_count=0,
-        )
-        updated = self.repository.transition_rewrite_run(
-            run["id"], {"QUEUED"}, "NEEDS_FACTS",
-            blocking_questions=blockers,
         )
         return self._decorate_run(updated)
 
@@ -270,9 +284,25 @@ class ResumeRewritePipeline:
         )
         temporary = artifacts.directory / ".codex-output.tmp"
         try:
-            result = self.codex_runner.run(
-                materials["task"], self.schema_path, temporary, self.project_root
-            )
+            try:
+                result = self.codex_runner.run(
+                    materials["task"], self.schema_path, temporary, self.project_root
+                )
+            except CodexRunError:
+                raise
+            except (KeyboardInterrupt, SystemExit) as error:
+                try:
+                    self._fail(
+                        run, artifacts, error, error_code="CODEX_PROCESS_ERROR"
+                    )
+                except BaseException:
+                    pass
+                raise
+            except Exception as error:
+                self._fail(
+                    run, artifacts, error, error_code="CODEX_PROCESS_ERROR"
+                )
+                return self.get(run["id"])
             result = CodexRewriteResult.model_validate(result)
             artifacts.write_json("result.json", result.model_dump())
             artifacts.append_audit(
@@ -291,14 +321,17 @@ class ResumeRewritePipeline:
                         expected_lease_expires_at=run["lease_expires_at"],
                         new_status="NEEDS_FACTS",
                         blocking_questions=questions,
-                        mutate_artifacts=lambda: self._cleanup_and_audit_blockers(
-                            run, artifacts, materials, result, questions
+                        mutate_artifacts=lambda: self._remove_deployable_artifacts(
+                            artifacts
                         ),
                     )
                 except Exception:
-                    return self._decorate_run(
-                        self._authoritative_run(run["id"]) or run
-                    )
+                    updated = self._authoritative_run(run["id"])
+                    if not (updated and updated["status"] == "NEEDS_FACTS"):
+                        return self._decorate_run(updated or run)
+                self._append_facts_required(
+                    run, artifacts, materials, result, questions
+                )
                 return self._decorate_run(updated)
             validated_markdown = gate.rewritten_resume_markdown
             return self._render_publish_and_mark_ready(
@@ -322,7 +355,21 @@ class ResumeRewritePipeline:
             render_result, updated = self._render_and_publish(
                 run, artifacts, materials, result, validated_markdown
             )
-            artifacts.append_audit(
+            self._append_audit_best_effort(
+                artifacts,
+                run_id=run["id"], status="RUNNING",
+                event_code="RENDER_COMPLETED",
+                content_hash=_hash_text(validated_markdown),
+                page_count=render_result.page_count,
+                source_ids=[
+                    item["id"]
+                    for item in materials["resumes"] + materials["jobs"]
+                ],
+                gate_outcome="PASS",
+                claim_count=len(result.claim_audit),
+            )
+            self._append_audit_best_effort(
+                artifacts,
                 run_id=run["id"], status="READY", event_code="RUN_READY",
                 source_ids=[item["id"] for item in materials["resumes"] + materials["jobs"]],
             )
@@ -342,32 +389,41 @@ class ResumeRewritePipeline:
         )
 
     def _fail(
-        self, run: dict, artifacts: RunArtifacts, error: Exception,
+        self, run: dict, artifacts: RunArtifacts, error: BaseException,
         error_code: str | None = None,
-    ) -> None:
+    ) -> dict | None:
         code = error_code or _safe_error_code(error)
         if run["status"] == "RUNNING":
             try:
-                self.repository.fenced_rewrite_transition(
+                updated = self.repository.fenced_rewrite_transition(
                     run["id"],
                     expected_owner_token=self._owner_token,
                     expected_lease_expires_at=run["lease_expires_at"],
                     new_status="FAILED",
                     error_code=code,
-                    mutate_artifacts=lambda: self._cleanup_and_audit_failure(
-                        run, artifacts, code
+                    mutate_artifacts=lambda: self._remove_deployable_artifacts(
+                        artifacts
                     ),
                 )
             except Exception:
-                return
-            return
-        artifacts.append_audit(
+                updated = self._authoritative_run(run["id"])
+                if not (
+                    updated
+                    and updated["status"] == "FAILED"
+                    and updated["error_code"] == code
+                ):
+                    return updated
+            self._append_run_failed(artifacts, run["id"], code)
+            return updated
+        updated = self.repository.transition_rewrite_run(
+            run["id"], {"QUEUED"}, "FAILED", error_code=code,
+        )
+        self._append_audit_best_effort(
+            artifacts,
             run_id=run["id"], status="FAILED", event_code="RUN_FAILED",
             error_code=code, error_safe_hash=_hash_text(code),
         )
-        self.repository.transition_rewrite_run(
-            run["id"], {"QUEUED"}, "FAILED", error_code=code,
-        )
+        return updated
 
     def _open_artifacts(self, run: dict) -> RunArtifacts:
         expected = self.runs_root.resolve() / run["id"]
@@ -412,16 +468,7 @@ class ResumeRewritePipeline:
             raise ValueError("created artifacts are invalid")
         shutil.rmtree(expected)
 
-    def _cleanup_and_audit_recovery(
-        self, run: dict, artifacts: RunArtifacts
-    ) -> None:
-        self._remove_deployable_artifacts(artifacts)
-        artifacts.append_audit(
-            run_id=run["id"], status="FAILED", event_code="RUN_RECOVERED",
-            error_code="INTERRUPTED",
-        )
-
-    def _cleanup_and_audit_blockers(
+    def _append_facts_required(
         self,
         run: dict,
         artifacts: RunArtifacts,
@@ -429,8 +476,8 @@ class ResumeRewritePipeline:
         result: CodexRewriteResult,
         questions: list[dict[str, Any]],
     ) -> None:
-        self._remove_deployable_artifacts(artifacts)
-        artifacts.append_audit(
+        self._append_audit_best_effort(
+            artifacts,
             run_id=run["id"], status="NEEDS_FACTS", event_code="FACTS_REQUIRED",
             question_ids=[item["question_id"] for item in questions],
             source_ids=[
@@ -440,40 +487,35 @@ class ResumeRewritePipeline:
             claim_count=len(result.claim_audit),
         )
 
-    def _cleanup_and_audit_failure(
-        self, run: dict, artifacts: RunArtifacts, code: str
+    def _append_run_failed(
+        self, artifacts: RunArtifacts, run_id: str, code: str
     ) -> None:
-        self._remove_deployable_artifacts(artifacts)
-        artifacts.append_audit(
-            run_id=run["id"], status="FAILED", event_code="RUN_FAILED",
+        self._append_audit_best_effort(
+            artifacts,
+            run_id=run_id, status="FAILED", event_code="RUN_FAILED",
             error_code=code, error_safe_hash=_hash_text(code),
         )
 
-    def _publish_and_audit_ready(
+    @staticmethod
+    def _append_audit_best_effort(
+        artifacts: RunArtifacts, **event: Any
+    ) -> None:
+        try:
+            artifacts.append_audit(**event)
+        except Exception:
+            pass
+
+    def _publish_ready_artifacts(
         self,
-        run: dict,
         artifacts: RunArtifacts,
         stage: Path,
         render_result: Any,
-        materials: dict[str, Any],
-        result: CodexRewriteResult,
-        validated_markdown: str,
     ) -> None:
         if not self._remove_publication_artifacts(
             artifacts, preserved_stage=stage
         ):
             raise OSError("deployable artifact cleanup is incomplete")
         self._publish_staged_deployables(artifacts, stage, render_result)
-        artifacts.append_audit(
-            run_id=run["id"], status="RUNNING", event_code="RENDER_COMPLETED",
-            content_hash=_hash_text(validated_markdown),
-            page_count=render_result.page_count,
-            source_ids=[
-                item["id"] for item in materials["resumes"] + materials["jobs"]
-            ],
-            gate_outcome="PASS",
-            claim_count=len(result.claim_audit),
-        )
 
     def _remove_deployable_artifacts(self, artifacts: RunArtifacts) -> None:
         if not self._remove_publication_artifacts(artifacts):
@@ -538,14 +580,19 @@ class ResumeRewritePipeline:
                 expected_lease_expires_at=run["lease_expires_at"],
                 new_status="FAILED",
                 error_code=code,
-                mutate_artifacts=lambda: self._cleanup_and_audit_failure(
-                    run, artifacts, code
+                mutate_artifacts=lambda: self._remove_deployable_artifacts(
+                    artifacts
                 ),
             )
         except Exception:
-            return self._decorate_run(
-                self._authoritative_run(run["id"]) or run
-            )
+            updated = self._authoritative_run(run["id"])
+            if not (
+                updated
+                and updated["status"] == "FAILED"
+                and updated["error_code"] == code
+            ):
+                return self._decorate_run(updated or run)
+        self._append_run_failed(artifacts, run["id"], code)
         return self._decorate_run(updated)
 
     def _authoritative_run(self, run_id: str) -> dict | None:
@@ -583,22 +630,21 @@ class ResumeRewritePipeline:
                     raise RenderError(
                         "RENDER_ERROR", "Unable to render the resume safely."
                     ) from None
-                updated = self.repository.fenced_rewrite_transition(
-                    run["id"],
-                    expected_owner_token=self._owner_token,
-                    expected_lease_expires_at=run["lease_expires_at"],
-                    new_status="READY",
-                    blocking_questions=[],
-                    mutate_artifacts=lambda: self._publish_and_audit_ready(
-                        run,
-                        artifacts,
-                        stage,
-                        render_result,
-                        materials,
-                        result,
-                        validated_markdown,
-                    ),
-                )
+                try:
+                    updated = self.repository.fenced_rewrite_transition(
+                        run["id"],
+                        expected_owner_token=self._owner_token,
+                        expected_lease_expires_at=run["lease_expires_at"],
+                        new_status="READY",
+                        blocking_questions=[],
+                        mutate_artifacts=lambda: self._publish_ready_artifacts(
+                            artifacts, stage, render_result
+                        ),
+                    )
+                except Exception:
+                    updated = self._authoritative_run(run["id"])
+                    if not (updated and updated["status"] == "READY"):
+                        raise
                 return render_result, updated
         except RenderError:
             raise
@@ -759,7 +805,7 @@ def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _safe_error_code(error: Exception) -> str:
+def _safe_error_code(error: BaseException) -> str:
     if isinstance(error, CodexRunError):
         return error.code if error.code in {"CODEX_UNAVAILABLE", "CODEX_TIMEOUT", "CODEX_PROCESS_ERROR", "INVALID_MODEL_RESULT"} else "CODEX_PROCESS_ERROR"
     if isinstance(error, RenderError):
