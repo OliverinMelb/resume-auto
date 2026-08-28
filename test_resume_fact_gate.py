@@ -577,6 +577,39 @@ class FactGateTests(unittest.TestCase):
                     [accepted_record(claim)],
                 )
 
+    def test_promoted_claim_policy_scans_markdown_urls_and_rejects_html(self):
+        safe_link = "实现[本地 Agent 评测](https://example.test/project)"
+        gate = validate_rewrite_facts(
+            accepted_result(safe_link),
+            self.resumes,
+            self.jobs,
+            [],
+            [accepted_record(safe_link)],
+        )
+        self.assertEqual(gate.blockers, [])
+
+        forbidden_claims = [
+            "实现[本地 Agent 评测](https://example.test/客户)",
+            "实现[本地 Agent 评测](https://example.test/%E5%AE%A2%E6%88%B7)",
+            "实现[本地 Agent 评测](https://example.test/?role=%E7%94%B2%E6%96%B9)",
+            "实现[本地 Agent 评测](https://example.test/%E4%B8%8A%E7%BA%BF)",
+            '<span data-owner="客户">实现本地 Agent 评测</span>',
+            "<strong>实现本地 Agent 评测</strong>",
+            (
+                "&lt;span data-target=&quot;生产环境&quot;&gt;"
+                "实现本地 Agent 评测&lt;/span&gt;"
+            ),
+        ]
+        for claim in forbidden_claims:
+            with self.subTest(claim=claim), self.assertRaises(InvalidModelResult):
+                validate_rewrite_facts(
+                    accepted_result(claim),
+                    self.resumes,
+                    self.jobs,
+                    [],
+                    [accepted_record(claim)],
+                )
+
     def test_unaccepted_gap_cannot_be_promoted(self):
         with self.assertRaises(InvalidModelResult):
             validate_rewrite_facts(

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import unescape
 from typing import Any
+from urllib.parse import unquote
 
 from resume_agent.rewrite_schemas import (
     CodexRewriteResult,
@@ -479,9 +480,12 @@ def validate_rewrite_facts(
             ]
             if not claim_key or verified_claim_keys.count(claim_key) != 1:
                 raise InvalidModelResult("已验收缺口 claim 必须完整匹配一条 verified_claims")
-            policy_text = _policy_key(audit.claim)
+            decoded_fact = _decoded_acceptance_fact(audit.claim)
+            if HTML_MARKUP.search(decoded_fact):
+                raise InvalidModelResult("已验收缺口 claim 不得包含 HTML")
+            policy_text = _acceptance_policy_key(decoded_fact)
             if any(
-                _policy_key(term) in policy_text
+                _acceptance_policy_key(term) in policy_text
                 for term in FORBIDDEN_ACCEPTANCE_FACTS
             ):
                 raise InvalidModelResult("验收记录不得引入公司、客户、上线或生产事实")
@@ -950,6 +954,31 @@ def _policy_key(value: str) -> str:
         if not character.isspace()
         and not unicodedata.category(character).startswith("P")
     ).lower()
+
+
+def _decoded_acceptance_fact(value: str) -> str:
+    decoded = _rendered_fact_text(value)
+    for _ in range(4):
+        expanded = unquote(unescape(decoded))
+        if expanded == decoded:
+            break
+        decoded = expanded
+    return decoded
+
+
+def _acceptance_policy_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = "".join(
+        character
+        for character in normalized
+        if not _is_default_ignorable(character)
+    )
+    return "".join(
+        character
+        for character in normalized
+        if not character.isspace()
+        and not unicodedata.category(character).startswith("P")
+    ).casefold()
 
 
 def _rendered_visible_text(value: str) -> str:

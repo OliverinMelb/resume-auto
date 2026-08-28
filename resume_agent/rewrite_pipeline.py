@@ -163,6 +163,8 @@ class ResumeRewritePipeline:
         except (NotFoundError, ValueError):
             self._fail_validation(run, artifacts)
             raise ValueError("rewrite input is invalid") from None
+        except sqlite3.Error:
+            return self._settle_database_failure(run, artifacts)
         if materials["preflight_blockers"]:
             return self._block_preflight(run, artifacts, materials)
         run = self.repository.transition_rewrite_run(
@@ -179,6 +181,8 @@ class ResumeRewritePipeline:
         except (NotFoundError, ValueError):
             self._fail_validation(run, artifacts)
             raise ValueError("rewrite input is invalid") from None
+        except sqlite3.Error:
+            return self._settle_database_failure(run, artifacts)
         return self._run_with_materials(run, artifacts, materials)
 
     def _prepare(self, run: dict, artifacts: RunArtifacts) -> dict[str, Any]:
@@ -397,6 +401,17 @@ class ResumeRewritePipeline:
             run, artifacts, InvalidModelResult("invalid request state"),
             error_code="VALIDATION_ERROR",
         )
+
+    def _settle_database_failure(
+        self, run: dict, artifacts: RunArtifacts
+    ) -> dict:
+        updated = self._fail(
+            run,
+            artifacts,
+            InvalidModelResult("database operation failed"),
+            error_code="DATABASE_ERROR",
+        )
+        return self._decorate_run(updated or run)
 
     def _fail(
         self, run: dict, artifacts: RunArtifacts, error: BaseException,

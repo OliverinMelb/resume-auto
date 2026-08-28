@@ -111,6 +111,39 @@ class GapAcceptancePlan(StrictModel):
 
 
 LOWER_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+RFC3339_UTC_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d{1,6})?(?:Z|\+00:00)$"
+)
+
+
+def _is_default_ignorable(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        unicodedata.category(character) == "Cf"
+        or codepoint == 0x034F
+        or 0x180B <= codepoint <= 0x180F
+        or 0xFE00 <= codepoint <= 0xFE0F
+        or 0xFFF0 <= codepoint <= 0xFFF8
+        or 0x1BCA0 <= codepoint <= 0x1BCA3
+        or 0x1D173 <= codepoint <= 0x1D17A
+        or 0xE0000 <= codepoint <= 0xE0FFF
+    )
+
+
+def _canonical_evidence_text(value: str, *, max_length: int) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = "".join(
+        character
+        for character in normalized
+        if not _is_default_ignorable(character)
+    )
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized or len(normalized) > max_length:
+        raise ValueError(
+            f"evidence text must be 1 to {max_length} substantive characters"
+        )
+    return normalized
 
 
 class TestRecord(StrictModel):
@@ -121,10 +154,7 @@ class TestRecord(StrictModel):
     @field_validator("command")
     @classmethod
     def normalize_command(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("command must not be blank")
-        return normalized
+        return _canonical_evidence_text(value, max_length=4000)
 
 
 class GapAcceptanceRequest(StrictModel):
@@ -140,32 +170,15 @@ class GapAcceptanceRequest(StrictModel):
     @field_validator("project_path")
     @classmethod
     def normalize_project_path(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("project_path must not be blank")
-        return normalized
+        return _canonical_evidence_text(value, max_length=2000)
 
     @field_validator("verified_claims")
     @classmethod
     def normalize_verified_claims(cls, values: list[str]) -> list[str]:
-        normalized = [value.strip() for value in values]
-        identities = [
-            re.sub(
-                r"\s+",
-                " ",
-                "".join(
-                    character
-                    for character in unicodedata.normalize("NFKC", value)
-                    if unicodedata.category(character) != "Cf"
-                ),
-            ).strip().casefold()
-            for value in normalized
+        normalized = [
+            _canonical_evidence_text(value, max_length=2000) for value in values
         ]
-        if any(
-            not identity or len(value) > 2000
-            for value, identity in zip(normalized, identities)
-        ):
-            raise ValueError("verified_claims entries must be 1 to 2000 characters")
+        identities = [value.casefold() for value in normalized]
         if len(identities) != len(set(identities)):
             raise ValueError("verified_claims must not contain duplicates")
         return normalized
@@ -174,16 +187,30 @@ class GapAcceptanceRequest(StrictModel):
     @classmethod
     def normalize_artifact_hashes(cls, values: dict[str, str]) -> dict[str, str]:
         normalized: dict[str, str] = {}
+        identities: set[str] = set()
         for raw_name, digest in values.items():
-            name = raw_name.strip()
-            if not name or len(name) > 500:
-                raise ValueError("artifact hash names must be 1 to 500 characters")
-            if name in normalized:
-                raise ValueError("artifact hash names must be unique after trimming")
+            name = _canonical_evidence_text(raw_name, max_length=500)
+            identity = name.casefold()
+            if identity in identities:
+                raise ValueError("artifact hash names must be canonically unique")
             if re.fullmatch(LOWER_SHA256_PATTERN, digest) is None:
                 raise ValueError("artifact hashes must be lowercase SHA-256 values")
+            identities.add(identity)
             normalized[name] = digest
         return normalized
+
+    @field_validator("test_records")
+    @classmethod
+    def reject_duplicate_test_records(
+        cls, values: list[TestRecord]
+    ) -> list[TestRecord]:
+        identities = [
+            (record.command, record.exit_code, record.output_sha256)
+            for record in values
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("test_records must be canonically unique")
+        return values
 
     @field_validator("completed_at", "confirmed_at")
     @classmethod
@@ -197,7 +224,13 @@ class GapAcceptanceRequest(StrictModel):
     @field_validator("completed_at", "confirmed_at", mode="before")
     @classmethod
     def reject_implicit_timestamps(cls, value):
-        if not isinstance(value, (str, datetime)):
+        if isinstance(value, str):
+            if RFC3339_UTC_PATTERN.fullmatch(value) is None:
+                raise ValueError(
+                    "acceptance timestamps must be RFC3339 UTC strings"
+                )
+            return value
+        if not isinstance(value, datetime):
             raise ValueError("acceptance timestamps must be explicit datetimes")
         return value
 

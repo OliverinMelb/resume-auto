@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from pydantic import ValidationError
+
 from resume_agent.discovery_schemas import (
     DISCOVERY_RUN_ID_PATTERN,
     DISCOVERY_RUN_STATUSES,
@@ -25,6 +27,24 @@ def utc_now() -> str:
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _validate_gap_acceptance_payload(
+    payload: Any,
+) -> GapAcceptanceRequest | None:
+    try:
+        return GapAcceptanceRequest.model_validate(payload)
+    except ValidationError:
+        return None
+
+
+def _validate_stored_gap_acceptance(
+    evidence_json: str,
+) -> GapAcceptanceRequest | None:
+    try:
+        return GapAcceptanceRequest.model_validate_json(evidence_json)
+    except Exception:
+        return None
 
 
 class NotFoundError(LookupError):
@@ -155,12 +175,10 @@ class Repository:
         if row is None:
             raise NotFoundError("gap acceptance not found")
         data = dict(row)
-        try:
-            evidence = GapAcceptanceRequest.model_validate_json(
-                data.pop("evidence_json")
-            ).model_dump(mode="json")
-        except Exception:
+        request = _validate_stored_gap_acceptance(data.pop("evidence_json"))
+        if request is None:
             raise ValueError("stored gap acceptance evidence is invalid") from None
+        evidence = request.model_dump(mode="json")
         if (
             evidence["gap_id"] != data["gap_id"]
             or evidence["completed_at"] != data["completed_at"]
@@ -735,7 +753,9 @@ class Repository:
         self, candidate_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         self.get_candidate(candidate_id)
-        request = GapAcceptanceRequest.model_validate(payload)
+        request = _validate_gap_acceptance_payload(payload)
+        if request is None:
+            raise ValueError("invalid gap acceptance evidence") from None
         evidence = request.model_dump(mode="json")
         evidence_json = json.dumps(
             evidence,

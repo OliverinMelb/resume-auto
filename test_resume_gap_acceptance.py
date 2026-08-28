@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -73,6 +74,34 @@ class GapAcceptanceSchemaTests(unittest.TestCase):
                         completed_at=completed_at, confirmed_at=confirmed_at
                     )
                 )
+
+    def test_timestamps_require_strict_rfc3339_utc_strings_or_aware_utc_datetime(self):
+        invalid_values = [
+            "0",
+            "1",
+            "1690000000",
+            "2026-08-26 03:00:00Z",
+            "2026-08-26T03:00:00z",
+            "2026-08-26T03:00:00+0000",
+            "2026-08-26T03:00:00-00:00",
+            "2026-08-26T03:00Z",
+            "not-rfc3339",
+        ]
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                GapAcceptanceRequest.model_validate(
+                    acceptance_payload(completed_at=value, confirmed_at=value)
+                )
+
+        completed = datetime(2026, 8, 26, 3, 0, tzinfo=timezone.utc)
+        confirmed = datetime(2026, 8, 26, 3, 1, tzinfo=timezone.utc)
+        request = GapAcceptanceRequest.model_validate(
+            acceptance_payload(completed_at=completed, confirmed_at=confirmed)
+        )
+        self.assertEqual(
+            request.model_dump(mode="json")["completed_at"],
+            "2026-08-26T03:00:00Z",
+        )
 
     def test_rejects_false_confirmation_extra_fields_and_non_lowercase_hashes(self):
         invalid_payloads = [
@@ -146,6 +175,71 @@ class GapAcceptanceSchemaTests(unittest.TestCase):
                 )
             )
 
+    def test_required_evidence_text_is_unicode_canonical_and_substantive(self):
+        invalid_payloads = [
+            acceptance_payload(project_path="\u200b"),
+            acceptance_payload(
+                test_records=[{
+                    "command": "\u200b",
+                    "exit_code": 0,
+                    "output_sha256": "b" * 64,
+                }]
+            ),
+            acceptance_payload(artifact_hashes={"\u200b": "a" * 64}),
+        ]
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), self.assertRaises(ValidationError):
+                GapAcceptanceRequest.model_validate(payload)
+
+        request = GapAcceptanceRequest.model_validate(
+            acceptance_payload(
+                project_path="  Ｃ:/work/\u200b项目　 ",
+                verified_claims=["  实现\u200b　评测  "],
+                artifact_hashes={"　ｒｅｐｏｒｔ.json\u200b ": "a" * 64},
+                test_records=[{
+                    "command": "  ｐｙｔｈｏｎ\u200b　-m　unittest  ",
+                    "exit_code": 0,
+                    "output_sha256": "b" * 64,
+                }],
+            )
+        )
+        dumped = request.model_dump(mode="json")
+        self.assertEqual(dumped["project_path"], "C:/work/项目")
+        self.assertEqual(dumped["verified_claims"], ["实现 评测"])
+        self.assertEqual(list(dumped["artifact_hashes"]), ["report.json"])
+        self.assertEqual(
+            dumped["test_records"][0]["command"], "python -m unittest"
+        )
+
+    def test_test_records_reject_duplicate_canonical_identity(self):
+        duplicate_records = [
+            {
+                "command": "python\u200b  -m unittest",
+                "exit_code": 0,
+                "output_sha256": "b" * 64,
+            },
+            {
+                "command": "ｐｙｔｈｏｎ　-m　unittest",
+                "exit_code": 0,
+                "output_sha256": "b" * 64,
+            },
+        ]
+        with self.assertRaises(ValidationError):
+            GapAcceptanceRequest.model_validate(
+                acceptance_payload(test_records=duplicate_records)
+            )
+
+    def test_artifact_names_reject_duplicate_canonical_identity(self):
+        with self.assertRaises(ValidationError):
+            GapAcceptanceRequest.model_validate(
+                acceptance_payload(
+                    artifact_hashes={
+                        "report.json": "a" * 64,
+                        "ｒｅｐｏｒｔ.json\u200b": "b" * 64,
+                    }
+                )
+            )
+
     def test_command_and_project_path_are_inert_evidence_text(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "must-not-exist"
@@ -181,6 +275,14 @@ class GapAcceptanceRepositoryTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def assertSafeEvidenceError(self, error, expected_message):
+        self.assertIs(type(error), ValueError)
+        self.assertEqual(str(error), expected_message)
+        self.assertNotIn("TOP_SECRET", str(error))
+        self.assertNotIn("TOP_SECRET", repr(error))
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
 
     def test_evidence_round_trips_and_list_order_is_stable(self):
         first_request = GapAcceptanceRequest.model_validate(acceptance_payload())
@@ -270,16 +372,32 @@ class GapAcceptanceRepositoryTests(unittest.TestCase):
         try:
             connection.execute(
                 "UPDATE gap_acceptances SET evidence_json = ? WHERE id = ?",
-                ('{"verified_claims": ["forged"]}', accepted["id"]),
+                ('{"verified_claims": ["TOP_SECRET"]}', accepted["id"]),
             )
             connection.commit()
         finally:
             connection.close()
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as captured:
             self.repository.get_gap_acceptance(self.candidate["id"], accepted["id"])
+        self.assertSafeEvidenceError(
+            captured.exception, "stored gap acceptance evidence is invalid"
+        )
         with self.assertRaises(ValueError):
             self.repository.list_gap_acceptances(self.candidate["id"])
+
+    def test_create_validation_error_does_not_expose_payload_or_exception_chain(self):
+        payload = {
+            **acceptance_payload(confirmed_at="0"),
+            "unexpected": "TOP_SECRET",
+        }
+
+        with self.assertRaises(ValueError) as captured:
+            self.repository.create_gap_acceptance(self.candidate["id"], payload)
+
+        self.assertSafeEvidenceError(
+            captured.exception, "invalid gap acceptance evidence"
+        )
 
     def test_additive_schema_migration_preserves_existing_candidate(self):
         migrated_path = Path(self.temp_dir.name) / "legacy.db"

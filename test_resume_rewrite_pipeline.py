@@ -94,6 +94,39 @@ class InsertionFailingRepository(Repository):
         raise sqlite3.IntegrityError("private database detail")
 
 
+class AcceptanceLoadFailingRepository(Repository):
+    def list_gap_acceptances(self, candidate_id):
+        raise sqlite3.OperationalError(
+            "TOP_SECRET database path C:/private/resume-agent.db"
+        )
+
+
+class AcceptanceLoadOwnerHandoffRepository(AcceptanceLoadFailingRepository):
+    def __init__(self, database_path):
+        super().__init__(database_path)
+        self.handed_off = False
+        self.winner_owner = "winner-owner"
+        self.winner_lease = "2099-01-01T00:00:00+00:00"
+
+    def fenced_rewrite_transition(self, run_id, **changes):
+        if changes["new_status"] == "FAILED" and not self.handed_off:
+            self.handed_off = True
+            current = Repository.get_rewrite_run(self, run_id)
+            winner_pdf = Path(current["artifact_dir"]) / "resume.pdf"
+            winner_pdf.write_bytes(b"%PDF-winner")
+            Repository.transition_rewrite_run(
+                self,
+                run_id,
+                {"RUNNING"},
+                "RUNNING",
+                owner_token=self.winner_owner,
+                lease_expires_at=self.winner_lease,
+                expected_owner_token=changes["expected_owner_token"],
+                expected_lease_expires_at=changes["expected_lease_expires_at"],
+            )
+        return Repository.fenced_rewrite_transition(self, run_id, **changes)
+
+
 class ReadyTransitionFailingRepository(Repository):
     def transition_rewrite_run(self, run_id, expected_statuses, new_status, **changes):
         if new_status == "READY":
@@ -1270,6 +1303,106 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual(snapshot["accepted_gap_ids"], [])
         self.assertEqual(snapshot["gap_acceptances"], [])
         self._assert_no_deployable_artifacts(run)
+
+    def test_queued_acceptance_database_failure_settles_failed_without_leak(self):
+        repository = AcceptanceLoadFailingRepository(
+            self.repository.database_path
+        )
+        runner = FakeCodexRunner(
+            result_for(self.resume["id"], self.job["id"])
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            runner,
+            FakeRenderer(),
+        )
+
+        run = pipeline.run(self.request())
+
+        self.assertEqual((run["status"], run["error_code"]), ("FAILED", "DATABASE_ERROR"))
+        self.assertEqual((run["attempt_count"], runner.run_count), (0, 0))
+        self.assertNotIn("TOP_SECRET", str(run))
+        self.assertEqual(run["error_summary"], "")
+        self.assertEqual(
+            [event["event_code"] for event in self._audit_events(run)],
+            ["RUN_CREATED", "RUN_FAILED"],
+        )
+        self.assertFalse((Path(run["artifact_dir"]) / "input-snapshot.json").exists())
+        self._assert_no_deployable_artifacts(run)
+
+    def test_running_acceptance_database_failure_uses_owner_lease_fence(self):
+        first_pipeline = self.make_pipeline(
+            FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+        first = first_pipeline.run(self.request())
+        answer = confirmed_answer(
+            question_id=first["blocking_questions"][0]["question_id"],
+            answer="Completed 86 of 100 fixed regression runs; 86/100.",
+            source_note="本地回归记录，候选人确认",
+        )
+        repository = AcceptanceLoadFailingRepository(
+            self.repository.database_path
+        )
+        runner = FakeCodexRunner(
+            result_for(self.resume["id"], self.job["id"])
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            runner,
+            FakeRenderer(),
+        )
+
+        run = pipeline.resume(first["id"], [answer])
+
+        self.assertEqual((run["status"], run["error_code"]), ("FAILED", "DATABASE_ERROR"))
+        self.assertEqual(runner.run_count, 0)
+        self.assertIsNone(run["owner_token"])
+        self.assertIsNone(run["lease_expires_at"])
+        self.assertNotIn("TOP_SECRET", str(run))
+        self.assertEqual(self._audit_events(run)[-1]["event_code"], "RUN_FAILED")
+        self._assert_no_deployable_artifacts(run)
+
+    def test_acceptance_load_failure_does_not_overwrite_new_running_owner(self):
+        first_pipeline = self.make_pipeline(
+            FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+        first = first_pipeline.run(self.request())
+        answer = confirmed_answer(
+            question_id=first["blocking_questions"][0]["question_id"],
+            answer="Completed 86 of 100 fixed regression runs; 86/100.",
+            source_note="本地回归记录，候选人确认",
+        )
+        repository = AcceptanceLoadOwnerHandoffRepository(
+            self.repository.database_path
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+
+        run = pipeline.resume(first["id"], [answer])
+
+        self.assertEqual(run["status"], "RUNNING")
+        self.assertEqual(run["owner_token"], repository.winner_owner)
+        self.assertEqual(run["lease_expires_at"], repository.winner_lease)
+        winner_pdf = Path(run["artifact_dir"]) / "resume.pdf"
+        self.assertEqual(winner_pdf.read_bytes(), b"%PDF-winner")
+        self.assertNotIn(
+            "RUN_FAILED",
+            [event["event_code"] for event in self._audit_events(run)],
+        )
 
     def test_temporary_runner_output_is_removed_when_runner_raises(self):
         run = self.make_pipeline(TempOutputFailureRunner(None), FakeRenderer()).run(self.request())
