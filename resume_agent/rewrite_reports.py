@@ -6,6 +6,7 @@ import re
 import unicodedata
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
 from resume_agent.rewrite_schemas import CodexRewriteResult, GapAcceptancePlan
 from resume_agent.research import KEYWORD_ALIASES
@@ -22,6 +23,7 @@ EMAIL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CN_PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
+CONTINUOUS_PHONE_PATTERN = re.compile(r"(?<!\d)\d{10,15}(?!\d)")
 INTERNATIONAL_PHONE_PATTERN = re.compile(
     r"(?<![\w])\+\d(?:[\d ().-]{7,}\d)(?![\w])"
 )
@@ -40,9 +42,13 @@ JWT_PATTERN = re.compile(
     r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
 )
 CREDENTIAL_PATTERN = re.compile(
-    r"(?i)\b(?:authorization|proxy-authorization|cookie|set-cookie|"
-    r"access[_-]?token|refresh[_-]?token|session(?:[_-]?id)?|api[_-]?key|"
-    r"client[_-]?secret|password|passwd|secret)\b\s*(?::|=)\s*"
+    r"(?i)(?<![A-Za-z0-9_])(?:"
+    r"(?:[A-Za-z][A-Za-z0-9]*_)+(?:token|access_token|refresh_token|"
+    r"session(?:_id)?|api_key|client_secret|password|passwd|secret)|"
+    r"authorization|proxy-authorization|cookie|set-cookie|token|"
+    r"access(?:[ _-]?token)|refresh(?:[ _-]?token)|"
+    r"session(?:[ _-]?id)?|api(?:[ _-]?key)|client(?:[ _-]?secret)|"
+    r"password|passwd|secret)(?![A-Za-z0-9_])\s*(?::|=)\s*"
     r"(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;，；]+)"
 )
 COMMAND_SECRET_PATTERN = re.compile(
@@ -55,6 +61,10 @@ KNOWN_SECRET_PATTERN = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{16,}|"
     r"AKIA[0-9A-Z]{16})(?![A-Za-z0-9_-])"
 )
+PERCENT_ESCAPE_PATTERN = re.compile(r"%[0-9A-Fa-f]{2}")
+MALFORMED_PERCENT_PATTERN = re.compile(
+    r"%(?![0-9A-Fa-f]{2})(?=[0-9A-Za-z]{1,2})"
+)
 
 
 class ReportValidationError(ValueError):
@@ -64,17 +74,41 @@ class ReportValidationError(ValueError):
         super().__init__("report input is invalid")
 
 
-def sanitize_report_text(value: str) -> str:
-    """Redact PII, credentials, URLs, paths and digests from report prose."""
-    if not isinstance(value, str):
-        raise ReportValidationError()
+def _normalize_report_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value)
-    normalized = "".join(
+    return "".join(
         character
         for character in normalized
         if unicodedata.category(character) not in {"Cc", "Cf"}
         or character in "\t\r\n"
     )
+
+
+def _decode_percent_escapes(value: str) -> str | None:
+    decoded = value
+    for _ in range(4):
+        if PERCENT_ESCAPE_PATTERN.search(decoded) is None:
+            return None if MALFORMED_PERCENT_PATTERN.search(decoded) else decoded
+        try:
+            decoded = unquote_to_bytes(decoded).decode("utf-8", errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return None
+        decoded = _normalize_report_text(decoded)
+    if (
+        PERCENT_ESCAPE_PATTERN.search(decoded) is not None
+        or MALFORMED_PERCENT_PATTERN.search(decoded) is not None
+    ):
+        return None
+    return decoded
+
+
+def sanitize_report_text(value: str) -> str:
+    """Redact PII, credentials, URLs, paths and digests from report prose."""
+    if not isinstance(value, str):
+        raise ReportValidationError()
+    normalized = _decode_percent_escapes(_normalize_report_text(value))
+    if normalized is None:
+        return "[REDACTED_UNSAFE]"
     normalized = CREDENTIAL_PATTERN.sub("[REDACTED_CREDENTIAL]", normalized)
     normalized = COMMAND_SECRET_PATTERN.sub(
         lambda match: f"{match.group(1)}=[REDACTED_CREDENTIAL]", normalized
@@ -83,6 +117,7 @@ def sanitize_report_text(value: str) -> str:
     normalized = JWT_PATTERN.sub("[REDACTED_CREDENTIAL]", normalized)
     normalized = EMAIL_PATTERN.sub("[REDACTED_EMAIL]", normalized)
     normalized = CN_PHONE_PATTERN.sub("[REDACTED_PHONE]", normalized)
+    normalized = CONTINUOUS_PHONE_PATTERN.sub("[REDACTED_PHONE]", normalized)
     normalized = INTERNATIONAL_PHONE_PATTERN.sub("[REDACTED_PHONE]", normalized)
     normalized = SEPARATED_PHONE_PATTERN.sub("[REDACTED_PHONE]", normalized)
     normalized = URL_PATTERN.sub("[REDACTED_URL]", normalized)
@@ -150,6 +185,9 @@ def build_claim_ledger(
         }
         for audit in result.claim_audit
     ]
+    visual_claims = [item["claim"].casefold() for item in claims]
+    if len(visual_claims) != len(set(visual_claims)):
+        raise ReportValidationError()
     identities = [
         (
             item["claim"].casefold(),
@@ -172,8 +210,12 @@ def build_claim_ledger(
     claims.sort(
         key=lambda item: (
             item["claim"].casefold(),
+            item["claim"],
             item["claim_status"],
             item["change_type"],
+            tuple(item["source_resume_ids"]),
+            tuple(item["source_job_ids"]),
+            item["gap_id"] or "",
             item["acceptance_id"] or "",
         )
     )

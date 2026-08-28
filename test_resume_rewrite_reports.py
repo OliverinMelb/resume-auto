@@ -1,9 +1,11 @@
+import json
 import unittest
 
 from resume_agent.rewrite_reports import (
     build_ats_report,
     build_claim_ledger,
     build_gap_roadmap,
+    sanitize_report_text,
 )
 from resume_agent.rewrite_schemas import CodexRewriteResult, GapAcceptancePlan
 
@@ -12,6 +14,8 @@ RESUME_ID = "source_resume_" + "a" * 32
 JOB_ID = "job_" + "b" * 32
 CANDIDATE_ID = "candidate_" + "c" * 32
 ACCEPTANCE_ID = "gap_acceptance_" + "d" * 32
+OTHER_RESUME_ID = "source_resume_" + "e" * 32
+OTHER_JOB_ID = "job_" + "f" * 32
 
 
 def rewrite_result(*, claims=None, plans=None, markdown="- Built Python agents"):
@@ -45,6 +49,66 @@ def rewrite_result(*, claims=None, plans=None, markdown="- Built Python agents")
 
 
 class RewriteReportTests(unittest.TestCase):
+    def test_report_sanitizer_redacts_bounded_credential_contexts(self):
+        credential_inputs = (
+            "token=topsecret",
+            "Token: topsecret",
+            "access token: topsecret",
+            "API Key: topsecret",
+            "OPENAI_API_KEY=topsecret",
+            "BOSS_TOKEN=topsecret",
+            "--token topsecret",
+            "--api-key=topsecret",
+            "Authorization: Bearer topsecret",
+        )
+
+        for value in credential_inputs:
+            with self.subTest(value=value):
+                sanitized = sanitize_report_text(value)
+                self.assertNotIn("topsecret", sanitized.casefold())
+
+        self.assertEqual(
+            sanitize_report_text("tokenizer preserves the token budget"),
+            "tokenizer preserves the token budget",
+        )
+        self.assertEqual(
+            sanitize_report_text("tokenizer=topsecret; token budget"),
+            "tokenizer=topsecret; token budget",
+        )
+
+    def test_report_sanitizer_decodes_percent_encoding_and_fails_closed(self):
+        cases = (
+            ("contact%2540example.com", "[REDACTED_EMAIL]"),
+            (
+                "https%3A%2F%2Fexample.com%2Fprivate%3Ftoken%3Dtopsecret",
+                "[REDACTED_URL]",
+            ),
+            ("tok\u200ben%3Dtopsecret", "[REDACTED_CREDENTIAL]"),
+            ("token%252525253Dtopsecret", "[REDACTED_UNSAFE]"),
+            ("candidate%C3%28@example.com", "[REDACTED_UNSAFE]"),
+            ("token%3Dtopsecret\ud800", "[REDACTED_UNSAFE]"),
+            ("token%ZZ=topsecret", "[REDACTED_UNSAFE]"),
+        )
+
+        for value, expected in cases:
+            with self.subTest(value=value):
+                sanitized = sanitize_report_text(value)
+                self.assertEqual(sanitized, expected)
+                self.assertNotIn("topsecret", sanitized.casefold())
+
+    def test_report_sanitizer_redacts_continuous_phone_numbers(self):
+        for number in ("4155552671", "442071838750", "861381234567890"):
+            with self.subTest(number=number):
+                self.assertEqual(
+                    sanitize_report_text(f"call {number}"),
+                    "call [REDACTED_PHONE]",
+                )
+
+        self.assertEqual(
+            sanitize_report_text("invoice 1234567890123456"),
+            "invoice 1234567890123456",
+        )
+
     def test_claim_ledger_contains_only_the_restricted_contract(self):
         ledger = build_claim_ledger(
             rewrite_result(),
@@ -68,6 +132,68 @@ class RewriteReportTests(unittest.TestCase):
                 ]
             },
         )
+
+    def test_claim_ledger_bytes_are_stable_for_reversed_nonduplicate_sources(self):
+        base = rewrite_result().claim_audit[0].model_dump()
+        first = {
+            **base,
+            "claim": "Token budget",
+            "source_resume_ids": [RESUME_ID],
+            "job_ids": [JOB_ID],
+        }
+        second = {
+            **base,
+            "claim": "API architecture",
+            "source_resume_ids": [OTHER_RESUME_ID],
+            "job_ids": [OTHER_JOB_ID],
+        }
+
+        rendered = []
+        for claims in ([first, second], [second, first]):
+            ledger = build_claim_ledger(
+                rewrite_result(claims=claims),
+                [RESUME_ID, OTHER_RESUME_ID],
+                [JOB_ID, OTHER_JOB_ID],
+                [],
+            )
+            rendered.append(
+                json.dumps(
+                    ledger,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+
+        self.assertEqual(rendered[0], rendered[1])
+
+    def test_claim_ledger_rejects_claims_that_collide_after_sanitizing(self):
+        base = rewrite_result().claim_audit[0].model_dump()
+        claims = [
+            {
+                **base,
+                "claim": "Contact alice@example.com",
+                "source_resume_ids": [RESUME_ID],
+                "job_ids": [JOB_ID],
+            },
+            {
+                **base,
+                "claim": "contact bob@example.org",
+                "source_resume_ids": [OTHER_RESUME_ID],
+                "job_ids": [OTHER_JOB_ID],
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, "^report input is invalid$") as caught:
+            build_claim_ledger(
+                rewrite_result(claims=claims),
+                [RESUME_ID, OTHER_RESUME_ID],
+                [JOB_ID, OTHER_JOB_ID],
+                [],
+            )
+
+        self.assertNotIn("alice@example.com", repr(caught.exception))
+        self.assertNotIn("bob@example.org", repr(caught.exception))
 
     def test_claim_ledger_rejects_unknown_and_duplicate_source_ids(self):
         base = rewrite_result().claim_audit[0].model_dump()
@@ -185,6 +311,35 @@ class RewriteReportTests(unittest.TestCase):
             "xoxb-",
             "415",
             "/tmp/private",
+        ):
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret.casefold(), roadmap.casefold())
+
+    def test_gap_roadmap_sanitizes_every_prose_field(self):
+        plan = GapAcceptancePlan.model_validate(
+            {
+                "gap_id": "gap-bbbbbbbbbbbb",
+                "jd_requirements": ["OPENAI_API_KEY=requirement-secret"],
+                "project_scope": "contact%2540example.com",
+                "required_artifacts": ["call 4155552671"],
+                "test_commands": ["curl --token command-secret"],
+                "acceptance_metrics": ["access token: acceptance-secret"],
+                "interview_topics": [
+                    "https%3A%2F%2Fexample.com%2Fprivate%3Ftoken%3Dtopic-secret"
+                ],
+            }
+        )
+
+        roadmap = build_gap_roadmap([plan])
+
+        for secret in (
+            "requirement-secret",
+            "contact@example.com",
+            "4155552671",
+            "command-secret",
+            "acceptance-secret",
+            "topic-secret",
+            "example.com",
         ):
             with self.subTest(secret=secret):
                 self.assertNotIn(secret.casefold(), roadmap.casefold())
