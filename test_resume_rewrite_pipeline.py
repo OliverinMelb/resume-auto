@@ -86,6 +86,11 @@ class ReadyTransitionFailingRepository(Repository):
             run_id, expected_statuses, new_status, **changes
         )
 
+    def fenced_rewrite_transition(self, run_id, **changes):
+        if changes["new_status"] == "READY":
+            raise sqlite3.OperationalError("private ready transition failure")
+        return super().fenced_rewrite_transition(run_id, **changes)
+
 
 class CommitThenReadyErrorRepository(Repository):
     def __init__(self, database_path, error):
@@ -99,6 +104,40 @@ class CommitThenReadyErrorRepository(Repository):
         if new_status == "READY":
             raise self.error
         return updated
+
+    def fenced_rewrite_transition(self, run_id, **changes):
+        updated = super().fenced_rewrite_transition(run_id, **changes)
+        if changes["new_status"] == "READY":
+            raise self.error
+        return updated
+
+
+class FencedMutationRaceRepository(Repository):
+    def __init__(self, database_path):
+        super().__init__(database_path)
+        self.before_mutation = threading.Event()
+        self.release_mutation = threading.Event()
+        self._armed = False
+
+    def arm(self):
+        self._armed = True
+
+    def _pause_once(self):
+        if not self._armed:
+            return
+        self._armed = False
+        self.before_mutation.set()
+        if not self.release_mutation.wait(timeout=5):
+            raise AssertionError("test did not release fenced mutation")
+
+    def get_rewrite_run(self, run_id):
+        current = super().get_rewrite_run(run_id)
+        self._pause_once()
+        return current
+
+    def fenced_rewrite_transition(self, *args, **kwargs):
+        self._pause_once()
+        return super().fenced_rewrite_transition(*args, **kwargs)
 
 
 class ReadyBeforeRecoveryClaimRepository(Repository):
@@ -198,6 +237,33 @@ class PublishAfterRecoveryRenderer(FakeRenderer):
         preview_dir.mkdir(parents=True, exist_ok=True)
         (preview_dir / "page-1.png").write_bytes(b"late-preview")
         return RenderResult(1, markdown, [preview_dir / "page-1.png"])
+
+
+class BlockingFailureRenderer(FakeRenderer):
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def render(self, markdown, pdf_path, preview_dir):
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise AssertionError("test did not release failing renderer")
+        raise RuntimeError("private renderer failure")
+
+
+class RecreatingStageAfterRecoveryRenderer(PublishAfterRecoveryRenderer):
+    def render(self, markdown, pdf_path, preview_dir):
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise AssertionError("test did not release recreating renderer")
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        (pdf_path.parent / "resume.md").write_text(markdown, encoding="utf-8")
+        pdf_path.write_bytes(b"%PDF-recreated")
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_path = preview_dir / "page-1.png"
+        preview_path.write_bytes(b"recreated-preview")
+        return RenderResult(1, markdown, [preview_path])
 
 
 def result_for(resume_id, job_id):
@@ -406,6 +472,41 @@ class RewritePipelineTests(unittest.TestCase):
         self._assert_no_deployable_artifacts(final)
         self.assertFalse((Path(final["artifact_dir"]) / ".preview").exists())
 
+    def test_recovered_run_rejects_late_renderer_publication(self):
+        renderer = RecreatingStageAfterRecoveryRenderer()
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), renderer
+        )
+        outcomes = []
+        worker = threading.Thread(
+            target=lambda: self._capture_pipeline_run(pipeline, outcomes), daemon=True
+        )
+        worker.start()
+        self.assertTrue(renderer.started.wait(timeout=2))
+        running = self._latest_run()
+        connection = sqlite3.connect(self.repository.database_path)
+        try:
+            connection.execute(
+                "UPDATE rewrite_runs SET lease_expires_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", running["id"]),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        recovering = self.make_pipeline(FakeCodexRunner({}), FakeRenderer())
+        try:
+            self.assertEqual(recovering.recover_interrupted_runs(), 1)
+        finally:
+            renderer.release.set()
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive(), "late renderer thread did not stop")
+        final = self.repository.get_rewrite_run(running["id"])
+        self.assertEqual((final["status"], final["error_code"]), ("FAILED", "INTERRUPTED"))
+        self._assert_no_deployable_artifacts(final)
+        self.assertEqual(list(Path(final["artifact_dir"]).glob(".render-stage-*")), [])
+
     def test_ready_winner_before_recovery_claim_keeps_artifacts_and_audit(self):
         run_id = "rewrite_run_" + "c" * 32
         artifacts = RunArtifacts.create(self.runs_root, run_id)
@@ -562,6 +663,35 @@ class RewritePipelineTests(unittest.TestCase):
             worker.join(timeout=5)
 
         self.assertFalse(worker.is_alive(), "owned pipeline thread did not stop")
+
+    def test_stale_same_owner_generation_cannot_fail_new_recovery_claim(self):
+        pipeline = self.make_pipeline(FakeCodexRunner({}), FakeRenderer())
+        run_id = "rewrite_run_" + "e" * 32
+        artifacts = RunArtifacts.create(self.runs_root, run_id)
+        queued = self.repository.create_rewrite_run_with_id(
+            run_id, self.request().model_dump(), str(artifacts.directory)
+        )
+        stale = self.repository.transition_rewrite_run(
+            queued["id"], {"QUEUED"}, "RUNNING",
+            owner_token=pipeline._owner_token,
+            lease_expires_at="2099-01-01T00:00:01+00:00",
+        )
+        self.repository.transition_rewrite_run(
+            queued["id"], {"RUNNING"}, "RUNNING",
+            owner_token=pipeline._owner_token,
+            lease_expires_at="2099-01-01T00:00:02+00:00",
+            expected_owner_token=pipeline._owner_token,
+            expected_lease_expires_at=stale["lease_expires_at"],
+        )
+
+        with self.assertRaises(ValueError):
+            pipeline._fail_artifact_location(stale)
+
+        current = self.repository.get_rewrite_run(run_id)
+        self.assertEqual(current["status"], "RUNNING")
+        self.assertEqual(
+            current["lease_expires_at"], "2099-01-01T00:00:02+00:00"
+        )
 
     def _capture_pipeline_run(self, pipeline, errors):
         try:
@@ -981,6 +1111,59 @@ class RewritePipelineTests(unittest.TestCase):
                     "RUN_FAILED",
                     [event["event_code"] for event in self._audit_events(run)],
                 )
+
+    def test_old_owner_cleanup_cannot_delete_new_ready_delivery(self):
+        repository = FencedMutationRaceRepository(self.repository.database_path)
+        renderer = BlockingFailureRenderer()
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            renderer,
+        )
+        outcomes = []
+        worker = threading.Thread(
+            target=lambda: self._capture_pipeline_run(pipeline, outcomes), daemon=True
+        )
+        worker.start()
+        self.assertTrue(renderer.started.wait(timeout=2))
+        running = self._latest_run()
+        repository.arm()
+        renderer.release.set()
+        self.assertTrue(repository.before_mutation.wait(timeout=2))
+
+        winner = Repository(self.repository.database_path)
+        winner.transition_rewrite_run(
+            running["id"],
+            {"RUNNING"},
+            "RUNNING",
+            owner_token="winner-owner",
+            lease_expires_at="2099-01-01T00:00:00+00:00",
+            expected_owner_token=running["owner_token"],
+        )
+        artifact_dir = Path(running["artifact_dir"])
+        (artifact_dir / "resume.md").write_text("winner resume", encoding="utf-8")
+        (artifact_dir / "resume.pdf").write_bytes(b"%PDF-winner")
+        preview = artifact_dir / ".preview"
+        preview.mkdir()
+        (preview / "page-1.png").write_bytes(b"winner-preview")
+        winner.transition_rewrite_run(
+            running["id"],
+            {"RUNNING"},
+            "READY",
+            expected_owner_token="winner-owner",
+        )
+        repository.release_mutation.set()
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive(), "old owner thread did not stop")
+        final = winner.get_rewrite_run(running["id"])
+        self.assertEqual((final["status"], final["error_code"]), ("READY", None))
+        self.assertEqual((artifact_dir / "resume.md").read_text("utf-8"), "winner resume")
+        self.assertEqual((artifact_dir / "resume.pdf").read_bytes(), b"%PDF-winner")
+        self.assertEqual((preview / "page-1.png").read_bytes(), b"winner-preview")
 
     def test_post_ready_audit_interrupt_preserves_delivery_then_reraises(self):
         interrupt = KeyboardInterrupt("post-ready audit interrupted")

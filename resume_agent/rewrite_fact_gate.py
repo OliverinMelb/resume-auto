@@ -187,11 +187,14 @@ FUTURE_SCOPE_BOUNDARIES = (
     "然而",
     "不过",
     "但是",
+    "可是",
     "当前",
     "目前",
     "现已",
     "已经",
+    "却",
     "但",
+    "而",
 )
 TEST_CONTEXT_TERMS = ("回归", "测试", "用例", "样本", "验收")
 HTML_MARKUP = re.compile(r"<!--[\s\S]*?-->|<[^>\n]*>")

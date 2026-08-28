@@ -758,9 +758,12 @@ class Repository:
         owner_token: str | None = None,
         lease_expires_at: str | None = None,
         expected_owner_token: str | None = None,
+        expected_lease_expires_at: str | None = None,
     ) -> dict[str, Any]:
         if not expected_statuses:
             raise ValueError("expected_statuses 不能为空")
+        if expected_lease_expires_at is not None and expected_owner_token is None:
+            raise ValueError("expected rewrite lease requires owner")
         assignments = [
             "status = ?", "updated_at = ?", "error_code = ?", "error_summary = ?",
             "owner_token = ?", "lease_expires_at = ?",
@@ -784,6 +787,9 @@ class Repository:
         if expected_owner_token is not None:
             owner_condition = " AND owner_token = ?"
             parameters.append(expected_owner_token)
+        if expected_lease_expires_at is not None:
+            owner_condition += " AND lease_expires_at IS ?"
+            parameters.append(expected_lease_expires_at)
         with self._connect() as connection:
             cursor = connection.execute(
                 f"UPDATE rewrite_runs SET {', '.join(assignments)} "
@@ -793,6 +799,85 @@ class Repository:
             if cursor.rowcount != 1:
                 raise ValueError("非法的简历改写状态迁移")
         return self.get_rewrite_run(run_id)
+
+    def fenced_rewrite_transition(
+        self,
+        run_id: str,
+        *,
+        expected_owner_token: str,
+        expected_lease_expires_at: str,
+        new_status: str,
+        mutate_artifacts: Callable[[], None],
+        blocking_questions: list[dict[str, Any]] | None = None,
+        error_code: str | None = None,
+        error_summary: str = "",
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(expected_owner_token, str)
+            or not expected_owner_token
+            or not isinstance(expected_lease_expires_at, str)
+            or not expected_lease_expires_at
+            or new_status not in {"READY", "FAILED", "NEEDS_FACTS"}
+            or not callable(mutate_artifacts)
+        ):
+            raise ValueError("invalid fenced rewrite transition")
+        if blocking_questions is not None and not isinstance(
+            blocking_questions, list
+        ):
+            raise ValueError("invalid rewrite blocking questions")
+
+        assignments = [
+            "status = ?",
+            "updated_at = ?",
+            "error_code = ?",
+            "error_summary = ?",
+            "owner_token = NULL",
+            "lease_expires_at = NULL",
+        ]
+        parameters: list[Any] = [
+            new_status,
+            utc_now(),
+            error_code,
+            error_summary,
+        ]
+        if blocking_questions is not None:
+            assignments.append("blocking_questions_json = ?")
+            parameters.append(json.dumps(blocking_questions, ensure_ascii=False))
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                """
+                SELECT status, owner_token, lease_expires_at
+                FROM rewrite_runs
+                WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if (
+                current is None
+                or current["status"] != "RUNNING"
+                or current["owner_token"] != expected_owner_token
+                or current["lease_expires_at"] != expected_lease_expires_at
+            ):
+                raise ValueError("invalid rewrite artifact mutation owner")
+
+            mutate_artifacts()
+            parameters.extend(
+                [run_id, expected_owner_token, expected_lease_expires_at]
+            )
+            cursor = connection.execute(
+                f"UPDATE rewrite_runs SET {', '.join(assignments)} "
+                "WHERE id = ? AND status = 'RUNNING' "
+                "AND owner_token = ? AND lease_expires_at IS ?",
+                parameters,
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("invalid rewrite artifact mutation owner")
+            updated = connection.execute(
+                "SELECT * FROM rewrite_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return self._decode_rewrite_run(updated, run_id)
 
     def list_recoverable_rewrite_runs(
         self, *, now: str, legacy_stale_before: str

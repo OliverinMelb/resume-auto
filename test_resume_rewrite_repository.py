@@ -154,6 +154,38 @@ class RewriteRepositoryTests(unittest.TestCase):
         self.assertIsNone(recovered["owner_token"])
         self.assertIsNone(recovered["lease_expires_at"])
 
+    def test_recovery_requeue_checks_claim_lease_generation(self):
+        candidate = self.repository.create_candidate("Candidate", ["AI Agent"], "")
+        request = RewriteRequest(
+            candidate_id=candidate["id"],
+            job_ids=["job_1"],
+            source_resume_ids=["source_resume_1"],
+            output_name="resume.pdf",
+        )
+        run = self.repository.create_rewrite_run(
+            request.model_dump(), "analysis/runs/recovery-generation"
+        )
+        self.repository.transition_rewrite_run(
+            run["id"], {"QUEUED"}, "RUNNING",
+            owner_token="recovery-owner",
+            lease_expires_at="2099-01-01T00:00:02+00:00",
+        )
+
+        with self.assertRaises(ValueError):
+            self.repository.transition_rewrite_run(
+                run["id"], {"RUNNING"}, "RUNNING",
+                owner_token="recovery-owner",
+                lease_expires_at="2000-01-01T00:00:00+00:00",
+                expected_owner_token="recovery-owner",
+                expected_lease_expires_at="2099-01-01T00:00:01+00:00",
+            )
+
+        current = self.repository.get_rewrite_run(run["id"])
+        self.assertEqual(current["owner_token"], "recovery-owner")
+        self.assertEqual(
+            current["lease_expires_at"], "2099-01-01T00:00:02+00:00"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
