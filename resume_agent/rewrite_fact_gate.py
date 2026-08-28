@@ -991,8 +991,13 @@ def _forbidden_in_progress_state(claim: str) -> str | None:
         if explicit_completed:
             return explicit_completed.group(0)
         for completed in COMPLETED_ASSERTION.finditer(clause):
-            event_start = _completion_event_start(completed)
-            if not _has_future_target_before(clause, event_start):
+            event_starts = _completion_event_starts(completed)
+            if any(
+                not _has_future_target_before(
+                    clause, event_start, after_previous_event=True
+                )
+                for event_start in event_starts
+            ):
                 return completed.group(0)
         for term in BARE_COMPLETION_TERMS:
             start = clause.find(term)
@@ -1003,11 +1008,14 @@ def _forbidden_in_progress_state(claim: str) -> str | None:
     return None
 
 
-def _completion_event_start(completed: re.Match[str]) -> int:
+def _completion_event_starts(completed: re.Match[str]) -> list[int]:
     event_offsets = [
         event.start() for event in COMPLETION_EVENT.finditer(completed.group(0))
     ]
-    return completed.start() + max(event_offsets, default=0)
+    return [
+        completed.start() + event_offset
+        for event_offset in (event_offsets or [0])
+    ]
 
 
 def _is_future_or_artifact_reference(clause: str, term: str, start: int) -> bool:
@@ -1019,16 +1027,26 @@ def _is_future_or_artifact_reference(clause: str, term: str, start: int) -> bool
     return _has_future_target_before(clause, start)
 
 
-def _has_future_target_before(clause: str, event_start: int) -> bool:
+def _has_future_target_before(
+    clause: str, event_start: int, *, after_previous_event: bool = False
+) -> bool:
     prefix = clause[:event_start]
-    boundary_end = max(
-        (
+    previous_event_end = (
+        max(
+            (event.end() for event in COMPLETION_EVENT.finditer(prefix)),
+            default=0,
+        )
+        if after_previous_event
+        else 0
+    )
+    boundary_end = max([
+        previous_event_end,
+        *(
             position + len(boundary)
             for boundary in FUTURE_SCOPE_BOUNDARIES
             if (position := prefix.rfind(boundary)) >= 0
         ),
-        default=0,
-    )
+    ])
     local_prefix = prefix[boundary_end:]
     return any(marker in local_prefix for marker in FUTURE_TERMS)
 
