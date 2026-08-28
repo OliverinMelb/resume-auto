@@ -145,6 +145,69 @@ def in_progress_result(
     )
 
 
+def accepted_result(
+    claim,
+    *,
+    acceptance_id="gap_acceptance_123",
+    gap_id="gap-aaaaaaaaaaaa",
+):
+    return CodexRewriteResult.model_validate(
+        {
+            "verdict": "匹配",
+            "scorecard": [],
+            "risks": [],
+            "missing_information": [],
+            "rewritten_resume_markdown": f"## 项目经历\n- {claim}",
+            "rewrite_reasons": [],
+            "depth_recommendations": [],
+            "interviewer_probes": [],
+            "claim_audit": [
+                {
+                    "claim": claim,
+                    "source_resume_ids": [],
+                    "source_quotes": [],
+                    "job_ids": ["job_1"],
+                    "change_type": "strengthened",
+                    "fact_status": "user_confirmed",
+                    "measurement_basis": None,
+                    "claim_status": "verified",
+                    "gap_id": gap_id,
+                    "acceptance_id": acceptance_id,
+                }
+            ],
+            "gap_acceptance_plans": [],
+        }
+    )
+
+
+def accepted_record(
+    *claims,
+    acceptance_id="gap_acceptance_123",
+    gap_id="gap-aaaaaaaaaaaa",
+):
+    return {
+        "id": acceptance_id,
+        "candidate_id": "candidate_1",
+        "gap_id": gap_id,
+        "evidence": {
+            "gap_id": gap_id,
+            "project_path": "C:/work/agent-eval",
+            "verified_claims": list(claims),
+            "artifact_hashes": {"report.json": "a" * 64},
+            "test_records": [
+                {
+                    "command": "python -m unittest -v",
+                    "exit_code": 0,
+                    "output_sha256": "b" * 64,
+                }
+            ],
+            "completed_at": "2026-08-26T03:00:00Z",
+            "user_confirmed": True,
+            "confirmed_at": "2026-08-26T03:01:00Z",
+        },
+    }
+
+
 class FactGateTests(unittest.TestCase):
     def setUp(self):
         self.resumes = [
@@ -455,6 +518,101 @@ class FactGateTests(unittest.TestCase):
             [item.question_id for item in answered.blockers],
             [item.question_id for item in first.blockers],
         )
+
+    def test_accepted_gap_claim_requires_exact_record_and_gap_pair(self):
+        claim = "实现本地 Agent 评测集"
+        acceptance = accepted_record(claim)
+
+        gate = validate_rewrite_facts(
+            accepted_result(claim), self.resumes, self.jobs, [], [acceptance]
+        )
+
+        self.assertEqual(gate.blockers, [])
+        for result in (
+            accepted_result(claim, acceptance_id="gap_acceptance_missing"),
+            accepted_result(claim, gap_id="gap-bbbbbbbbbbbb"),
+        ):
+            with self.subTest(result=result), self.assertRaises(InvalidModelResult):
+                validate_rewrite_facts(
+                    result, self.resumes, self.jobs, [], [acceptance]
+                )
+
+    def test_accepted_gap_claim_must_equal_one_complete_verified_assertion(self):
+        acceptance = accepted_record("实现本地 Agent 评测集")
+        invalid_claims = [
+            "主导实现本地 Agent 评测集",
+            "实现本地 Agent 评测集，准确率达到 92%",
+            "C:/work/agent-eval",
+            "python -m unittest -v",
+        ]
+
+        for claim in invalid_claims:
+            with self.subTest(claim=claim), self.assertRaises(InvalidModelResult):
+                validate_rewrite_facts(
+                    accepted_result(claim), self.resumes, self.jobs, [], [acceptance]
+                )
+
+    def test_accepted_gap_allows_only_listed_metric_and_no_external_production_fact(self):
+        measured = "固定 100 条回归集通过 100 条"
+        measured_gate = validate_rewrite_facts(
+            accepted_result(measured),
+            self.resumes,
+            self.jobs,
+            [],
+            [accepted_record(measured)],
+        )
+        self.assertEqual(measured_gate.blockers, [])
+
+        forbidden_claims = [
+            "为客户上线 RAG 系统",
+            "项目已部署到生产环境并服务真实用户",
+        ]
+        for claim in forbidden_claims:
+            with self.subTest(claim=claim), self.assertRaises(InvalidModelResult):
+                validate_rewrite_facts(
+                    accepted_result(claim),
+                    self.resumes,
+                    self.jobs,
+                    [],
+                    [accepted_record(claim)],
+                )
+
+    def test_unaccepted_gap_cannot_be_promoted(self):
+        with self.assertRaises(InvalidModelResult):
+            validate_rewrite_facts(
+                accepted_result("实现本地 Agent 评测集"),
+                self.resumes,
+                self.jobs,
+                [],
+                [],
+            )
+
+    def test_promoted_gap_cannot_also_remain_in_progress(self):
+        promoted_claim = "实现本地 Agent 评测集"
+        pending_claim = "正在实现评测报告页面，计划验收"
+        promoted = accepted_result(promoted_claim)
+        pending = in_progress_result(pending_claim)
+        combined = promoted.model_copy(
+            update={
+                "rewritten_resume_markdown": (
+                    f"## 项目经历\n- {promoted_claim}\n"
+                    f"## 在建项目（待验收）\n- {pending_claim}"
+                ),
+                "claim_audit": [
+                    promoted.claim_audit[0], pending.claim_audit[0]
+                ],
+                "gap_acceptance_plans": pending.gap_acceptance_plans,
+            }
+        )
+
+        with self.assertRaises(InvalidModelResult):
+            validate_rewrite_facts(
+                combined,
+                self.resumes,
+                self.jobs,
+                [],
+                [accepted_record(promoted_claim)],
+            )
 
     def test_source_text_without_measurement_basis_needs_facts(self):
         gate = validate_rewrite_facts(

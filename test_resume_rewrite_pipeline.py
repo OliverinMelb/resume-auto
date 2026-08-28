@@ -352,6 +352,25 @@ def in_progress_result(resume_id, job_id, *, claim=None, test_commands=None):
     })
 
 
+def accepted_result(resume_id, job_id, acceptance_id, *, claim=None, gap_id=None):
+    claim = claim or "实现本地 Agent 评测集"
+    gap_id = gap_id or "gap-123456789abc"
+    return CodexRewriteResult.model_validate({
+        "verdict": "match", "scorecard": [], "risks": [],
+        "missing_information": [],
+        "rewritten_resume_markdown": f"## 项目经历\n- {claim}",
+        "rewrite_reasons": [], "depth_recommendations": [], "interviewer_probes": [],
+        "claim_audit": [{
+            "claim": claim, "source_resume_ids": [], "source_quotes": [],
+            "job_ids": [job_id], "change_type": "strengthened",
+            "fact_status": "user_confirmed", "measurement_basis": None,
+            "claim_status": "verified", "gap_id": gap_id,
+            "acceptance_id": acceptance_id,
+        }],
+        "gap_acceptance_plans": [],
+    })
+
+
 class RewritePipelineTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1175,6 +1194,82 @@ class RewritePipelineTests(unittest.TestCase):
 
         self.assertEqual(run["status"], "READY")
         self.assertFalse(marker.exists())
+
+    def test_accepted_gap_enters_snapshot_prompt_and_can_be_promoted(self):
+        marker = Path(self.temp_dir.name) / "acceptance-command-was-executed"
+        command = f"Set-Content -LiteralPath '{marker}' -Value unsafe"
+        accepted = self.repository.create_gap_acceptance(
+            self.candidate["id"],
+            {
+                "gap_id": "gap-123456789abc",
+                "project_path": str(Path(self.temp_dir.name) / "missing-project"),
+                "verified_claims": ["实现本地 Agent 评测集"],
+                "artifact_hashes": {"report.json": "a" * 64},
+                "test_records": [{
+                    "command": command,
+                    "exit_code": 0,
+                    "output_sha256": "b" * 64,
+                }],
+                "completed_at": "2026-08-26T03:00:00Z",
+                "user_confirmed": True,
+                "confirmed_at": "2026-08-26T03:01:00Z",
+            },
+        )
+        result = accepted_result(
+            self.resume["id"], self.job["id"], accepted["id"]
+        )
+
+        run = self.make_pipeline(FakeCodexRunner(result), FakeRenderer()).run(
+            self.request()
+        )
+
+        self.assertEqual(run["status"], "READY")
+        artifact_dir = Path(run["artifact_dir"])
+        snapshot = json.loads((artifact_dir / "input-snapshot.json").read_text("utf-8"))
+        self.assertEqual(snapshot["accepted_gap_ids"], [accepted["id"]])
+        self.assertEqual(snapshot["gap_acceptances"], [accepted])
+        task = (artifact_dir / "codex-task.md").read_text("utf-8")
+        self.assertIn(accepted["id"], task)
+        self.assertIn("实现本地 Agent 评测集", task)
+        self.assertIn("Set-Content -LiteralPath", task)
+        self.assertIn(marker.name, task)
+        self.assertIn("不可执行", task)
+        self.assertFalse(marker.exists())
+
+    def test_other_candidate_acceptance_is_not_loaded_or_accepted(self):
+        other = self.repository.create_candidate("Other", ["AI Agent"], "")
+        accepted = self.repository.create_gap_acceptance(
+            other["id"],
+            {
+                "gap_id": "gap-123456789abc",
+                "project_path": "C:/work/other-project",
+                "verified_claims": ["实现本地 Agent 评测集"],
+                "artifact_hashes": {"report.json": "a" * 64},
+                "test_records": [{
+                    "command": "python -m unittest -v",
+                    "exit_code": 0,
+                    "output_sha256": "b" * 64,
+                }],
+                "completed_at": "2026-08-26T03:00:00Z",
+                "user_confirmed": True,
+                "confirmed_at": "2026-08-26T03:01:00Z",
+            },
+        )
+        result = accepted_result(
+            self.resume["id"], self.job["id"], accepted["id"]
+        )
+
+        run = self.make_pipeline(FakeCodexRunner(result), FakeRenderer()).run(
+            self.request()
+        )
+
+        self.assertEqual(run["status"], "FAILED")
+        snapshot = json.loads(
+            (Path(run["artifact_dir"]) / "input-snapshot.json").read_text("utf-8")
+        )
+        self.assertEqual(snapshot["accepted_gap_ids"], [])
+        self.assertEqual(snapshot["gap_acceptances"], [])
+        self._assert_no_deployable_artifacts(run)
 
     def test_temporary_runner_output_is_removed_when_runner_raises(self):
         run = self.make_pipeline(TempOutputFailureRunner(None), FakeRenderer()).run(self.request())

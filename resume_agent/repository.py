@@ -13,6 +13,7 @@ from resume_agent.discovery_schemas import (
     DISCOVERY_RUN_STATUSES,
     DISCOVERY_STATUS_TRANSITIONS,
 )
+from resume_agent.rewrite_schemas import GapAcceptanceRequest
 
 
 DISCOVERY_RUN_ID = DISCOVERY_RUN_ID_PATTERN
@@ -147,6 +148,26 @@ class Repository:
             "imported_job_ids",
         ):
             data[name] = json.loads(data.pop(f"{name}_json"))
+        return data
+
+    @staticmethod
+    def _decode_gap_acceptance(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            raise NotFoundError("gap acceptance not found")
+        data = dict(row)
+        try:
+            evidence = GapAcceptanceRequest.model_validate_json(
+                data.pop("evidence_json")
+            ).model_dump(mode="json")
+        except Exception:
+            raise ValueError("stored gap acceptance evidence is invalid") from None
+        if (
+            evidence["gap_id"] != data["gap_id"]
+            or evidence["completed_at"] != data["completed_at"]
+            or evidence["confirmed_at"] != data["confirmed_at"]
+        ):
+            raise ValueError("stored gap acceptance evidence is invalid")
+        data["evidence"] = evidence
         return data
 
     @staticmethod
@@ -709,6 +730,77 @@ class Repository:
         return self.create_rewrite_run_with_id(
             new_id("rewrite_run"), payload, artifact_dir
         )
+
+    def create_gap_acceptance(
+        self, candidate_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.get_candidate(candidate_id)
+        request = GapAcceptanceRequest.model_validate(payload)
+        evidence = request.model_dump(mode="json")
+        evidence_json = json.dumps(
+            evidence,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        acceptance_id = new_id("gap_acceptance")
+        created_at = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO gap_acceptances(
+                    id, candidate_id, gap_id, evidence_json,
+                    completed_at, confirmed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(candidate_id, gap_id) DO NOTHING
+                """,
+                (
+                    acceptance_id,
+                    candidate_id,
+                    request.gap_id,
+                    evidence_json,
+                    evidence["completed_at"],
+                    evidence["confirmed_at"],
+                    created_at,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM gap_acceptances
+                WHERE candidate_id = ? AND gap_id = ?
+                """,
+                (candidate_id, request.gap_id),
+            ).fetchone()
+            if row is None or row["evidence_json"] != evidence_json:
+                raise ValueError("gap acceptance conflicts with existing evidence")
+        return self._decode_gap_acceptance(row)
+
+    def get_gap_acceptance(
+        self, candidate_id: str, acceptance_id: str
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM gap_acceptances
+                WHERE candidate_id = ? AND id = ?
+                """,
+                (candidate_id, acceptance_id),
+            ).fetchone()
+        return self._decode_gap_acceptance(row)
+
+    def list_gap_acceptances(self, candidate_id: str) -> list[dict[str, Any]]:
+        self.get_candidate(candidate_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM gap_acceptances
+                WHERE candidate_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (candidate_id,),
+            ).fetchall()
+        return [self._decode_gap_acceptance(row) for row in rows]
 
     def create_rewrite_run_with_id(
         self, run_id: str, payload: dict[str, Any], artifact_dir: str

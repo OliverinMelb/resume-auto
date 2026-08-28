@@ -183,6 +183,7 @@ class ResumeRewritePipeline:
 
     def _prepare(self, run: dict, artifacts: RunArtifacts) -> dict[str, Any]:
         candidate = self.repository.get_candidate(run["candidate_id"])
+        gap_acceptances = self.repository.list_gap_acceptances(candidate["id"])
         job_ids = _ordered_unique(run["job_ids"])
         resume_ids = _ordered_unique(run["source_resume_ids"])
         if not job_ids or not resume_ids:
@@ -214,6 +215,8 @@ class ResumeRewritePipeline:
                 for resume in resumes
             ],
             "research_report_id": report["id"],
+            "accepted_gap_ids": [item["id"] for item in gap_acceptances],
+            "gap_acceptances": gap_acceptances,
             "preflight_blocker_ids": [
                 blocker["question_id"] for blocker in preflight_blockers
             ],
@@ -237,6 +240,7 @@ class ResumeRewritePipeline:
             return {
                 "jobs": jobs,
                 "resumes": resumes,
+                "gap_acceptances": gap_acceptances,
                 "task": None,
                 "preflight_blockers": preflight_blockers,
             }
@@ -246,11 +250,13 @@ class ResumeRewritePipeline:
             fact_answers=run["fact_answers"],
             allowed_resume_ids=resume_ids,
             allowed_job_ids=job_ids,
+            gap_acceptances=gap_acceptances,
         )
         artifacts.write_text("codex-task.md", task)
         return {
             "jobs": jobs,
             "resumes": resumes,
+            "gap_acceptances": gap_acceptances,
             "task": task,
             "preflight_blockers": [],
         }
@@ -310,7 +316,11 @@ class ResumeRewritePipeline:
                 content_hash=_hash_text(result.rewritten_resume_markdown),
             )
             gate = validate_rewrite_facts(
-                result, materials["resumes"], materials["jobs"], run["fact_answers"]
+                result,
+                materials["resumes"],
+                materials["jobs"],
+                run["fact_answers"],
+                materials["gap_acceptances"],
             )
             if gate.blockers:
                 questions = [item.model_dump() for item in gate.blockers]

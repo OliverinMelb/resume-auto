@@ -7,7 +7,11 @@ from datetime import datetime, timedelta
 from html import unescape
 from typing import Any
 
-from resume_agent.rewrite_schemas import CodexRewriteResult, MissingInformation
+from resume_agent.rewrite_schemas import (
+    CodexRewriteResult,
+    GapAcceptanceRequest,
+    MissingInformation,
+)
 
 
 PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
@@ -153,6 +157,18 @@ COMPLETED_MARKERS = (
     "生产",
 )
 FORBIDDEN_EXTERNAL_ACTORS = ("客户", "甲方", "生产用户", "真实用户")
+FORBIDDEN_ACCEPTANCE_FACTS = (
+    "公司",
+    "客户",
+    "甲方",
+    "生产用户",
+    "真实用户",
+    "生产环境",
+    "投入生产",
+    "正式投产",
+    "上线",
+    "线上运行",
+)
 BUSINESS_RESULT = re.compile(
     r"(?:准确率|召回率|成功率|转化率|可用性|效率|性能|吞吐|qps|成本|"
     r"耗时|时延|用户数|日活|月活|收入|业务量).{0,12}"
@@ -433,18 +449,43 @@ def validate_rewrite_facts(
     source_resumes: Sequence[Any],
     jobs: Sequence[Any],
     fact_answers: Sequence[Any],
+    gap_acceptances: Sequence[Any] = (),
 ) -> FactGateResult:
     allowed_resumes = {
         _field(item, "id"): _field(item, "content") for item in source_resumes
     }
     allowed_jobs = {_field(item, "id") for item in jobs}
     answers = _valid_answers_by_id(fact_answers)
+    acceptances = _accepted_gap_acceptances(gap_acceptances)
+    accepted_audit_indexes: set[int] = set()
 
-    for audit in result.claim_audit:
+    for audit_index, audit in enumerate(result.claim_audit):
         if not set(audit.source_resume_ids) <= allowed_resumes.keys():
             raise InvalidModelResult("claim_audit 引用了未选择的简历")
         if not set(audit.job_ids) <= allowed_jobs:
             raise InvalidModelResult("claim_audit 引用了未选择的岗位")
+        if audit.acceptance_id is not None:
+            acceptance = acceptances.get(audit.acceptance_id)
+            if acceptance is None or audit.gap_id != acceptance["gap_id"]:
+                raise InvalidModelResult("claim_audit 引用了当前候选人未验收的缺口")
+            if audit.claim_status != "verified" or audit.fact_status != "user_confirmed":
+                raise InvalidModelResult("已验收缺口只能升级为 user_confirmed verified claim")
+            if audit.source_resume_ids or audit.source_quotes or audit.measurement_basis:
+                raise InvalidModelResult("已验收缺口 claim 不得混入其他证据字段")
+            claim_key = _normalize_claim(audit.claim)
+            verified_claim_keys = [
+                _normalize_claim(claim)
+                for claim in acceptance["evidence"].verified_claims
+            ]
+            if not claim_key or verified_claim_keys.count(claim_key) != 1:
+                raise InvalidModelResult("已验收缺口 claim 必须完整匹配一条 verified_claims")
+            policy_text = _policy_key(audit.claim)
+            if any(
+                _policy_key(term) in policy_text
+                for term in FORBIDDEN_ACCEPTANCE_FACTS
+            ):
+                raise InvalidModelResult("验收记录不得引入公司、客户、上线或生产事实")
+            accepted_audit_indexes.add(audit_index)
         mapped_sources = [
             allowed_resumes[source_id] for source_id in audit.source_resume_ids
         ]
@@ -458,6 +499,17 @@ def validate_rewrite_facts(
             raise InvalidModelResult(
                 "claim_audit measurement_basis 不存在于所选简历或候选人答案"
             )
+
+    promoted_gap_ids = {
+        result.claim_audit[index].gap_id for index in accepted_audit_indexes
+    }
+    still_in_progress_gap_ids = {
+        audit.gap_id
+        for audit in result.claim_audit
+        if audit.claim_status == "in_progress"
+    } | {plan.gap_id for plan in result.gap_acceptance_plans}
+    if promoted_gap_ids & still_in_progress_gap_ids:
+        raise InvalidModelResult("已升级缺口不得同时保留 in_progress claim 或 plan")
 
     declared_items = [
         _normalize_declared_missing(item) for item in result.missing_information
@@ -522,6 +574,8 @@ def validate_rewrite_facts(
         audit = result.claim_audit[indexes[0]]
         if audit.claim_status == "in_progress":
             continue
+        if indexes[0] in accepted_audit_indexes:
+            continue
         if metrics_by_claim.get(line.normalized):
             continue
 
@@ -562,6 +616,8 @@ def validate_rewrite_facts(
 
             audit = result.claim_audit[indexes[0]]
             if audit.claim_status == "in_progress":
+                continue
+            if indexes[0] in accepted_audit_indexes:
                 continue
             answer = answers.get(question_id)
             answered = (
@@ -623,6 +679,32 @@ def validate_rewrite_facts(
         audit_markdown=render_fact_audit(result, unique_blockers, declared_items),
         rewritten_resume_markdown=result.rewritten_resume_markdown,
     )
+
+
+def _accepted_gap_acceptances(
+    gap_acceptances: Sequence[Any],
+) -> dict[str, dict[str, Any]]:
+    accepted: dict[str, dict[str, Any]] = {}
+    for item in gap_acceptances:
+        try:
+            acceptance_id = _field(item, "id")
+            gap_id = _field(item, "gap_id")
+            evidence = GapAcceptanceRequest.model_validate(_field(item, "evidence"))
+        except Exception:
+            raise InvalidModelResult("验收证据记录无效") from None
+        if (
+            not isinstance(acceptance_id, str)
+            or not acceptance_id
+            or len(acceptance_id) > 200
+            or gap_id != evidence.gap_id
+            or acceptance_id in accepted
+        ):
+            raise InvalidModelResult("验收证据记录无效")
+        accepted[acceptance_id] = {
+            "gap_id": gap_id,
+            "evidence": evidence,
+        }
+    return accepted
 
 
 def _field(item: Any, name: str) -> Any:

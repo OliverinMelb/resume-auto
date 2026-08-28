@@ -88,6 +88,20 @@ ON rewrite_runs(candidate_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_rewrite_runs_status
 ON rewrite_runs(status, updated_at);
 
+CREATE TABLE IF NOT EXISTS gap_acceptances (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+    gap_id TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    confirmed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(candidate_id, gap_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gap_acceptances_candidate
+ON gap_acceptances(candidate_id, created_at, id);
+
 CREATE TABLE IF NOT EXISTS discovery_runs (
     id TEXT PRIMARY KEY,
     candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,

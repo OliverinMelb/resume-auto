@@ -1,4 +1,6 @@
-from datetime import datetime, timedelta
+import re
+import unicodedata
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -106,6 +108,111 @@ class GapAcceptancePlan(StrictModel):
     test_commands: list[str] = Field(min_length=1, max_length=20)
     acceptance_metrics: list[str] = Field(min_length=1, max_length=20)
     interview_topics: list[str] = Field(default_factory=list, max_length=50)
+
+
+LOWER_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+
+
+class TestRecord(StrictModel):
+    command: str = Field(min_length=1, max_length=4000)
+    exit_code: int = Field(strict=True, ge=-(2**31), le=2**31 - 1)
+    output_sha256: str = Field(pattern=LOWER_SHA256_PATTERN)
+
+    @field_validator("command")
+    @classmethod
+    def normalize_command(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("command must not be blank")
+        return normalized
+
+
+class GapAcceptanceRequest(StrictModel):
+    gap_id: str = Field(pattern=r"^gap-[0-9a-f]{12}$")
+    project_path: str = Field(min_length=1, max_length=2000)
+    verified_claims: list[str] = Field(min_length=1, max_length=50)
+    artifact_hashes: dict[str, str] = Field(min_length=1, max_length=100)
+    test_records: list[TestRecord] = Field(min_length=1, max_length=50)
+    completed_at: datetime
+    user_confirmed: Literal[True]
+    confirmed_at: datetime
+
+    @field_validator("project_path")
+    @classmethod
+    def normalize_project_path(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("project_path must not be blank")
+        return normalized
+
+    @field_validator("verified_claims")
+    @classmethod
+    def normalize_verified_claims(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        identities = [
+            re.sub(
+                r"\s+",
+                " ",
+                "".join(
+                    character
+                    for character in unicodedata.normalize("NFKC", value)
+                    if unicodedata.category(character) != "Cf"
+                ),
+            ).strip().casefold()
+            for value in normalized
+        ]
+        if any(
+            not identity or len(value) > 2000
+            for value, identity in zip(normalized, identities)
+        ):
+            raise ValueError("verified_claims entries must be 1 to 2000 characters")
+        if len(identities) != len(set(identities)):
+            raise ValueError("verified_claims must not contain duplicates")
+        return normalized
+
+    @field_validator("artifact_hashes")
+    @classmethod
+    def normalize_artifact_hashes(cls, values: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for raw_name, digest in values.items():
+            name = raw_name.strip()
+            if not name or len(name) > 500:
+                raise ValueError("artifact hash names must be 1 to 500 characters")
+            if name in normalized:
+                raise ValueError("artifact hash names must be unique after trimming")
+            if re.fullmatch(LOWER_SHA256_PATTERN, digest) is None:
+                raise ValueError("artifact hashes must be lowercase SHA-256 values")
+            normalized[name] = digest
+        return normalized
+
+    @field_validator("completed_at", "confirmed_at")
+    @classmethod
+    def require_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("acceptance timestamps must include a timezone")
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("acceptance timestamps must be UTC")
+        return value.astimezone(timezone.utc)
+
+    @field_validator("completed_at", "confirmed_at", mode="before")
+    @classmethod
+    def reject_implicit_timestamps(cls, value):
+        if not isinstance(value, (str, datetime)):
+            raise ValueError("acceptance timestamps must be explicit datetimes")
+        return value
+
+    @field_validator("user_confirmed", mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value):
+        if value is not True:
+            raise ValueError("user_confirmed must be explicitly true")
+        return value
+
+    @model_validator(mode="after")
+    def validate_confirmation_time(self):
+        if self.confirmed_at < self.completed_at:
+            raise ValueError("confirmed_at must not precede completed_at")
+        return self
 
 
 class ClaimAudit(StrictModel):
