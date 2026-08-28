@@ -35,6 +35,7 @@ IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 BULLET = re.compile(r"^[-*+]\s+(.+?)\s*$")
 LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+INLINE_BOLD = re.compile(r"\*\*(.+?)\*\*")
 WHITESPACE = re.compile(r"\s+")
 
 
@@ -153,15 +154,11 @@ class ReportLabAdapter:
         """Publish both output targets as a rollback-capable filesystem transaction."""
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         preview_dir.parent.mkdir(parents=True, exist_ok=True)
-        transaction_id = uuid.uuid4().hex
-        pdf_stage = pdf_path.parent / f".{pdf_path.name}.pdf-stage-{transaction_id}"
-        preview_stage = (
-            preview_dir.parent / f".{preview_dir.name}.preview-stage-{transaction_id}"
-        )
-        pdf_backup = pdf_path.parent / f".{pdf_path.name}.pdf-backup-{transaction_id}"
-        preview_backup = (
-            preview_dir.parent / f".{preview_dir.name}.preview-backup-{transaction_id}"
-        )
+        transaction_id = uuid.uuid4().hex[:24]
+        pdf_stage = pdf_path.parent / f".rp-{transaction_id}"
+        preview_stage = preview_dir.parent / f".rv-{transaction_id}"
+        pdf_backup = pdf_path.parent / f".rb-{transaction_id}"
+        preview_backup = preview_dir.parent / f".rd-{transaction_id}"
         transaction = PublicationTransaction(
             pdf_path=pdf_path,
             preview_dir=preview_dir,
@@ -451,7 +448,8 @@ def _paragraph_markup(text: str) -> str:
         label, url = match.groups()
         return f"{label} ({url})"
 
-    return escape(LINK.sub(replace_link, text))
+    linked = LINK.sub(replace_link, text)
+    return escape(INLINE_BOLD.sub(lambda match: match.group(1), linked))
 
 
 def _normalized_markdown_lines(markdown: str) -> list[str]:
@@ -466,6 +464,7 @@ def _normalized_markdown_lines(markdown: str) -> list[str]:
             if bullet:
                 text = bullet.group(1)
         text = LINK.sub(lambda match: f"{match.group(1)} ({match.group(2)})", text)
+        text = INLINE_BOLD.sub(lambda match: match.group(1), text)
         normalized = _normalize_plain_text(text)
         if normalized:
             lines.append(normalized)

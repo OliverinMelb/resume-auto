@@ -26,6 +26,10 @@ PHONE_CANDIDATE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])(?:\+[ ]*|\()?[0-9]"
     r"[0-9 ().-]{8,38}[0-9](?![A-Za-z0-9_])"
 )
+RESUME_DATE_RANGE_PATTERN = re.compile(
+    r"\d{4}[.-](?:0[1-9]|1[0-2])\s*-\s*"
+    r"\d{4}[.-](?:0[1-9]|1[0-2])"
+)
 URL_PATTERN = re.compile(r"(?i)\bhttps?://[^\s<>()]+")
 WINDOWS_PATH_PATTERN = re.compile(
     r"(?i)(?<![\w])(?:[a-z]:[\\/]|\\\\)[^\s,;，；]+"
@@ -126,6 +130,8 @@ def _decode_percent_escapes(value: str) -> str | None:
 
 def _redact_phone_candidate(match: re.Match[str]) -> str:
     candidate = match.group(0)
+    if RESUME_DATE_RANGE_PATTERN.fullmatch(candidate):
+        return candidate
     digit_count = sum(character in "0123456789" for character in candidate)
     if 10 <= digit_count <= 15:
         return "[REDACTED_PHONE]"

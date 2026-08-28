@@ -34,6 +34,16 @@ class ResumeRendererTests(unittest.TestCase):
         self.assertIn("\\u66f9\\u7533\\u5112", result.extracted_text)
         self.assertTrue((self.root / "preview" / "page-1.png").exists())
 
+    def test_inline_bold_markers_do_not_leak_into_pdf_text(self):
+        result = self.renderer.render(
+            "# Resume\n**Target:** AI Agent Engineer",
+            self.root / "resume.pdf",
+            self.root / "preview",
+        )
+
+        self.assertIn("Target: AI Agent Engineer", result.extracted_text)
+        self.assertNotIn("**", result.extracted_text)
+
     def test_markdown_table_is_rejected(self):
         with self.assertRaisesRegex(RenderError, "UNSUPPORTED_MARKDOWN"):
             self.renderer.render(
@@ -157,7 +167,7 @@ class ResumeRendererTests(unittest.TestCase):
                 stage_publish_failed
                 and not restore_failed
                 and target_path == destination
-                and ".pdf-backup-" in source_path.name
+                and source_path.name.startswith(".rb-")
             ):
                 restore_failed = True
                 raise PermissionError(f"private backup path: {self.root}")
@@ -173,7 +183,7 @@ class ResumeRendererTests(unittest.TestCase):
         self.assertTrue(restore_failed)
         self.assertEqual(raised.exception.code, "RENDER_RECOVERY_REQUIRED")
         self.assertNotIn(str(self.root), raised.exception.safe_message)
-        backups = list(self.root.glob(".resume.pdf.pdf-backup-*"))
+        backups = list(self.root.glob(".rb-*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_bytes(), b"old-pdf")
 
@@ -190,11 +200,11 @@ class ResumeRendererTests(unittest.TestCase):
         def fail_after_pdf_backup_cleanup(path):
             nonlocal pdf_backup_deleted, preview_cleanup_failed
             candidate = Path(path)
-            if ".pdf-backup-" in candidate.name:
+            if candidate.name.startswith(".rb-"):
                 original_remove(candidate)
                 pdf_backup_deleted = True
                 return
-            if pdf_backup_deleted and ".preview-backup-" in candidate.name:
+            if pdf_backup_deleted and candidate.name.startswith(".rd-"):
                 preview_cleanup_failed = True
                 raise PermissionError(f"private cleanup path: {self.root}")
             original_remove(candidate)
@@ -216,8 +226,8 @@ class ResumeRendererTests(unittest.TestCase):
         self.assertTrue(destination.exists())
         self.assertNotEqual(destination.read_bytes(), b"old-pdf")
         self.assertTrue((preview / "page-1.png").exists())
-        self.assertEqual(list(self.root.glob(".resume.pdf.pdf-backup-*")), [])
-        preview_backups = list(self.root.glob(".preview.preview-backup-*"))
+        self.assertEqual(list(self.root.glob(".rb-*")), [])
+        preview_backups = list(self.root.glob(".rd-*"))
         self.assertEqual(len(preview_backups), 1)
         self.assertEqual(
             (preview_backups[0] / "page-1.png").read_bytes(), b"old-preview"
@@ -233,8 +243,58 @@ class ResumeRendererTests(unittest.TestCase):
         self.renderer.render("# Resume\n- Current evidence", destination, preview)
 
         self.assertEqual(
-            [path for path in self.root.iterdir() if "backup" in path.name], []
+            [
+                path
+                for path in self.root.iterdir()
+                if path.name.startswith((".rp-", ".rv-", ".rb-", ".rd-"))
+            ],
+            [],
         )
+
+    def test_publication_uses_short_transaction_names_for_long_windows_paths(self):
+        destination = self.root / "resume-with-a-descriptive-delivery-name.pdf"
+        preview = self.root / "diagnostic-preview"
+        selected_pdf = self.root / "selected.pdf"
+        selected_preview_dir = self.root / "selected-preview"
+        selected_preview = selected_preview_dir / "page-1.png"
+        selected_pdf.write_bytes(b"new-pdf")
+        selected_preview_dir.mkdir()
+        selected_preview.write_bytes(b"new-preview")
+        observed_transaction_names = set()
+        original_copyfile = resume_renderer.shutil.copyfile
+        original_replace = resume_renderer.os.replace
+
+        def capture_copyfile(source, target):
+            target_path = Path(target)
+            candidates = (target_path, target_path.parent)
+            observed_transaction_names.update(
+                candidate.name
+                for candidate in candidates
+                if candidate.parent == self.root and candidate.name.startswith(".")
+            )
+            return original_copyfile(source, target)
+
+        def capture_replace(source, target):
+            for candidate in (Path(source), Path(target)):
+                if candidate.parent == self.root and candidate.name.startswith("."):
+                    observed_transaction_names.add(candidate.name)
+            return original_replace(source, target)
+
+        with (
+            patch(
+                "resume_agent.resume_renderer.shutil.copyfile",
+                side_effect=capture_copyfile,
+            ),
+            patch(
+                "resume_agent.resume_renderer.os.replace", side_effect=capture_replace
+            ),
+        ):
+            self.renderer._publish(
+                selected_pdf, [selected_preview], destination, preview
+            )
+
+        self.assertTrue(observed_transaction_names)
+        self.assertLessEqual(max(map(len, observed_transaction_names)), 32)
 
     def test_real_document_width_keeps_a_bullet_that_fits_on_one_page_together(self):
         preset = PRESETS[0]

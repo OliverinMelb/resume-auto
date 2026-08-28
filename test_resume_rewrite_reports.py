@@ -218,6 +218,11 @@ class RewriteReportTests(unittest.TestCase):
             "invoice 1234567890123456",
         )
 
+    def test_report_sanitizer_preserves_resume_date_ranges(self):
+        for date_range in ("2025.06 - 2025.09", "2026-03 - 2026-06"):
+            with self.subTest(date_range=date_range):
+                self.assertEqual(sanitize_report_text(date_range), date_range)
+
     def test_report_sanitizer_bounds_phone_candidates_and_prioritizes_digests(self):
         for number in (
             "1381234 5678",
