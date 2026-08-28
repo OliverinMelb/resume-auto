@@ -166,34 +166,14 @@ BUSINESS_RESULT = re.compile(
     r"|(?:达到四个九|增长一倍)",
     re.I,
 )
-EXPLICIT_COMPLETED_ASSERTION = re.compile(
-    r"(?:已|已经|现已).{0,6}(?:完成|完工|上线|落地|交付|投入使用|投产|发布|"
-    r"通过|达标|实现|部署)"
-    r"|(?:已经|现已).{0,8}(?:部署|运行).{0,6}(?:线上|生产)",
-    re.I,
-)
-COMPLETED_ASSERTION = re.compile(
-    r"(?:成功|正式).{0,4}(?:发布|上线|投产|交付|投入使用)"
-    r"|(?:稳定运行|投入生产|服务真实用户|服务生产用户)"
-    r"|(?:开发|研发|构建|建设)(?!.{0,6}(?:未|待)完成).{0,8}"
-    r"(?:完成(?!度)|完工|完毕|实现|上线|落地|交付)"
-    r"|(?<!未)(?<!待)(?<!未能)完成(?!度)(?:了)?"
-    r"|(?:已经|已)?做完"
-    r"|(?:开发|研发|构建|建设|实现)完(?!成|整)"
-    r"|实现(?!.{0,4}(?:未|待)完成).{0,4}(?:完成(?!度)|完毕)"
-    r"|(?:系统|服务|应用|平台|模块|能力).{0,8}"
-    r"(?:运行于|部署(?:在|于)).{0,4}(?:线上|生产)"
-    r"|(?:主导|负责|为客户).{0,16}(?:上线|落地|交付|投产|发布)",
-    re.I,
-)
 COMPLETION_EVENT = re.compile(
     r"完成(?!度)|完工|完毕|做完|"
     r"(?:开发|研发|构建|建设|实现)完(?!成|整)|"
-    r"投入使用|投入生产|稳定运行|运行于|部署|发布|上线|投产|"
-    r"交付(?!物)|落地|实现|服务",
+    r"投入使用|投入生产|稳定运行|运行(?:在|于)(?:线上|生产)|"
+    r"部署|发布|上线|投产|"
+    r"交付(?!物)|落地|通过|达标|实现|服务(?:真实|生产)用户|生产",
     re.I,
 )
-BARE_COMPLETION_TERMS = ("上线", "落地", "交付", "生产")
 FUTURE_TERMS = ("计划", "待", "目标", "拟", "预计", "准备", "将", "验收")
 FUTURE_SCOPE_BOUNDARIES = (
     "然而",
@@ -208,6 +188,25 @@ FUTURE_SCOPE_BOUNDARIES = (
     "但",
     "而",
 )
+EVENT_SCOPE_TERMINATORS = (
+    "最终",
+    "然而",
+    "不过",
+    "但是",
+    "可是",
+    "当前",
+    "目前",
+    "现已",
+    "已经",
+    "却",
+    "但",
+    "而",
+    "后",
+)
+EVENT_COORDINATOR = re.compile(r"(?:并且|以及|且|并(?!发))")
+EXPLICIT_COMPLETION_PREFIX = re.compile(r"(?:已经|现已|已).{0,6}$")
+COMPLETION_MODIFIER = re.compile(r"(?:成功|正式|主导|负责).{0,12}$")
+NEGATED_COMPLETION_PREFIX = re.compile(r"(?:没有|尚未|未能|未|待)$")
 TEST_CONTEXT_TERMS = ("回归", "测试", "用例", "样本", "验收")
 HTML_MARKUP = re.compile(r"<!--[\s\S]*?-->|<[^>\n]*>")
 MIN_ANSWER_LENGTH = 4
@@ -987,68 +986,96 @@ def _forbidden_in_progress_state(claim: str) -> str | None:
         )
         if external is not None:
             return external
-        explicit_completed = EXPLICIT_COMPLETED_ASSERTION.search(clause)
-        if explicit_completed:
-            return explicit_completed.group(0)
-        for completed in COMPLETED_ASSERTION.finditer(clause):
-            event_starts = _completion_event_starts(completed)
-            if any(
-                not _has_future_target_before(
-                    clause, event_start, after_previous_event=True
-                )
-                for event_start in event_starts
-            ):
-                return completed.group(0)
-        for term in BARE_COMPLETION_TERMS:
-            start = clause.find(term)
-            while start >= 0:
-                if not _is_future_or_artifact_reference(clause, term, start):
-                    return term
-                start = clause.find(term, start + len(term))
+        forbidden_event = _forbidden_completion_event(clause)
+        if forbidden_event is not None:
+            return forbidden_event
     return None
 
 
-def _completion_event_starts(completed: re.Match[str]) -> list[int]:
-    event_offsets = [
-        event.start() for event in COMPLETION_EVENT.finditer(completed.group(0))
-    ]
-    return [
-        completed.start() + event_offset
-        for event_offset in (event_offsets or [0])
-    ]
+def _forbidden_completion_event(clause: str) -> str | None:
+    previous_event: re.Match[str] | None = None
+    for event in COMPLETION_EVENT.finditer(clause):
+        if _is_noncompletion_reference(clause, event):
+            continue
 
-
-def _is_future_or_artifact_reference(clause: str, term: str, start: int) -> bool:
-    suffix = clause[start + len(term):start + len(term) + 4]
-    if term == "上线" and suffix.startswith("前"):
-        return True
-    if term == "交付" and suffix.startswith("物"):
-        return True
-    return _has_future_target_before(clause, start)
-
-
-def _has_future_target_before(
-    clause: str, event_start: int, *, after_previous_event: bool = False
-) -> bool:
-    prefix = clause[:event_start]
-    previous_event_end = (
-        max(
-            (event.end() for event in COMPLETION_EVENT.finditer(prefix)),
-            default=0,
+        bridge_start = previous_event.end() if previous_event is not None else 0
+        bridge = clause[bridge_start:event.start()]
+        local_start = max(
+            bridge_start,
+            _last_scope_boundary_end(clause, event.start()),
         )
-        if after_previous_event
-        else 0
-    )
-    boundary_end = max([
-        previous_event_end,
-        *(
+        local_prefix = clause[local_start:event.start()]
+        explicit = bool(EXPLICIT_COMPLETION_PREFIX.search(bridge))
+        local_future = any(marker in local_prefix for marker in FUTURE_TERMS)
+        inherited_future = (
+            previous_event is not None and _coordinates_future_events(bridge)
+        )
+        future = not explicit and (local_future or inherited_future)
+
+        if not _is_real_completion_event(
+            clause, event, bridge, explicit=explicit, future=future
+        ):
+            continue
+        if not future:
+            return event.group(0)
+        previous_event = event
+    return None
+
+
+def _is_noncompletion_reference(
+    clause: str, event: re.Match[str]
+) -> bool:
+    text = event.group(0)
+    prefix = clause[:event.start()]
+    suffix = clause[event.end():event.end() + 6]
+    if text == "完成" and NEGATED_COMPLETION_PREFIX.search(prefix):
+        return True
+    if text == "上线" and suffix.startswith("前"):
+        return True
+    if text == "生产" and re.search(r"部署(?:在|于|至|到)?$", prefix):
+        return True
+    return False
+
+
+def _is_real_completion_event(
+    clause: str,
+    event: re.Match[str],
+    bridge: str,
+    *,
+    explicit: bool,
+    future: bool,
+) -> bool:
+    text = event.group(0)
+    if text not in {"实现", "发布", "部署"}:
+        return True
+    if explicit or future:
+        return True
+    if text == "实现":
+        return False
+    if COMPLETION_MODIFIER.search(bridge):
+        return True
+    if text == "部署":
+        suffix = clause[event.end():event.end() + 8]
+        return bool(re.match(r"(?:在|于|至|到)?(?:线上|生产)", suffix))
+    return False
+
+
+def _last_scope_boundary_end(clause: str, event_start: int) -> int:
+    prefix = clause[:event_start]
+    return max(
+        (
             position + len(boundary)
             for boundary in FUTURE_SCOPE_BOUNDARIES
             if (position := prefix.rfind(boundary)) >= 0
         ),
-    ])
-    local_prefix = prefix[boundary_end:]
-    return any(marker in local_prefix for marker in FUTURE_TERMS)
+        default=0,
+    )
+
+
+def _coordinates_future_events(bridge: str) -> bool:
+    return bool(EVENT_COORDINATOR.search(bridge)) and not any(
+        terminator in bridge for terminator in EVENT_SCOPE_TERMINATORS
+    )
 
 
 def _has_unverified_in_progress_result(claim: str) -> bool:
