@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
 from copy import deepcopy
 from contextlib import redirect_stderr, redirect_stdout
 from os import environ
@@ -335,6 +336,152 @@ class RewriteCliTests(unittest.TestCase):
         request = bootstrap_request(self.repository, None, long_name, "Role", [resume], [jd], None)
         self.assertLessEqual(len(request.output_name), 180)
         self.assertTrue(request.output_name.endswith(".pdf"))
+
+    def _linked_cli(self, args, *, orchestrator=None, resolver=None, pipeline=None):
+        orchestrator = orchestrator or SimpleNamespace()
+        resolver = resolver or SimpleNamespace()
+        pipeline = pipeline or FakePipeline({
+            "id": "rewrite_run_linked", "status": "READY", "blocking_questions": []
+        })
+        dependencies = SimpleNamespace(
+            repository=self.repository,
+            orchestrator=orchestrator,
+            target_resolver=resolver,
+            rewrite_pipeline=pipeline,
+        )
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.dict(environ, {"RESUME_AGENT_DB_PATH": str(self.root / "test.db")}), \
+                patch("resume_agent.rewrite_cli._build_dependencies", return_value=dependencies), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            code = main(args)
+        return code, json.loads(stdout.getvalue()), stdout.getvalue() + stderr.getvalue(), pipeline
+
+    def test_discover_and_poll_use_stable_status_codes(self):
+        class Orchestrator:
+            def start(self, request):
+                self.request = request
+                return {"id": "discovery_run_1", "status": "COLLECTING"}
+
+            def poll(self, run_id):
+                self.run_id = run_id
+                return {"id": run_id, "status": "PARTIAL"}
+
+        orchestrator = Orchestrator()
+        code, payload, _, _ = self._linked_cli([
+            "discover", "--candidate-id", "candidate_1",
+            "--sources", "boss", "nowcoder", "--keyword", "AI Agent",
+            "--boss-project-id", "boss-project", "--city", "上海", "--limit", "10",
+        ], orchestrator=orchestrator)
+        self.assertEqual(code, 3)
+        self.assertEqual(payload["status"], "COLLECTING")
+        self.assertEqual(orchestrator.request.sources, ["boss", "nowcoder"])
+        self.assertEqual(orchestrator.request.keywords, ["AI Agent"])
+
+        code, payload, _, _ = self._linked_cli([
+            "poll-discovery", "--discovery-run-id", "discovery_run_1"
+        ], orchestrator=orchestrator)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "PARTIAL")
+
+    def test_broad_imports_once_and_hands_jobs_to_one_rewrite(self):
+        class Orchestrator:
+            def build_broad_rewrite(self, run_id, candidate_id, source_resume_ids, pipeline):
+                self.call = (run_id, candidate_id, source_resume_ids, pipeline)
+                pipeline.request = SimpleNamespace(job_ids=["job_1", "job_2", "job_3"])
+                return pipeline.result
+
+        orchestrator = Orchestrator()
+        artifact_dir = self.root / "broad-artifacts"
+        artifact_dir.mkdir()
+        (artifact_dir / "resume.pdf").write_bytes(b"pdf")
+        pipeline = FakePipeline({
+            "id": "rewrite_run_broad", "status": "READY",
+            "artifact_dir": str(artifact_dir), "output_name": "broad.pdf",
+        })
+        code, payload, _, _ = self._linked_cli([
+            "broad", "--discovery-run-id", "discovery_run_1",
+            "--candidate-id", "candidate_1", "--source-resume-id", "resume_1",
+        ], orchestrator=orchestrator, pipeline=pipeline)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["id"], "rewrite_run_broad")
+        self.assertEqual(pipeline.request.job_ids, ["job_1", "job_2", "job_3"])
+        self.assertEqual(orchestrator.call[:3], (
+            "discovery_run_1", "candidate_1", ["resume_1"]
+        ))
+
+    def test_targeted_requires_exactly_one_target_at_parser_and_runtime(self):
+        target_file = self.root / "target.md"
+        target_file.write_text("# 职位名称\nAgent\n\n# 职位描述\nBuild agents", "utf-8")
+        for target_args in ([], ["--job-id", "job_1", "--jd-path", str(target_file)]):
+            code, payload, rendered, _ = self._linked_cli([
+                "targeted", "--candidate-id", "candidate_1",
+                "--source-resume-id", "resume_1", *target_args,
+            ])
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["status"], "FAILED")
+            self.assertNotIn(str(target_file), rendered)
+
+    def test_targeted_jd_path_uses_task6_safe_reader_and_resolver(self):
+        class Resolver:
+            def resolve(self, target, candidate_id):
+                self.target = target
+                self.candidate_id = candidate_id
+                return "job_targeted"
+
+        resolver = Resolver()
+        pipeline = FakePipeline({"id": "rewrite_run_targeted", "status": "NEEDS_FACTS"})
+        target_file = self.root / "target.md"
+        target_file.write_text("# 职位名称\nAgent\n\n# 职位描述\nBuild agents", "utf-8")
+        with patch("resume_agent.rewrite_cli.read_target_jd_file", return_value="SAFE JD") as reader:
+            code, payload, _, _ = self._linked_cli([
+                "targeted", "--candidate-id", "candidate_1",
+                "--source-resume-id", "resume_1", "--jd-path", str(target_file),
+            ], resolver=resolver, pipeline=pipeline)
+        self.assertEqual(code, 2)
+        reader.assert_called_once_with(target_file)
+        self.assertEqual(resolver.target.jd_text, "SAFE JD")
+        self.assertEqual(pipeline.request.job_ids, ["job_targeted"])
+
+    def test_accept_gap_reads_bounded_json_never_executes_and_redacts_all_output(self):
+        candidate = self.repository.create_candidate("Candidate", ["Agent"], "")
+        private_path = self.root / "private" / "candidate@example.com"
+        evidence = self.root / "evidence.json"
+        evidence.write_text(json.dumps({
+            "gap_id": "gap-aaaaaaaaaaaa",
+            "project_path": str(private_path),
+            "verified_claims": ["Contact candidate@example.com"],
+            "artifact_hashes": {"report.txt": "a" * 64},
+            "test_records": [{
+                "command": "powershell -Command Remove-Item never-run",
+                "exit_code": 0,
+                "output_sha256": "b" * 64,
+            }],
+            "completed_at": "2026-08-26T01:30:00Z",
+            "user_confirmed": True,
+            "confirmed_at": "2026-08-26T01:31:00Z",
+        }), "utf-8")
+        with patch("subprocess.run", side_effect=AssertionError("must not execute")):
+            code, payload, rendered, _ = self._linked_cli([
+                "accept-gap", "--candidate-id", candidate["id"],
+                "--evidence-json", str(evidence),
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "ACCEPTED")
+        self.assertNotIn("candidate@example.com", rendered)
+        self.assertNotIn(str(private_path), rendered)
+        self.assertNotIn("Remove-Item", rendered)
+
+    def test_accept_gap_rejects_oversized_json_before_repository_mutation(self):
+        candidate = self.repository.create_candidate("Candidate", ["Agent"], "")
+        evidence = self.root / "evidence.json"
+        evidence.write_bytes(b"{" + b" " * 200_001 + b"}")
+        code, payload, _, _ = self._linked_cli([
+            "accept-gap", "--candidate-id", candidate["id"],
+            "--evidence-json", str(evidence),
+        ])
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "FAILED")
+        self.assertEqual(self.repository.list_gap_acceptances(candidate["id"]), [])
 
 
 if __name__ == "__main__":

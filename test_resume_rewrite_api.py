@@ -132,12 +132,12 @@ class RewriteApiTests(unittest.TestCase):
         invalid_client = self._client_with(FakePipeline(run_result=ValueError("bad request")))
         invalid = invalid_client.post("/resume-agent/v1/rewrite-runs", json=self._rewrite_payload())
         self.assertEqual(invalid.status_code, 400)
-        self.assertEqual(invalid.json()["detail"], "bad request")
+        self.assertEqual(invalid.json()["detail"], "INVALID_REQUEST")
 
         missing_client = self._client_with(FakePipeline(get_result=NotFoundError("run missing")))
         missing = missing_client.get("/resume-agent/v1/rewrite-runs/missing")
         self.assertEqual(missing.status_code, 404)
-        self.assertEqual(missing.json()["detail"], "run missing")
+        self.assertEqual(missing.json()["detail"], "RESOURCE_NOT_FOUND")
 
     def test_settings_default_and_timeout_bounds(self):
         with patch.dict(os.environ, {
@@ -162,6 +162,39 @@ class RewriteApiTests(unittest.TestCase):
             settings = get_settings()
         self.assertEqual(settings.runs_root, Path("custom-runs"))
         self.assertEqual(settings.codex_timeout_seconds, 3600)
+
+    def test_discovery_settings_are_loopback_only_and_timeout_is_bounded(self):
+        with patch.dict(os.environ, {
+            "RESUME_AGENT_BOSS_RESEARCH_ENDPOINT": "",
+            "RESUME_AGENT_NOWCODER_RESEARCH_ENDPOINT": "",
+            "RESUME_AGENT_DISCOVERY_TIMEOUT_SECONDS": "",
+        }, clear=False):
+            settings = get_settings()
+        self.assertEqual(settings.boss_research_endpoint, "http://127.0.0.1:8011")
+        self.assertEqual(settings.nowcoder_research_endpoint, "http://127.0.0.1:8012")
+        self.assertEqual(settings.discovery_timeout_seconds, 30)
+
+        for value in ("0", "121", "not-a-number"):
+            with self.subTest(value=value), patch.dict(os.environ, {
+                "RESUME_AGENT_DISCOVERY_TIMEOUT_SECONDS": value,
+            }, clear=False):
+                with self.assertRaisesRegex(ValueError, "discovery timeout"):
+                    get_settings()
+
+        secret_endpoint = "http://token:private@203.0.113.10:8011/?session=secret"
+        with patch.dict(os.environ, {
+            "RESUME_AGENT_BOSS_RESEARCH_ENDPOINT": secret_endpoint,
+        }, clear=False):
+            with self.assertRaises(ValueError) as caught:
+                get_settings()
+        self.assertNotIn("private", str(caught.exception))
+        self.assertNotIn("session", str(caught.exception))
+
+        with patch.dict(os.environ, {
+            "RESUME_AGENT_BOSS_RESEARCH_ENDPOINT": "http://127.0.0.1:99999",
+        }, clear=False):
+            with self.assertRaisesRegex(ValueError, "loopback HTTP"):
+                get_settings()
 
 
 if __name__ == "__main__":

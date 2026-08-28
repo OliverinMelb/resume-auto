@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timedelta
-from typing import Literal, get_args
+from typing import Annotated, Literal, get_args
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import Field, field_validator
@@ -45,7 +45,9 @@ class DiscoveredJob(StrictModel):
 class DiscoveryRequest(StrictModel):
     candidate_id: str = Field(min_length=1, max_length=200)
     sources: list[Literal["boss", "nowcoder"]] = Field(min_length=1, max_length=2)
-    keywords: list[str] = Field(min_length=1, max_length=10)
+    keywords: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        min_length=1, max_length=10
+    )
     target_family: Literal["ai_engineering"] = "ai_engineering"
     city: str | None = Field(default=None, max_length=100)
     recruitment_channel: Literal["internship", "campus", "social"] = "social"

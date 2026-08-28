@@ -17,11 +17,20 @@ from typing import Iterable
 
 from pydantic import ValidationError
 
+from .discovery_factory import create_discovery_dependencies
+from .discovery_schemas import DiscoveryRequest
 from .importer import parse_raw_job
 from .repository import NotFoundError, Repository
+from .rewrite_reports import sanitize_report_text
 from .rewrite_factory import create_rewrite_pipeline
-from .rewrite_schemas import FactAnswer, FactAnswersRequest, RewriteRequest
+from .rewrite_schemas import (
+    FactAnswer,
+    FactAnswersRequest,
+    GapAcceptanceRequest,
+    RewriteRequest,
+)
 from .settings import get_settings
+from .targeted_jobs import JobTarget
 
 
 _TEXT_RESUME_SUFFIXES = {".md", ".txt"}
@@ -34,14 +43,40 @@ _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _PHONE = re.compile(r"(?<![\w])(?:\+?\d[\d()\s.-]{6,}\d)(?![\w])")
 _TARGET_JD_MAX_CHARACTERS = 100_000
+_JSON_MAX_CHARACTERS = 200_000
 
 
 def read_target_jd_file(path: Path) -> str:
     """Read one safe UTF-8 Markdown/text JD at the CLI boundary."""
+    return _read_safe_utf8_file(
+        path,
+        suffixes=_TEXT_RESUME_SUFFIXES,
+        max_characters=_TARGET_JD_MAX_CHARACTERS,
+        kind="target JD",
+    )
+
+
+def _read_safe_json_file(path: Path) -> object:
+    content = _read_safe_utf8_file(
+        path,
+        suffixes={".json"},
+        max_characters=_JSON_MAX_CHARACTERS,
+        kind="JSON input",
+    )
+    return json.loads(content)
+
+
+def _read_safe_utf8_file(
+    path: Path,
+    *,
+    suffixes: set[str],
+    max_characters: int,
+    kind: str,
+) -> str:
     if not isinstance(path, Path):
-        raise ValueError("target JD file path is invalid")
-    if path.suffix.lower() not in _TEXT_RESUME_SUFFIXES:
-        raise ValueError("target JD file must be .md or .txt")
+        raise ValueError(f"{kind} file path is invalid")
+    if path.suffix.lower() not in suffixes:
+        raise ValueError(f"{kind} file type is invalid")
     if os.name == "nt":
         _validate_windows_target_path(str(path))
     absolute = path.absolute()
@@ -78,13 +113,13 @@ def read_target_jd_file(path: Path) -> str:
             with io.TextIOWrapper(
                 binary, encoding="utf-8-sig", errors="strict"
             ) as reader:
-                content = reader.read(_TARGET_JD_MAX_CHARACTERS + 1)
+                content = reader.read(max_characters + 1)
     except UnicodeError:
         raise ValueError("target JD file is not valid UTF-8") from None
     except OSError:
         raise ValueError("target JD file is unavailable") from None
-    if len(content) > _TARGET_JD_MAX_CHARACTERS:
-        raise ValueError("target JD file exceeds 100000 characters")
+    if len(content) > max_characters:
+        raise ValueError(f"{kind} file exceeds {max_characters} characters")
     content = content.strip()
     if not content:
         raise ValueError("target JD file is empty")
@@ -515,11 +550,56 @@ def _build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--run-id", required=True)
     resume.add_argument("--facts-json", required=True)
     resume.add_argument("--output-dir")
+
+    discover = commands.add_parser("discover")
+    discover.add_argument("--candidate-id", required=True)
+    discover.add_argument(
+        "--sources", nargs="+", required=True, choices=("boss", "nowcoder")
+    )
+    discover.add_argument("--keyword", dest="keywords", action="append", required=True)
+    discover.add_argument("--city")
+    discover.add_argument(
+        "--recruitment-channel", choices=("internship", "campus", "social"),
+        default="social",
+    )
+    discover.add_argument("--limit", type=int, default=10)
+    discover.add_argument("--boss-project-id")
+    discover.add_argument(
+        "--nowcoder-acquisition-mode", choices=("public", "browser"),
+        default="public",
+    )
+
+    poll = commands.add_parser("poll-discovery")
+    poll.add_argument("--discovery-run-id", required=True)
+
+    broad = commands.add_parser("broad")
+    broad.add_argument("--discovery-run-id", required=True)
+    broad.add_argument("--candidate-id", required=True)
+    broad.add_argument("--source-resume-id", action="append", required=True)
+    broad.add_argument("--output-dir")
+
+    targeted = commands.add_parser("targeted")
+    targeted.add_argument("--candidate-id", required=True)
+    targeted.add_argument("--source-resume-id", action="append", required=True)
+    target = targeted.add_mutually_exclusive_group(required=True)
+    target.add_argument("--job-id")
+    target.add_argument("--jd-path")
+    target.add_argument("--jd-url")
+    targeted.add_argument("--output-name")
+    targeted.add_argument("--output-dir")
+
+    accept_gap = commands.add_parser("accept-gap")
+    accept_gap.add_argument("--candidate-id", required=True)
+    accept_gap.add_argument("--evidence-json", required=True)
     return parser
 
 
 def _build_pipeline(repository: Repository, settings):
     return create_rewrite_pipeline(repository, settings)
+
+
+def _build_dependencies(repository: Repository, settings):
+    return create_discovery_dependencies(settings, repository=repository)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -528,8 +608,8 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
         settings = get_settings()
         repository = Repository(settings.database_path)
-        pipeline = _build_pipeline(repository, settings)
         if args.command == "run":
+            pipeline = _build_pipeline(repository, settings)
             resume_inputs = args.resume_inputs or []
             job_inputs = args.job_inputs or []
             request = bootstrap_request(
@@ -543,12 +623,82 @@ def main(argv: list[str] | None = None) -> int:
                 job_inputs=job_inputs,
             )
             run = pipeline.run(request)
-        else:
+            exported = _export_if_ready(run, args.output_dir)
+            _print_result(run, exported)
+            return _status_exit_code(run.get("status"))
+        if args.command == "resume":
+            pipeline = _build_pipeline(repository, settings)
             answers = _read_fact_answers(Path(args.facts_json))
             run = pipeline.resume(args.run_id, answers)
-        exported = _export_if_ready(run, args.output_dir)
-        _print_result(run, exported)
-        return _status_exit_code(run.get("status"))
+            exported = _export_if_ready(run, args.output_dir)
+            _print_result(run, exported)
+            return _status_exit_code(run.get("status"))
+
+        dependencies = _build_dependencies(repository, settings)
+        if args.command == "discover":
+            run = dependencies.orchestrator.start(DiscoveryRequest(
+                candidate_id=args.candidate_id,
+                sources=args.sources,
+                keywords=args.keywords,
+                city=args.city,
+                recruitment_channel=args.recruitment_channel,
+                limit_per_source=args.limit,
+                boss_project_id=args.boss_project_id,
+                nowcoder_acquisition_mode=args.nowcoder_acquisition_mode,
+            ))
+            _print_linked_result(run)
+            return _discovery_exit_code(run.get("status"))
+        if args.command == "poll-discovery":
+            run = dependencies.orchestrator.poll(args.discovery_run_id)
+            _print_linked_result(run)
+            return _discovery_exit_code(run.get("status"))
+        if args.command == "broad":
+            run = dependencies.orchestrator.build_broad_rewrite(
+                args.discovery_run_id,
+                args.candidate_id,
+                args.source_resume_id,
+                dependencies.rewrite_pipeline,
+            )
+            exported = _export_if_ready(run, args.output_dir)
+            _print_result(run, exported)
+            return _status_exit_code(run.get("status"))
+        if args.command == "targeted":
+            raw_target = {
+                "job_id": args.job_id,
+                "jd_url": args.jd_url,
+                "jd_text": (
+                    read_target_jd_file(Path(args.jd_path))
+                    if args.jd_path is not None else None
+                ),
+            }
+            target = JobTarget.from_payload(raw_target)
+            job_id = dependencies.target_resolver.resolve(
+                target, args.candidate_id
+            )
+            run = dependencies.rewrite_pipeline.run(RewriteRequest(
+                candidate_id=args.candidate_id,
+                job_ids=[job_id],
+                source_resume_ids=args.source_resume_id,
+                output_name=args.output_name or "targeted-resume.pdf",
+            ))
+            exported = _export_if_ready(run, args.output_dir)
+            _print_result(run, exported)
+            return _status_exit_code(run.get("status"))
+        if args.command == "accept-gap":
+            evidence = GapAcceptanceRequest.model_validate(
+                _read_safe_json_file(Path(args.evidence_json))
+            )
+            acceptance = dependencies.repository.create_gap_acceptance(
+                args.candidate_id, evidence.model_dump(mode="json")
+            )
+            _print_linked_result({
+                "id": acceptance["id"],
+                "candidate_id": acceptance["candidate_id"],
+                "gap_id": acceptance["gap_id"],
+                "status": "ACCEPTED",
+            })
+            return 0
+        raise ValueError("invalid command arguments")
     except (OSError, ValueError, ValidationError, NotFoundError, json.JSONDecodeError):
         _print_result({"id": None, "status": "FAILED", "blocking_questions": []}, None)
         print("resume rewrite command failed", file=sys.stderr)
@@ -560,7 +710,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _read_fact_answers(path: Path) -> list[FactAnswer]:
-    raw = json.loads(_readable_file(path).read_text(encoding="utf-8-sig"))
+    raw = _read_safe_json_file(path)
     facts = FactAnswersRequest.model_validate_json(
         json.dumps({"fact_answers": raw}, ensure_ascii=False), strict=True
     ).fact_answers
@@ -587,13 +737,34 @@ def _print_result(run: dict, exported: Path | None) -> None:
     print(json.dumps(_redact_nested(result), ensure_ascii=False, separators=(",", ":")))
 
 
+def _print_linked_result(run: dict) -> None:
+    allowed = {
+        key: run.get(key)
+        for key in (
+            "id", "candidate_id", "gap_id", "status", "error_code",
+            "imported_job_ids",
+        )
+        if key in run
+    }
+    print(json.dumps(
+        _redact_nested(allowed), ensure_ascii=False, separators=(",", ":")
+    ))
+
+
 def _redact_nested(value):
     if isinstance(value, str):
-        return _PHONE.sub(
-            "[REDACTED_PHONE]", _EMAIL.sub("[REDACTED_EMAIL]", value)
-        )
+        if not value:
+            return value
+        try:
+            return sanitize_report_text(value)
+        except Exception:
+            return "[REDACTED_UNSAFE]"
     if isinstance(value, dict):
-        return {key: _redact_nested(item) for key, item in value.items()}
+        return {
+            _redact_nested(key) if isinstance(key, str) else key:
+            _redact_nested(item)
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [_redact_nested(item) for item in value]
     return value
@@ -604,6 +775,14 @@ def _status_exit_code(status: object) -> int:
         return 0
     if status == "NEEDS_FACTS":
         return 2
+    return 1
+
+
+def _discovery_exit_code(status: object) -> int:
+    if status in {"READY_FOR_IMPORT", "PARTIAL", "IMPORTED"}:
+        return 0
+    if status == "COLLECTING":
+        return 3
     return 1
 
 

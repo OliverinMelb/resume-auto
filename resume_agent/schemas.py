@@ -1,7 +1,58 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .rewrite_schemas import GapAcceptanceRequest
+from .targeted_jobs import JobTarget
+
+
+class StrictApiModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+
+class BroadRewriteCreate(StrictApiModel):
+    candidate_id: str = Field(min_length=1, max_length=200)
+    source_resume_ids: list[
+        Annotated[str, Field(min_length=1, max_length=200)]
+    ] = Field(min_length=1, max_length=50)
+
+
+class TargetedRewriteCreate(StrictApiModel):
+    candidate_id: str = Field(min_length=1, max_length=200)
+    source_resume_ids: list[
+        Annotated[str, Field(min_length=1, max_length=200)]
+    ] = Field(min_length=1, max_length=50)
+    job_id: str | None = Field(default=None, min_length=1, max_length=200)
+    jd_text: str | None = Field(default=None, min_length=1, max_length=100_000)
+    jd_url: str | None = Field(default=None, min_length=1, max_length=8192)
+    title: str | None = Field(default=None, max_length=500)
+    company: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        JobTarget.from_payload({
+            "job_id": self.job_id,
+            "jd_text": self.jd_text,
+            "jd_url": self.jd_url,
+            "title": self.title,
+            "company": self.company,
+        })
+        return self
+
+    def to_job_target(self) -> JobTarget:
+        return JobTarget.from_payload({
+            "job_id": self.job_id,
+            "jd_text": self.jd_text,
+            "jd_url": self.jd_url,
+            "title": self.title,
+            "company": self.company,
+        })
+
+
+class GapAcceptanceCreate(StrictApiModel):
+    candidate_id: str = Field(min_length=1, max_length=200)
+    evidence: GapAcceptanceRequest
 
 
 class CandidateCreate(BaseModel):

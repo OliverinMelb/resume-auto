@@ -1,19 +1,28 @@
 import ipaddress
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
+from .discovery_factory import create_discovery_dependencies
+from .discovery_schemas import DiscoveryRequest
 from .repository import NotFoundError, Repository
 from .rewrite_factory import create_rewrite_pipeline
+from .rewrite_cli import _redact_nested
 from .rewrite_schemas import FactAnswersRequest, RewriteRequest
 from .schemas import (
+    BroadRewriteCreate,
     CandidateProfilePromptRequest,
     CandidateCreate,
     DeliveryEventCreate,
+    GapAcceptanceCreate,
     JobDecisionImportRequest,
     JobCreate,
     PromptBuildRequest,
     ResearchCreate,
     SourceResumeCreate,
+    TargetedRewriteCreate,
 )
 from .service import ResumeAgentService
 from .settings import get_settings
@@ -39,10 +48,27 @@ def require_local_request(request: Request):
     )
 
 
+class _SafeValidationRoute(APIRoute):
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def safe_handler(request: Request):
+            try:
+                return await original(request)
+            except RequestValidationError:
+                return JSONResponse(
+                    status_code=422,
+                    content={"detail": "INVALID_REQUEST"},
+                )
+
+        return safe_handler
+
+
 router = APIRouter(
     prefix="/resume-agent/v1",
     tags=["resume-agent"],
     dependencies=[Depends(require_local_request)],
+    route_class=_SafeValidationRoute,
 )
 _repository = Repository(_settings.database_path)
 _service = ResumeAgentService(
@@ -51,14 +77,46 @@ _service = ResumeAgentService(
     _settings.legacy_decision_log_path,
 )
 _rewrite_pipeline = create_rewrite_pipeline(_repository, _settings)
+_workflow_dependencies = create_discovery_dependencies(
+    _settings,
+    repository=_repository,
+    rewrite_pipeline=_rewrite_pipeline,
+)
 
 
 def _raise_api_error(error: Exception):
     if isinstance(error, NotFoundError):
-        raise HTTPException(status_code=404, detail=str(error)) from error
+        raise _api_exception(404, "RESOURCE_NOT_FOUND") from error
     if isinstance(error, ValueError):
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    raise error
+        message = str(error)
+        if message == "SOURCE_INTERACTION_REQUIRED":
+            raise _api_exception(409, "SOURCE_INTERACTION_REQUIRED") from error
+        if message == "PARTIAL_JD":
+            raise _api_exception(409, "PARTIAL_JD") from error
+        if any(token in message.casefold() for token in (
+            "conflict", "mismatch", "not pollable", "busy",
+        )):
+            detail = (
+                "GAP_ACCEPTANCE_CONFLICT"
+                if "gap acceptance" in message.casefold()
+                else "RESOURCE_CONFLICT"
+            )
+            raise _api_exception(409, detail) from error
+        if message in {
+            "SOURCE_ADAPTER_UNAVAILABLE", "SOURCE_ADAPTER_MISMATCH",
+            "SOURCE_RESOLUTION_FAILED", "SOURCE_RESULT_INVALID",
+            "SOURCE_RESULT_MISMATCH",
+        }:
+            raise _api_exception(502, "SOURCE_UNAVAILABLE") from error
+        raise _api_exception(400, "INVALID_REQUEST") from error
+    raise _api_exception(502, "WORKFLOW_FAILED") from error
+
+
+def _api_exception(status_code: int, detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail=_redact_nested(detail),
+    )
 
 
 @router.get("/health")
@@ -74,10 +132,21 @@ def health():
 def _rewrite_response(run: dict):
     status = run.get("status")
     if status in {"READY", "RUNNING", "NEEDS_FACTS"}:
-        return run
+        return _redact_nested(run)
     if status == "FAILED" and run.get("error_code") == "CODEX_TIMEOUT":
-        raise HTTPException(status_code=504, detail="Codex timed out")
-    raise HTTPException(status_code=502, detail="Resume rewrite failed")
+        raise _api_exception(504, "Codex timed out")
+    raise _api_exception(502, "Resume rewrite failed")
+
+
+def _discovery_response(run: dict):
+    return _redact_nested({
+        "id": run.get("id"),
+        "candidate_id": run.get("candidate_id"),
+        "status": run.get("status", "FAILED"),
+        "error_code": run.get("error_code"),
+        "imported_job_ids": run.get("imported_job_ids", []),
+        "source_statuses": run.get("source_statuses", {}),
+    })
 
 
 @router.post("/rewrite-runs")
@@ -101,6 +170,83 @@ def resume_rewrite_run(run_id: str, payload: FactAnswersRequest):
     try:
         return _rewrite_response(_rewrite_pipeline.resume(run_id, payload.fact_answers))
     except (NotFoundError, ValueError) as error:
+        _raise_api_error(error)
+
+
+@router.post("/discovery-runs", status_code=201)
+def create_discovery_run(payload: DiscoveryRequest):
+    try:
+        return _discovery_response(
+            _workflow_dependencies.orchestrator.start(payload)
+        )
+    except Exception as error:
+        _raise_api_error(error)
+
+
+@router.get("/discovery-runs/{run_id}")
+def get_discovery_run(run_id: str):
+    try:
+        return _discovery_response(
+            _workflow_dependencies.orchestrator.get(run_id)
+        )
+    except Exception as error:
+        _raise_api_error(error)
+
+
+@router.post("/discovery-runs/{run_id}/poll")
+def poll_discovery_run(run_id: str):
+    try:
+        return _discovery_response(
+            _workflow_dependencies.orchestrator.poll(run_id)
+        )
+    except Exception as error:
+        _raise_api_error(error)
+
+
+@router.post("/discovery-runs/{run_id}/broad-rewrite")
+def create_broad_rewrite(run_id: str, payload: BroadRewriteCreate):
+    try:
+        run = _workflow_dependencies.orchestrator.build_broad_rewrite(
+            run_id,
+            payload.candidate_id,
+            payload.source_resume_ids,
+            _workflow_dependencies.rewrite_pipeline,
+        )
+        return _rewrite_response(run)
+    except Exception as error:
+        _raise_api_error(error)
+
+
+@router.post("/targeted-rewrite")
+def create_targeted_rewrite(payload: TargetedRewriteCreate):
+    try:
+        job_id = _workflow_dependencies.target_resolver.resolve(
+            payload.to_job_target(), payload.candidate_id
+        )
+        run = _workflow_dependencies.rewrite_pipeline.run(RewriteRequest(
+            candidate_id=payload.candidate_id,
+            job_ids=[job_id],
+            source_resume_ids=payload.source_resume_ids,
+            output_name="targeted-resume.pdf",
+        ))
+        return _rewrite_response(run)
+    except Exception as error:
+        _raise_api_error(error)
+
+
+@router.post("/gap-acceptances", status_code=201)
+def create_gap_acceptance(payload: GapAcceptanceCreate):
+    try:
+        acceptance = _workflow_dependencies.repository.create_gap_acceptance(
+            payload.candidate_id, payload.evidence.model_dump(mode="json")
+        )
+        return {
+            "id": acceptance["id"],
+            "candidate_id": acceptance["candidate_id"],
+            "gap_id": acceptance["gap_id"],
+            "status": "ACCEPTED",
+        }
+    except Exception as error:
         _raise_api_error(error)
 
 

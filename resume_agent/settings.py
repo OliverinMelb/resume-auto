@@ -1,6 +1,8 @@
 import os
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -14,6 +16,9 @@ class ResumeAgentSettings:
     allow_remote: bool
     runs_root: Path
     codex_timeout_seconds: int
+    boss_research_endpoint: str = "http://127.0.0.1:8011"
+    nowcoder_research_endpoint: str = "http://127.0.0.1:8012"
+    discovery_timeout_seconds: int = 30
 
 
 def get_settings() -> ResumeAgentSettings:
@@ -38,6 +43,21 @@ def get_settings() -> ResumeAgentSettings:
         raise ValueError(
             "RESUME_AGENT_CODEX_TIMEOUT_SECONDS must be between 30 and 3600"
         )
+    discovery_timeout_value = (
+        os.getenv("RESUME_AGENT_DISCOVERY_TIMEOUT_SECONDS") or "30"
+    )
+    try:
+        discovery_timeout_seconds = int(discovery_timeout_value)
+    except ValueError:
+        raise ValueError("discovery timeout must be an integer") from None
+    if not 1 <= discovery_timeout_seconds <= 120:
+        raise ValueError("discovery timeout must be between 1 and 120 seconds")
+    boss_research_endpoint = _discovery_endpoint(
+        "RESUME_AGENT_BOSS_RESEARCH_ENDPOINT", "http://127.0.0.1:8011"
+    )
+    nowcoder_research_endpoint = _discovery_endpoint(
+        "RESUME_AGENT_NOWCODER_RESEARCH_ENDPOINT", "http://127.0.0.1:8012"
+    )
     database_path = Path(database_value).expanduser()
     legacy_action_log_path = Path(action_log_value).expanduser()
     return ResumeAgentSettings(
@@ -48,4 +68,29 @@ def get_settings() -> ResumeAgentSettings:
         in {"1", "true", "yes"},
         runs_root=Path(runs_root_value).expanduser(),
         codex_timeout_seconds=codex_timeout_seconds,
+        boss_research_endpoint=boss_research_endpoint,
+        nowcoder_research_endpoint=nowcoder_research_endpoint,
+        discovery_timeout_seconds=discovery_timeout_seconds,
     )
+
+
+def _discovery_endpoint(name: str, default: str) -> str:
+    value = os.getenv(name) or default
+    try:
+        parsed = urlsplit(value)
+        host = ipaddress.ip_address(parsed.hostname or "")
+        port = parsed.port
+        valid = (
+            parsed.scheme == "http"
+            and host.is_loopback
+            and (port is None or 1 <= port <= 65535)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+        )
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise ValueError("discovery endpoint must be loopback HTTP")
+    return value.rstrip("/")
