@@ -70,6 +70,13 @@ def pending_result_payload():
 
 
 class CodexRunnerTests(unittest.TestCase):
+    def setUp(self):
+        which_patcher = patch(
+            "resume_agent.codex_runner.shutil.which", return_value="codex"
+        )
+        self.addCleanup(which_patcher.stop)
+        which_patcher.start()
+
     def test_uses_stdin_ephemeral_read_only_schema_and_output_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -104,6 +111,61 @@ class CodexRunnerTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.verdict, "match")
+
+    def test_run_uses_resolved_executable_path_without_shell(self):
+        resolved = r"C:\Users\Administrator\AppData\Roaming\npm\codex.CMD"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            schema = root / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            output = root / "result.json"
+
+            def fake_run(command, **kwargs):
+                output.write_text(json.dumps(VALID_RESULT), encoding="utf-8")
+                self.assertEqual(command[0], resolved)
+                self.assertFalse(kwargs["shell"])
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch(
+                "resume_agent.codex_runner.shutil.which", return_value=resolved
+            ) as mocked_which, patch(
+                "resume_agent.codex_runner.subprocess.run", side_effect=fake_run
+            ):
+                result = CodexCliAdapter("codex", 15).run(
+                    "private task", schema, output, root
+                )
+
+            mocked_which.assert_called_once_with("codex")
+            self.assertEqual(result.verdict, "match")
+
+    def test_run_is_unavailable_if_resolved_path_disappears_after_available(self):
+        resolved = r"C:\Users\Administrator\AppData\Roaming\npm\codex.CMD"
+        adapter = CodexCliAdapter("codex", 1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            schema = root / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            output = root / "result.json"
+            output.write_text("stale result", encoding="utf-8")
+
+            with patch(
+                "resume_agent.codex_runner.shutil.which",
+                side_effect=[resolved, None],
+            ) as mocked_which, patch(
+                "resume_agent.codex_runner.subprocess.run",
+                return_value=subprocess.CompletedProcess([resolved], 0, "", ""),
+            ) as mocked_run:
+                self.assertTrue(adapter.available())
+                with self.assertRaises(CodexRunError) as raised:
+                    adapter.run("secret resume", schema, output, root)
+
+            self._assert_safe_error(
+                raised.exception, "CODEX_UNAVAILABLE", "secret resume"
+            )
+            self.assertEqual(mocked_which.call_count, 2)
+            mocked_which.assert_called_with("codex")
+            mocked_run.assert_not_called()
+            self.assertFalse(output.exists())
 
     def test_timeout_has_safe_error_code_and_removes_output(self):
         adapter = CodexCliAdapter("codex", 1)

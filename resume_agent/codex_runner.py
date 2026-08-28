@@ -43,8 +43,11 @@ class CodexCliAdapter:
         project_root: Path,
     ) -> CodexRewriteResult:
         output_path.unlink(missing_ok=True)
+        resolved_executable = shutil.which(self.executable)
+        if resolved_executable is None:
+            raise CodexRunError("CODEX_UNAVAILABLE", "Codex CLI not found")
         command = [
-            self.executable,
+            resolved_executable,
             "exec",
             "--ephemeral",
             "--sandbox",
