@@ -157,6 +157,43 @@ class RewriteSupportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 artifacts.write_text("audit.md", "candidate resume text")
 
+    def test_report_artifacts_use_safe_names_and_deterministic_utf8_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = RunArtifacts.create(root, RUN_ID)
+
+            ledger = artifacts.write_json(
+                "claim-ledger.json", {"z": 1, "a": "曹申傲"}
+            )
+            roadmap = artifacts.write_text("gap-roadmap.md", "# 待验收\n")
+            ats = artifacts.write_text("ats-report.md", "# ATS\n")
+
+            self.assertEqual(
+                ledger.read_text("utf-8"),
+                '{\n  "a": "曹申傲",\n  "z": 1\n}\n',
+            )
+            self.assertEqual(roadmap.read_text("utf-8"), "# 待验收\n")
+            self.assertEqual(ats.read_text("utf-8"), "# ATS\n")
+            with self.assertRaises(ValueError):
+                artifacts.write_json("claim-ledger.json", {"value": float("nan")})
+
+    def test_report_artifact_symlink_cannot_escape_run_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = RunArtifacts.create(root, RUN_ID)
+            escaped = root / "escaped-ledger.json"
+            escaped.write_text("untouched", encoding="utf-8")
+            ledger = artifacts.directory / "claim-ledger.json"
+            try:
+                ledger.symlink_to(escaped)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    self.skipTest("Windows symlink privilege is unavailable")
+                raise
+            with self.assertRaises(ValueError):
+                artifacts.write_json("claim-ledger.json", {"safe": True})
+            self.assertEqual(escaped.read_text("utf-8"), "untouched")
+
     def test_task_marks_resume_and_jd_as_data_and_requires_skill_sections(self):
         task = build_codex_task(
             base_prompt="原始 prompt",

@@ -11,6 +11,7 @@ from resume_agent.repository import Repository
 from resume_agent.rewrite_artifacts import RunArtifacts
 from resume_agent.rewrite_factory import create_rewrite_pipeline
 from resume_agent.rewrite_pipeline import ResumeRewritePipeline
+from resume_agent.rewrite_reports import ReportValidationError
 from resume_agent.rewrite_schemas import CodexRewriteResult, FactAnswer, RewriteRequest
 from resume_agent.resume_renderer import RenderError, RenderResult
 from resume_agent.settings import ResumeAgentSettings
@@ -53,6 +54,9 @@ class OfficialArtifactWritingRunner(FakeCodexRunner):
         official_dir = Path(output_path).parent
         (official_dir / "resume.md").write_text("stale", encoding="utf-8")
         (official_dir / "resume.pdf").write_bytes(b"%PDF-stale")
+        (official_dir / "claim-ledger.json").write_text("stale", encoding="utf-8")
+        (official_dir / "gap-roadmap.md").write_text("stale", encoding="utf-8")
+        (official_dir / "ats-report.md").write_text("stale", encoding="utf-8")
         preview = official_dir / ".preview"
         preview.mkdir(parents=True, exist_ok=True)
         (preview / "page-1.png").write_bytes(b"stale-preview")
@@ -69,6 +73,9 @@ class OfficialArtifactFailureRunner(FakeCodexRunner):
         official_dir = Path(output_path).parent
         (official_dir / "resume.md").write_text("stale", encoding="utf-8")
         (official_dir / "resume.pdf").write_bytes(b"%PDF-stale")
+        (official_dir / "claim-ledger.json").write_text("stale", encoding="utf-8")
+        (official_dir / "gap-roadmap.md").write_text("stale", encoding="utf-8")
+        (official_dir / "ats-report.md").write_text("stale", encoding="utf-8")
         preview = official_dir / ".preview"
         preview.mkdir(parents=True, exist_ok=True)
         (preview / "page-1.png").write_bytes(b"stale-preview")
@@ -216,6 +223,36 @@ class FencedMutationRaceRepository(Repository):
         return super().fenced_rewrite_transition(*args, **kwargs)
 
 
+class StageInspectingRepository(Repository):
+    def __init__(self, database_path):
+        super().__init__(database_path)
+        self.stage_entries = None
+        self.official_before_callback = None
+
+    def fenced_rewrite_transition(self, run_id, **changes):
+        if changes["new_status"] == "READY":
+            run = super().get_rewrite_run(run_id)
+            directory = Path(run["artifact_dir"])
+            stages = list(directory.glob(".render-stage-*"))
+            self.stage_entries = (
+                {path.name for path in stages[0].iterdir()}
+                if len(stages) == 1
+                else set()
+            )
+            self.official_before_callback = {
+                name: (directory / name).exists()
+                for name in (
+                    "resume.md",
+                    "resume.pdf",
+                    "claim-ledger.json",
+                    "gap-roadmap.md",
+                    "ats-report.md",
+                    ".preview",
+                )
+            }
+        return super().fenced_rewrite_transition(run_id, **changes)
+
+
 class ReadyBeforeRecoveryClaimRepository(Repository):
     def __init__(self, database_path, artifacts):
         super().__init__(database_path)
@@ -277,6 +314,9 @@ class DerivedOfficialPathInterruptRenderer(FakeRenderer):
         self.official_dir = official_dir
         (official_dir / "resume.md").write_text(markdown, encoding="utf-8")
         (official_dir / "resume.pdf").write_bytes(b"%PDF-derived")
+        (official_dir / "claim-ledger.json").write_text("stale", encoding="utf-8")
+        (official_dir / "gap-roadmap.md").write_text("stale", encoding="utf-8")
+        (official_dir / "ats-report.md").write_text("stale", encoding="utf-8")
         official_preview = official_dir / ".preview"
         official_preview.mkdir(parents=True, exist_ok=True)
         (official_preview / "page-1.png").write_bytes(b"derived-preview")
@@ -340,6 +380,15 @@ class RecreatingStageAfterRecoveryRenderer(PublishAfterRecoveryRenderer):
         preview_path = preview_dir / "page-1.png"
         preview_path.write_bytes(b"recreated-preview")
         return RenderResult(1, markdown, [preview_path])
+
+
+class CorruptingReportStageRenderer(FakeRenderer):
+    def render(self, markdown, pdf_path, preview_dir):
+        result = super().render(markdown, pdf_path, preview_dir)
+        report = Path(pdf_path).parent / "ats-report.md"
+        report.unlink()
+        report.mkdir()
+        return result
 
 
 def result_for(resume_id, job_id):
@@ -459,13 +508,99 @@ class RewritePipelineTests(unittest.TestCase):
     def test_ready_run_writes_all_official_artifacts(self):
         run = self.make_pipeline(FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), FakeRenderer()).run(self.request())
         self.assertEqual(run["status"], "READY")
-        for name in ["input-snapshot.json", "jd-evidence.md", "codex-task.md", "result.json", "audit.md", "resume.md", "resume.pdf"]:
+        for name in ["input-snapshot.json", "jd-evidence.md", "codex-task.md", "result.json", "audit.md", "resume.md", "resume.pdf", "claim-ledger.json", "gap-roadmap.md", "ats-report.md"]:
             self.assertTrue((Path(run["artifact_dir"]) / name).exists(), name)
         self.assertTrue(
             (Path(run["artifact_dir"]) / ".preview" / "page-1.png").is_file()
         )
         self.assertFalse((Path(run["artifact_dir"]) / ".codex-output.tmp").exists())
         self.assertEqual(run["attempt_count"], 1)
+
+        ledger = json.loads(
+            (Path(run["artifact_dir"]) / "claim-ledger.json").read_text("utf-8")
+        )
+        self.assertEqual(
+            set(ledger["claims"][0]),
+            {
+                "acceptance_id",
+                "change_type",
+                "claim",
+                "claim_status",
+                "gap_id",
+                "source_job_ids",
+                "source_resume_ids",
+            },
+        )
+        self.assertNotIn("source_quotes", ledger["claims"][0])
+        self.assertIn(
+            "不是语义评分或通过承诺",
+            (Path(run["artifact_dir"]) / "ats-report.md").read_text("utf-8"),
+        )
+
+    def test_reports_join_resume_in_complete_stage_before_fenced_publish(self):
+        repository = StageInspectingRepository(self.repository.database_path)
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+
+        run = pipeline.run(self.request())
+
+        self.assertEqual(run["status"], "READY")
+        self.assertEqual(
+            repository.stage_entries,
+            {
+                "resume.md",
+                "resume.pdf",
+                "claim-ledger.json",
+                "gap-roadmap.md",
+                "ats-report.md",
+                "preview",
+            },
+        )
+        self.assertEqual(
+            repository.official_before_callback,
+            {name: False for name in repository.official_before_callback},
+        )
+
+    def test_report_builder_failure_leaves_no_deployable_or_stage(self):
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+
+        with patch(
+            "resume_agent.rewrite_pipeline.build_ats_report",
+            side_effect=ReportValidationError(),
+        ):
+            run = pipeline.run(self.request())
+
+        self.assertEqual(
+            (run["status"], run["error_code"]),
+            ("FAILED", "INVALID_MODEL_RESULT"),
+        )
+        self._assert_no_deployable_artifacts(run)
+        self.assertEqual(
+            list(Path(run["artifact_dir"]).glob(".render-stage-*")), []
+        )
+
+    def test_non_regular_staged_report_rejects_entire_delivery(self):
+        run = self.make_pipeline(
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            CorruptingReportStageRenderer(),
+        ).run(self.request())
+
+        self.assertEqual(
+            (run["status"], run["error_code"]), ("FAILED", "RENDER_ERROR")
+        )
+        self._assert_no_deployable_artifacts(run)
+        self.assertEqual(
+            list(Path(run["artifact_dir"]).glob(".render-stage-*")), []
+        )
 
     def test_second_factory_preserves_live_lease_and_recovers_only_expired_run(self):
         expired_id = "rewrite_run_" + "a" * 32
@@ -477,6 +612,8 @@ class RewritePipelineTests(unittest.TestCase):
             expired["id"], {"QUEUED"}, "RUNNING", increment_attempt=True
         )
         expired_artifacts.path("resume.pdf").write_bytes(b"%PDF-stale")
+        for name in ("claim-ledger.json", "gap-roadmap.md", "ats-report.md"):
+            expired_artifacts.path(name).write_text("stale", encoding="utf-8")
         preview = expired_artifacts.directory / ".preview"
         preview.mkdir()
         (preview / "page-1.png").write_bytes(b"stale-preview")
@@ -532,6 +669,8 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual(expired_after_startup["status"], "FAILED")
         self.assertEqual(expired_after_startup["error_code"], "INTERRUPTED")
         self.assertFalse(expired_artifacts.path("resume.pdf").exists())
+        for name in ("claim-ledger.json", "gap-roadmap.md", "ats-report.md"):
+            self.assertFalse(expired_artifacts.path(name).exists())
         self.assertFalse(preview.exists())
         recovery_events = [
             event for event in self._audit_events(expired_after_startup)
@@ -623,6 +762,8 @@ class RewritePipelineTests(unittest.TestCase):
         )
         artifacts.path("resume.md").write_text("ready resume", "utf-8")
         artifacts.path("resume.pdf").write_bytes(b"%PDF-ready")
+        for name in ("claim-ledger.json", "gap-roadmap.md", "ats-report.md"):
+            artifacts.path(name).write_text(f"ready {name}", encoding="utf-8")
         preview = artifacts.directory / ".preview"
         preview.mkdir()
         (preview / "page-1.png").write_bytes(b"ready-preview")
@@ -644,6 +785,10 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual(final["status"], "READY")
         self.assertEqual(artifacts.path("resume.md").read_text("utf-8"), "ready resume")
         self.assertEqual(artifacts.path("resume.pdf").read_bytes(), b"%PDF-ready")
+        for name in ("claim-ledger.json", "gap-roadmap.md", "ats-report.md"):
+            self.assertEqual(
+                artifacts.path(name).read_text("utf-8"), f"ready {name}"
+            )
         self.assertEqual((preview / "page-1.png").read_bytes(), b"ready-preview")
         event_codes = [event["event_code"] for event in self._audit_events(final)]
         self.assertIn("RUN_READY", event_codes)
@@ -1250,6 +1395,12 @@ class RewritePipelineTests(unittest.TestCase):
 
         self.assertEqual(run["status"], "READY")
         self.assertFalse(marker.exists())
+        roadmap = (
+            Path(run["artifact_dir"]) / "gap-roadmap.md"
+        ).read_text("utf-8")
+        self.assertIn("命令建议（未执行）", roadmap)
+        self.assertNotIn(str(marker), roadmap)
+        self.assertIn("Set-Content -LiteralPath", roadmap)
 
     def test_accepted_gap_enters_snapshot_prompt_and_can_be_promoted(self):
         marker = Path(self.temp_dir.name) / "acceptance-command-was-executed"
@@ -1291,6 +1442,11 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertIn(marker.name, task)
         self.assertIn("不可执行", task)
         self.assertFalse(marker.exists())
+        ledger = json.loads(
+            (artifact_dir / "claim-ledger.json").read_text("utf-8")
+        )
+        self.assertEqual(ledger["claims"][0]["gap_id"], accepted["gap_id"])
+        self.assertEqual(ledger["claims"][0]["acceptance_id"], accepted["id"])
 
     def test_other_candidate_acceptance_is_not_loaded_or_accepted(self):
         other = self.repository.create_candidate("Other", ["AI Agent"], "")
@@ -1569,6 +1725,50 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertFalse((artifact_dir / ".preview").exists())
         self.assertEqual(list(artifact_dir.glob(".render-stage-*")), [])
         self.assertEqual(self._audit_events(run)[-1]["event_code"], "RUN_FAILED")
+
+    def test_ready_commit_failure_after_full_callback_cleans_entire_delivery(self):
+        repository = MutationThenCommitFailureRepository(
+            self.repository.database_path, {"READY"}
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+
+        run = pipeline.run(self.request())
+
+        self.assertEqual(
+            (run["status"], run["error_code"]), ("FAILED", "RENDER_ERROR")
+        )
+        self._assert_no_deployable_artifacts(run)
+        self.assertFalse((Path(run["artifact_dir"]) / ".preview").exists())
+
+    def test_mid_publication_report_move_failure_cleans_partial_delivery(self):
+        pipeline = self.make_pipeline(
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+        original_replace = Path.replace
+
+        def fail_gap_roadmap_move(path, target):
+            if path.name == "gap-roadmap.md" and path.parent.name.startswith(
+                ".render-stage-"
+            ):
+                raise OSError("private simulated move failure")
+            return original_replace(path, target)
+
+        with patch.object(Path, "replace", fail_gap_roadmap_move):
+            run = pipeline.run(self.request())
+
+        self.assertEqual(
+            (run["status"], run["error_code"]), ("FAILED", "RENDER_ERROR")
+        )
+        self._assert_no_deployable_artifacts(run)
+        self.assertFalse((Path(run["artifact_dir"]) / ".preview").exists())
 
     def test_ready_commit_then_ordinary_error_preserves_ready_delivery(self):
         errors = (
@@ -1921,7 +2121,13 @@ class RewritePipelineTests(unittest.TestCase):
 
     def _assert_no_deployable_artifacts(self, run):
         directory = Path(run["artifact_dir"])
-        for name in ("resume.md", "resume.pdf"):
+        for name in (
+            "resume.md",
+            "resume.pdf",
+            "claim-ledger.json",
+            "gap-roadmap.md",
+            "ats-report.md",
+        ):
             with self.subTest(name=name):
                 self.assertFalse((directory / name).exists())
 

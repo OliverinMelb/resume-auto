@@ -15,6 +15,9 @@ ALLOWED_ARTIFACTS = {
     "audit.md",
     "resume.md",
     "resume.pdf",
+    "claim-ledger.json",
+    "gap-roadmap.md",
+    "ats-report.md",
 }
 RUN_ID_PATTERN = re.compile(r"^rewrite_run_[0-9a-f]{32}$")
 SOURCE_ID_PATTERN = re.compile(r"^(?:source_resume|job)_[0-9a-f]{32}$")
@@ -110,7 +113,15 @@ class RunArtifacts:
 
     def write_json(self, name: str, payload: Any) -> Path:
         return self.write_text(
-            name, json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+            name,
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n",
         )
 
     def append_audit(

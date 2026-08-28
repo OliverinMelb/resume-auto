@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import sqlite3
 import shutil
@@ -22,9 +23,22 @@ from resume_agent.resume_renderer import RenderError
 from resume_agent.rewrite_artifacts import RunArtifacts
 from resume_agent.rewrite_fact_gate import InvalidModelResult, validate_rewrite_facts
 from resume_agent.rewrite_prompt import build_codex_task, render_jd_evidence
+from resume_agent.rewrite_reports import (
+    ReportValidationError,
+    build_ats_report,
+    build_claim_ledger,
+    build_gap_roadmap,
+)
 from resume_agent.rewrite_schemas import CodexRewriteResult, FactAnswer, RewriteRequest
 
 PIPELINE_SCHEMA_EXECUTION_VERSION = "resume-rewrite-pipeline/v1"
+DELIVERY_FILE_NAMES = (
+    "resume.md",
+    "resume.pdf",
+    "claim-ledger.json",
+    "gap-roadmap.md",
+    "ats-report.md",
+)
 MULTI_JOB_TITLE_FAMILY_BLOCKER_ID = (
     "gap-" + hashlib.sha256(b"multi-job-title-family").hexdigest()[:12]
 )
@@ -248,6 +262,7 @@ class ResumeRewritePipeline:
         artifacts.write_text("jd-evidence.md", jd_evidence)
         if preflight_blockers:
             return {
+                "candidate_id": candidate["id"],
                 "jobs": jobs,
                 "resumes": resumes,
                 "gap_acceptances": gap_acceptances,
@@ -264,6 +279,7 @@ class ResumeRewritePipeline:
         )
         artifacts.write_text("codex-task.md", task)
         return {
+            "candidate_id": candidate["id"],
             "jobs": jobs,
             "resumes": resumes,
             "gap_acceptances": gap_acceptances,
@@ -357,7 +373,13 @@ class ResumeRewritePipeline:
             return self._render_publish_and_mark_ready(
                 run, artifacts, materials, result, validated_markdown
             )
-        except (CodexRunError, InvalidModelResult, RenderError, ValidationError) as error:
+        except (
+            CodexRunError,
+            InvalidModelResult,
+            RenderError,
+            ReportValidationError,
+            ValidationError,
+        ) as error:
             self._fail(run, artifacts, error)
             return self.get(run["id"])
         finally:
@@ -560,13 +582,12 @@ class ResumeRewritePipeline:
         self,
         artifacts: RunArtifacts,
         stage: Path,
-        render_result: Any,
     ) -> None:
         if not self._remove_publication_artifacts(
             artifacts, preserved_stage=stage
         ):
             raise OSError("deployable artifact cleanup is incomplete")
-        self._publish_staged_deployables(artifacts, stage, render_result)
+        self._publish_staged_deployables(artifacts, stage)
 
     def _remove_deployable_artifacts(self, artifacts: RunArtifacts) -> None:
         if not self._remove_publication_artifacts(artifacts):
@@ -581,8 +602,7 @@ class ResumeRewritePipeline:
                 preserved_stage.resolve() if preserved_stage is not None else None
             )
             targets = [
-                artifacts.directory / "resume.md",
-                artifacts.directory / "resume.pdf",
+                *(artifacts.directory / name for name in DELIVERY_FILE_NAMES),
                 artifacts.directory / ".preview",
                 *(
                     target
@@ -606,8 +626,7 @@ class ResumeRewritePipeline:
                 continue
         try:
             official_targets = (
-                artifacts.directory / "resume.md",
-                artifacts.directory / "resume.pdf",
+                *(artifacts.directory / name for name in DELIVERY_FILE_NAMES),
                 artifacts.directory / ".preview",
             )
             return not any(
@@ -668,9 +687,36 @@ class ResumeRewritePipeline:
                 staged_markdown = stage / "resume.md"
                 staged_pdf = stage / "resume.pdf"
                 staged_preview = stage / "preview"
+                ledger = build_claim_ledger(
+                    result,
+                    [item["id"] for item in materials["resumes"]],
+                    [item["id"] for item in materials["jobs"]],
+                    materials["gap_acceptances"],
+                    candidate_id=materials["candidate_id"],
+                )
+                reports = {
+                    "claim-ledger.json": json.dumps(
+                        ledger,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                        allow_nan=False,
+                    )
+                    + "\n",
+                    "gap-roadmap.md": build_gap_roadmap(
+                        result.gap_acceptance_plans
+                    ),
+                    "ats-report.md": build_ats_report(
+                        materials["jobs"], materials["resumes"], validated_markdown
+                    ),
+                }
                 staged_markdown.write_text(
                     validated_markdown, encoding="utf-8", newline="\n"
                 )
+                for name, content in reports.items():
+                    (stage / name).write_text(
+                        content, encoding="utf-8", newline="\n"
+                    )
                 try:
                     render_result = self.renderer.render(
                         validated_markdown, staged_pdf, staged_preview
@@ -681,6 +727,9 @@ class ResumeRewritePipeline:
                     raise RenderError(
                         "RENDER_ERROR", "Unable to render the resume safely."
                     ) from None
+                self._validate_staged_delivery(
+                    stage, render_result, staged_preview
+                )
                 try:
                     updated = self.repository.fenced_rewrite_transition(
                         run["id"],
@@ -689,7 +738,7 @@ class ResumeRewritePipeline:
                         new_status="READY",
                         blocking_questions=[],
                         mutate_artifacts=lambda: self._publish_ready_artifacts(
-                            artifacts, stage, render_result
+                            artifacts, stage
                         ),
                     )
                 except Exception:
@@ -697,7 +746,7 @@ class ResumeRewritePipeline:
                     if not (updated and updated["status"] == "READY"):
                         raise
                 return render_result, updated
-        except RenderError:
+        except (RenderError, ReportValidationError):
             raise
         except Exception:
             raise RenderError(
@@ -705,7 +754,7 @@ class ResumeRewritePipeline:
             ) from None
 
     def _publish_staged_deployables(
-        self, artifacts: RunArtifacts, stage: Path, render_result: Any
+        self, artifacts: RunArtifacts, stage: Path
     ) -> None:
         expected_parent = artifacts.directory.resolve()
         resolved_stage = stage.resolve()
@@ -716,31 +765,61 @@ class ResumeRewritePipeline:
         ):
             raise RenderError("RENDER_ERROR", "Render staging path is invalid.")
 
-        staged_markdown = stage / "resume.md"
-        staged_pdf = stage / "resume.pdf"
         staged_preview = stage / "preview"
-        if not self._is_regular_staged_file(staged_markdown, resolved_stage):
-            raise RenderError("RENDER_ERROR", "Rendered Markdown staging is invalid.")
-        if not self._is_regular_staged_file(staged_pdf, resolved_stage):
-            raise RenderError("RENDER_ERROR", "Rendered PDF staging is invalid.")
-        self._validate_staged_previews(
-            render_result, staged_preview, resolved_stage
-        )
-
-        official_markdown = artifacts.path("resume.md")
-        official_pdf = artifacts.path("resume.pdf")
+        staged_files = {name: stage / name for name in DELIVERY_FILE_NAMES}
+        official_files = {
+            name: artifacts.path(name) for name in DELIVERY_FILE_NAMES
+        }
         official_preview = artifacts.directory / ".preview"
-        if official_markdown.exists() or official_pdf.exists() or official_preview.exists():
+        if (
+            any(
+                path.exists() or path.is_symlink()
+                for path in official_files.values()
+            )
+            or official_preview.exists()
+            or official_preview.is_symlink()
+        ):
             raise RenderError("RENDER_ERROR", "Deployable artifacts already exist.")
         try:
-            staged_markdown.replace(official_markdown)
-            staged_pdf.replace(official_pdf)
+            for name in DELIVERY_FILE_NAMES:
+                staged_files[name].replace(official_files[name])
             staged_preview.replace(official_preview)
+            if not all(
+                path.is_file() and not path.is_symlink()
+                for path in official_files.values()
+            ) or not self._is_safe_preview_stage(
+                official_preview, artifacts.directory.resolve()
+            ):
+                raise OSError("published delivery is incomplete")
         except OSError:
             self._remove_deployable_artifacts(artifacts)
             raise RenderError(
                 "RENDER_ERROR", "Unable to publish deployable artifacts safely."
             ) from None
+
+    @classmethod
+    def _validate_staged_delivery(
+        cls, stage: Path, render_result: Any, preview_dir: Path
+    ) -> None:
+        resolved_stage = stage.resolve()
+        expected = {
+            *(stage / name for name in DELIVERY_FILE_NAMES),
+            preview_dir,
+        }
+        try:
+            actual = set(stage.iterdir())
+        except OSError:
+            raise RenderError(
+                "RENDER_ERROR", "Rendered delivery staging is invalid."
+            ) from None
+        if actual != expected or any(
+            not cls._is_regular_staged_file(stage / name, resolved_stage)
+            for name in DELIVERY_FILE_NAMES
+        ):
+            raise RenderError(
+                "RENDER_ERROR", "Rendered delivery staging is invalid."
+            )
+        cls._validate_staged_previews(render_result, preview_dir, resolved_stage)
 
     @staticmethod
     def _is_regular_staged_file(path: Path, stage: Path) -> bool:
@@ -861,10 +940,12 @@ def _safe_error_code(error: BaseException) -> str:
         return error.code if error.code in {"CODEX_UNAVAILABLE", "CODEX_TIMEOUT", "CODEX_PROCESS_ERROR", "INVALID_MODEL_RESULT"} else "CODEX_PROCESS_ERROR"
     if isinstance(error, RenderError):
         return "RENDER_ERROR" if error.code == "RENDER_ERROR" else "RENDER_VALIDATION_ERROR"
+    if isinstance(error, ReportValidationError):
+        return "INVALID_MODEL_RESULT"
     return "INVALID_MODEL_RESULT"
 
 
 def _publication_error_code(error: Exception) -> str:
-    if isinstance(error, RenderError):
+    if isinstance(error, (RenderError, ReportValidationError)):
         return _safe_error_code(error)
     return "RENDER_ERROR"
