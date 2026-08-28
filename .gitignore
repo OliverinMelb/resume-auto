@@ -17,3 +17,14 @@ resume_agent.db-wal
 resume-agent-exports/
 .worktrees/
 analysis/runs/
+.runtime/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.pdf
+*.log
+*checkpoint*.json
+*facts*.json
+*real-jd*

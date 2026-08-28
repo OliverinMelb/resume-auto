@@ -367,6 +367,14 @@ class ResumeAgentP0Tests(unittest.TestCase):
             router_module.require_local_request(request)
         self.assertEqual(context.exception.status_code, 403)
 
+    def test_readme_documents_linked_broad_and_targeted_modes(self):
+        text = Path("readme.md").read_text("utf-8")
+        self.assertIn("rewrite_resume.bat discover", text)
+        self.assertIn("rewrite_resume.bat broad", text)
+        self.assertIn("rewrite_resume.bat targeted", text)
+        self.assertIn("在建项目（待验收）", text)
+        self.assertNotIn("必须先创建 target-jd.md", text)
+
 
 if __name__ == "__main__":
     unittest.main()

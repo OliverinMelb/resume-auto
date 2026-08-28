@@ -106,19 +106,52 @@ RESUME_AGENT_ALLOW_REMOTE=false
 
 简历定制命令由 `rewrite_resume.bat` 启动，并复用当前机器已登录的 Codex。批处理会将简历和 JD 的 Prompt 内容发送给 Codex 所配置的 OpenAI 模型服务；命令编排、数据库和运行产物则保留在本机。无需新增 OpenAI API Key。
 
-岗位输入必须是已导入的 `job_id`，或真实的 `--jd-path` 文件。`analysis/` 中的报告是项目分析文档，不是 JD，不能把它们作为岗位输入。每次运行的可审计产物仅写入被 Git 忽略的 `analysis/runs/`。
+岗位可以来自 Boss / Nowcoder 联动发现，也可以在定向模式中使用主库 `job_id`、真实 JD 文件或可读取的真实岗位 URL。无需创建固定名称的 `target-jd.md`。`analysis/` 中的报告不是 JD，不能把它们作为岗位输入。每次运行的可审计产物仅写入被 Git 忽略的 `analysis/runs/`。
 
-### 首次运行（曹申傲）
+### Boss / Nowcoder 联动发现与简历模式
 
-先将一份真实目标 JD 保存为 `C:\Users\Administrator\Desktop\caoshenao\target-jd.md`。确认文件存在后，在仓库根目录运行：
+两个来源必须运行在独立 worktree、端口和数据库中；主线只通过 loopback HTTP 读取来源结果，不读取 Cookie、Token 或浏览器会话。完整的本机准备、恢复和验收步骤见 [`docs/boss-nowcoder-resume-workflow.md`](docs/boss-nowcoder-resume-workflow.md)。
+
+以下命令参数与当前 CLI 一致。先创建发现运行；`--keyword` 可以重复，`--sources` 后列出一个或两个来源：
 
 ```powershell
-$runResult = & .\rewrite_resume.bat run --candidate-name "曹申傲" --target-role "AI Agent开发" --resume-path "C:\Users\Administrator\Desktop\caoshenao\曹申傲-AI-Agent简历-修改版.md" --jd-path "C:\Users\Administrator\Desktop\caoshenao\target-jd.md" --output-dir "C:\Users\Administrator\Desktop\caoshenao\output\pdf" | Out-String | ConvertFrom-Json
+.\rewrite_resume.bat discover --candidate-id "candidate_<id>" --sources boss nowcoder --keyword "AI Agent" --city "上海" --limit 10 --boss-project-id "candidate_<boss-project-id>" --nowcoder-acquisition-mode public
+.\rewrite_resume.bat poll-discovery --discovery-run-id "discovery_run_<id>"
+```
+
+`COLLECTING` 表示仍可用同一个 discovery run ID 继续轮询，不是失败。只有至少 3 条完整、同职业族、可追踪的真实 JD 才能生成综合版；不足时不生成 PDF，也不能用测试 JD 补足：
+
+```powershell
+.\rewrite_resume.bat broad --discovery-run-id "discovery_run_<id>" --candidate-id "candidate_<id>" --source-resume-id "source_resume_<id>" --output-dir "C:\Users\Administrator\Desktop\caoshenao\output\pdf"
+```
+
+定向版只接受 `--job-id`、`--jd-path`、`--jd-url` 三者之一，不会混入综合样本中的岗位特有要求：
+
+```powershell
+.\rewrite_resume.bat targeted --candidate-id "candidate_<id>" --source-resume-id "source_resume_<id>" --jd-url "https://www.nowcoder.com/jobs/detail/<id>" --output-name "曹申傲-目标岗位.pdf" --output-dir "C:\Users\Administrator\Desktop\caoshenao\output\pdf"
+```
+
+事实门禁通过后每次只导出一份新 PDF，不覆盖原始 Markdown、原始 PDF 或旧投递版，同时生成 `claim-ledger.json`、`gap-roadmap.md` 和 `ats-report.md`。尚未验收的补齐项目只能放在“在建项目（待验收）”章节，不能写成已上线、已交付或已有无证据指标。路线图里的测试命令只是文本建议，程序绝不自动执行。
+
+完成项目、实际运行测试并保存证据后，使用当前 CLI 接受 gap；验收只保存 `--evidence-json` 中已经存在的证据：
+
+```powershell
+.\rewrite_resume.bat accept-gap --candidate-id "candidate_<id>" --evidence-json "C:\Users\Administrator\Desktop\caoshenao\gap-evidence.json"
+```
+
+Boss 侧生成的新 PDF 必须由用户手工上传，并把 `user_config.json` 的 `frontend.resumeIndex` 绑定到正确附件索引；本期不自动上传。Nowcoder 本期只负责公开岗位发现与调研，不自动投递。
+
+### 兼容的单文件定向流程
+
+旧 `run` 命令仍可使用任意真实 JD 文件名：
+
+```powershell
+$runResult = & .\rewrite_resume.bat run --candidate-name "曹申傲" --target-role "AI Agent开发" --resume-path "C:\Users\Administrator\Desktop\caoshenao\曹申傲-AI-Agent简历-修改版.md" --jd-path "C:\Users\Administrator\Desktop\caoshenao\某公司-Agent工程师.md" --output-dir "C:\Users\Administrator\Desktop\caoshenao\output\pdf" | Out-String | ConvertFrom-Json
 $runResult | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 'analysis\runs\last-cli-result.json'
 $runResult
 ```
 
-不要用 `analysis/` 报告替代真实 JD。该流程从不覆盖原始 Markdown 简历或原始 PDF；只有事实门禁和 PDF 验收均通过时，才会在输出目录生成按公司或岗位命名的新定制版 PDF。
+不要用 `analysis/` 报告替代真实 JD。只有事实门禁和 PDF 验收均通过时，才会导出新的定制版 PDF。
 
 ### 事实问题与继续运行
 
