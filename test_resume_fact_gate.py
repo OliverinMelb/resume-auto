@@ -653,8 +653,8 @@ class FactGateTests(unittest.TestCase):
         safe_claims = [
             "Used List<Foo> in the local evaluator",
             "Used Map<String, Foo> in the local evaluator",
-            "Validated x<y-z>0 in local tests",
-            "Checked left_value<right-value>result locally",
+            "Validated x < y-z > 0 in local tests",
+            "Documented `x<y-z>0` comparison behavior",
             "Documented `<span data-mode=\"safe\">` parser behavior",
             "See <https://example.test/evaluator> for local documentation",
         ]
@@ -678,8 +678,11 @@ class FactGateTests(unittest.TestCase):
             "<x-evaluator>Implemented locally</x-evaluator>",
             "Implemented locally</x-evaluator>",
             "before <x-evaluator> after",
+            "a<x-evaluator>b",
             "a</x-evaluator>b",
             "a<x-evaluator/>b",
+            "Validated x<y-z>0 in local tests",
+            "Checked left_value<right-value>result locally",
             '<span data-mode="safe">Implemented locally</span>',
             "See <https://example.test/%63%6C%69%65%6E%74> for documentation",
         ]
