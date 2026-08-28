@@ -620,6 +620,8 @@ class FactGateTests(unittest.TestCase):
             "Launched the Agent evaluator",
             "Deployed the Agent evaluator",
             "Built [the evaluator](https://example.test/%63%6C%69%65%6E%74)",
+            "See <https://example.test/real/users> for documentation",
+            "Read [docs](https://example.test/real%2Fusers)",
         ]
         for claim in forbidden_claims:
             with self.subTest(claim=claim), self.assertRaises(InvalidModelResult):
@@ -668,6 +670,10 @@ class FactGateTests(unittest.TestCase):
             "<span>Implemented the local evaluator</span>",
             "<!-- hidden -->Implemented the local evaluator",
             '<x-evaluator data-mode="safe">Implemented locally</x-evaluator>',
+            "<x-evaluator/>",
+            "<X-EVALUATOR>",
+            "<x-evaluator>Implemented locally</x-evaluator>",
+            "Implemented locally</x-evaluator>",
             "See <https://example.test/%63%6C%69%65%6E%74> for documentation",
         ]
         for claim in forbidden_claims:

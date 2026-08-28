@@ -173,7 +173,7 @@ FORBIDDEN_ACCEPTANCE_FACTS = (
 FORBIDDEN_ACCEPTANCE_ENGLISH_FACT = re.compile(
     r"\b(?:"
     r"clients?(?![-\s]+side\b)|"
-    r"customers?|compan(?:y|ies)|production|real[\s_-]+users?|launched|deployed"
+    r"customers?|compan(?:y|ies)|production|real(?:[\W_]+)users?|launched|deployed"
     r")\b",
     re.I,
 )
@@ -248,11 +248,11 @@ HTML_STANDARD_TAG = re.compile(
     re.I,
 )
 HTML_CUSTOM_TAG_WITH_ATTRIBUTES = re.compile(
-    r"<[A-Za-z][A-Za-z0-9.-]*"
+    r"</?[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9.-]+\s*/?>"
+    r"|<[A-Za-z][A-Za-z0-9.-]*"
     r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
     r"(?:\s*=\s*(?:\"[^\"<>]*\"|'[^'<>]*'|[^\s'\"=<>`]+))?)+"
-    r"\s*/?>"
-    r"|</[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9.-]+\s*>",
+    r"\s*/?>",
 )
 MARKDOWN_INLINE_CODE = re.compile(r"(?P<ticks>`+)[^\n]*?(?P=ticks)")
 MARKDOWN_AUTOLINK = re.compile(
