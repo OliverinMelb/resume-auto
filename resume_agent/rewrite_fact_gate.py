@@ -170,6 +170,13 @@ FORBIDDEN_ACCEPTANCE_FACTS = (
     "上线",
     "线上运行",
 )
+FORBIDDEN_ACCEPTANCE_ENGLISH_FACT = re.compile(
+    r"\b(?:"
+    r"clients?(?![-\s]+side\b)|"
+    r"customers?|compan(?:y|ies)|production|real[\s_-]+users?|launched|deployed"
+    r")\b",
+    re.I,
+)
 BUSINESS_RESULT = re.compile(
     r"(?:准确率|召回率|成功率|转化率|可用性|效率|性能|吞吐|qps|成本|"
     r"耗时|时延|用户数|日活|月活|收入|业务量).{0,12}"
@@ -225,7 +232,36 @@ EXPLICIT_COMPLETION_PREFIX = re.compile(r"(?:已经|现已|已).{0,6}$")
 COMPLETION_MODIFIER = re.compile(r"(?:成功|正式|主导|负责).{0,12}$")
 NEGATED_COMPLETION_PREFIX = re.compile(r"(?:没有|尚未|未能|未|待)$")
 TEST_CONTEXT_TERMS = ("回归", "测试", "用例", "样本", "验收")
-HTML_MARKUP = re.compile(r"<!--[\s\S]*?-->|<[^>\n]*>")
+HTML_COMMENT = re.compile(r"<!--[\s\S]*?-->")
+HTML_STANDARD_TAG = re.compile(
+    r"</?(?:"
+    r"a|abbr|address|area|article|aside|audio|b|base|bdi|bdo|blockquote|"
+    r"body|br|button|canvas|caption|cite|code|col|colgroup|data|datalist|"
+    r"dd|del|details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|"
+    r"figure|footer|form|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|"
+    r"input|ins|kbd|label|legend|li|link|main|map|mark|menu|meta|meter|"
+    r"nav|noscript|object|ol|optgroup|option|output|p|picture|pre|progress|"
+    r"q|rp|rt|ruby|s|samp|script|search|section|select|slot|small|source|"
+    r"span|strong|style|sub|summary|sup|table|tbody|td|template|textarea|"
+    r"tfoot|th|thead|time|title|tr|track|u|ul|var|video|wbr"
+    r")\b(?:\s+[^<>\n]*?)?\s*/?>",
+    re.I,
+)
+HTML_CUSTOM_TAG_WITH_ATTRIBUTES = re.compile(
+    r"<[A-Za-z][A-Za-z0-9.-]*"
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*"
+    r"(?:\s*=\s*(?:\"[^\"<>]*\"|'[^'<>]*'|[^\s'\"=<>`]+))?)+"
+    r"\s*/?>"
+    r"|</[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9.-]+\s*>",
+)
+MARKDOWN_INLINE_CODE = re.compile(r"(?P<ticks>`+)[^\n]*?(?P=ticks)")
+MARKDOWN_AUTOLINK = re.compile(
+    r"<(?:https?://|mailto:)[^<>\s]+>"
+    r"|<[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?"
+    r"(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+>",
+    re.I,
+)
 MIN_ANSWER_LENGTH = 4
 MIN_SOURCE_NOTE_LENGTH = 6
 HEADING = re.compile(r"^\s{0,3}#{1,6}(?!#)")
@@ -481,12 +517,14 @@ def validate_rewrite_facts(
             if not claim_key or verified_claim_keys.count(claim_key) != 1:
                 raise InvalidModelResult("已验收缺口 claim 必须完整匹配一条 verified_claims")
             decoded_fact = _decoded_acceptance_fact(audit.claim)
-            if HTML_MARKUP.search(decoded_fact):
+            if _contains_raw_html(decoded_fact):
                 raise InvalidModelResult("已验收缺口 claim 不得包含 HTML")
             policy_text = _acceptance_policy_key(decoded_fact)
             if any(
                 _acceptance_policy_key(term) in policy_text
                 for term in FORBIDDEN_ACCEPTANCE_FACTS
+            ) or FORBIDDEN_ACCEPTANCE_ENGLISH_FACT.search(
+                _acceptance_english_policy_text(decoded_fact)
             ):
                 raise InvalidModelResult("验收记录不得引入公司、客户、上线或生产事实")
             accepted_audit_indexes.add(audit_index)
@@ -981,6 +1019,52 @@ def _acceptance_policy_key(value: str) -> str:
     ).casefold()
 
 
+def _acceptance_english_policy_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = "".join(
+        character
+        for character in normalized
+        if not _is_default_ignorable(character)
+    )
+    return re.sub(r"\s+", " ", normalized).casefold()
+
+
+def _protect_markdown_angle_literals(value: str) -> tuple[str, list[str]]:
+    protected: list[str] = []
+
+    def stash(match: re.Match) -> str:
+        token = f"\x00protected-{len(protected)}\x00"
+        protected.append(match.group(0))
+        return token
+
+    masked = MARKDOWN_INLINE_CODE.sub(stash, value)
+    masked = MARKDOWN_AUTOLINK.sub(stash, masked)
+    return masked, protected
+
+
+def _restore_markdown_angle_literals(value: str, protected: list[str]) -> str:
+    for index, original in enumerate(protected):
+        value = value.replace(f"\x00protected-{index}\x00", original)
+    return value
+
+
+def _contains_raw_html(value: str) -> bool:
+    masked, _ = _protect_markdown_angle_literals(value)
+    return bool(
+        HTML_COMMENT.search(masked)
+        or HTML_STANDARD_TAG.search(masked)
+        or HTML_CUSTOM_TAG_WITH_ATTRIBUTES.search(masked)
+    )
+
+
+def _strip_raw_html(value: str) -> str:
+    masked, protected = _protect_markdown_angle_literals(value)
+    masked = HTML_COMMENT.sub("", masked)
+    masked = HTML_STANDARD_TAG.sub("", masked)
+    masked = HTML_CUSTOM_TAG_WITH_ATTRIBUTES.sub("", masked)
+    return _restore_markdown_angle_literals(masked, protected)
+
+
 def _rendered_visible_text(value: str) -> str:
     visible = value
     for _ in range(4):
@@ -989,7 +1073,7 @@ def _rendered_visible_text(value: str) -> str:
             break
         visible = decoded
     visible = _replace_markdown_links(visible, include_url=False)
-    visible = HTML_MARKUP.sub("", visible)
+    visible = _strip_raw_html(visible)
     visible = unicodedata.normalize("NFKC", visible)
     visible = "".join(
         character for character in visible if not _is_default_ignorable(character)

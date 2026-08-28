@@ -157,6 +157,7 @@ class ResumeRewritePipeline:
         return self.codex_runner.available() and self.renderer.available()
 
     def _execute(self, run: dict, artifacts: RunArtifacts) -> dict:
+        database_failure = False
         try:
             artifacts = self._open_artifacts(run)
             materials = self._prepare(run, artifacts)
@@ -164,6 +165,8 @@ class ResumeRewritePipeline:
             self._fail_validation(run, artifacts)
             raise ValueError("rewrite input is invalid") from None
         except sqlite3.Error:
+            database_failure = True
+        if database_failure:
             return self._settle_database_failure(run, artifacts)
         if materials["preflight_blockers"]:
             return self._block_preflight(run, artifacts, materials)
@@ -175,6 +178,7 @@ class ResumeRewritePipeline:
         return self._run_with_materials(run, artifacts, materials)
 
     def _execute_running(self, run: dict, artifacts: RunArtifacts) -> dict:
+        database_failure = False
         try:
             artifacts = self._open_artifacts(run)
             materials = self._prepare(run, artifacts)
@@ -182,6 +186,8 @@ class ResumeRewritePipeline:
             self._fail_validation(run, artifacts)
             raise ValueError("rewrite input is invalid") from None
         except sqlite3.Error:
+            database_failure = True
+        if database_failure:
             return self._settle_database_failure(run, artifacts)
         return self._run_with_materials(run, artifacts, materials)
 
@@ -405,13 +411,33 @@ class ResumeRewritePipeline:
     def _settle_database_failure(
         self, run: dict, artifacts: RunArtifacts
     ) -> dict:
-        updated = self._fail(
-            run,
-            artifacts,
-            InvalidModelResult("database operation failed"),
-            error_code="DATABASE_ERROR",
-        )
-        return self._decorate_run(updated or run)
+        settlement_failed = False
+        try:
+            updated = self._fail(
+                run,
+                artifacts,
+                InvalidModelResult("database operation failed"),
+                error_code="DATABASE_ERROR",
+            )
+        except Exception:
+            settlement_failed = True
+            updated = None
+        if settlement_failed:
+            updated = self._authoritative_run(run["id"])
+        if updated is None:
+            raise ValueError("rewrite database is unavailable") from None
+        if updated["status"] not in {"QUEUED", "RUNNING"}:
+            return self._decorate_run(updated)
+        if (
+            run["status"] == "RUNNING"
+            and updated["status"] == "RUNNING"
+            and (
+                updated.get("owner_token") != run.get("owner_token")
+                or updated.get("lease_expires_at") != run.get("lease_expires_at")
+            )
+        ):
+            return self._decorate_run(updated)
+        raise ValueError("rewrite database is unavailable") from None
 
     def _fail(
         self, run: dict, artifacts: RunArtifacts, error: BaseException,

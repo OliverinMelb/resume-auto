@@ -8,8 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from pydantic import ValidationError
-
 from resume_agent.discovery_schemas import (
     DISCOVERY_RUN_ID_PATTERN,
     DISCOVERY_RUN_STATUSES,
@@ -34,7 +32,7 @@ def _validate_gap_acceptance_payload(
 ) -> GapAcceptanceRequest | None:
     try:
         return GapAcceptanceRequest.model_validate(payload)
-    except ValidationError:
+    except Exception:
         return None
 
 

@@ -610,6 +610,76 @@ class FactGateTests(unittest.TestCase):
                     [accepted_record(claim)],
                 )
 
+    def test_promoted_claim_policy_rejects_english_external_facts_by_word(self):
+        forbidden_claims = [
+            "Built the evaluator for a client",
+            "Delivered the customer integration",
+            "Implemented the company platform",
+            "Runs in production",
+            "Serves real users",
+            "Launched the Agent evaluator",
+            "Deployed the Agent evaluator",
+            "Built [the evaluator](https://example.test/%63%6C%69%65%6E%74)",
+        ]
+        for claim in forbidden_claims:
+            with self.subTest(claim=claim), self.assertRaises(InvalidModelResult):
+                validate_rewrite_facts(
+                    accepted_result(claim),
+                    self.resumes,
+                    self.jobs,
+                    [],
+                    [accepted_record(claim)],
+                )
+
+        safe_claims = [
+            "Implemented a client-side library",
+            "Added accompanying evaluator documentation",
+            "Implemented deployment planning",
+        ]
+        for claim in safe_claims:
+            with self.subTest(claim=claim):
+                gate = validate_rewrite_facts(
+                    accepted_result(claim),
+                    self.resumes,
+                    self.jobs,
+                    [],
+                    [accepted_record(claim)],
+                )
+                self.assertEqual(gate.blockers, [])
+
+    def test_promoted_claim_html_detection_preserves_code_generics_and_autolinks(self):
+        safe_claims = [
+            "Used List<Foo> in the local evaluator",
+            "Documented `<span data-mode=\"safe\">` parser behavior",
+            "See <https://example.test/evaluator> for local documentation",
+        ]
+        for claim in safe_claims:
+            with self.subTest(claim=claim):
+                gate = validate_rewrite_facts(
+                    accepted_result(claim),
+                    self.resumes,
+                    self.jobs,
+                    [],
+                    [accepted_record(claim)],
+                )
+                self.assertEqual(gate.blockers, [])
+
+        forbidden_claims = [
+            "<span>Implemented the local evaluator</span>",
+            "<!-- hidden -->Implemented the local evaluator",
+            '<x-evaluator data-mode="safe">Implemented locally</x-evaluator>',
+            "See <https://example.test/%63%6C%69%65%6E%74> for documentation",
+        ]
+        for claim in forbidden_claims:
+            with self.subTest(claim=claim), self.assertRaises(InvalidModelResult):
+                validate_rewrite_facts(
+                    accepted_result(claim),
+                    self.resumes,
+                    self.jobs,
+                    [],
+                    [accepted_record(claim)],
+                )
+
     def test_unaccepted_gap_cannot_be_promoted(self):
         with self.assertRaises(InvalidModelResult):
             validate_rewrite_facts(

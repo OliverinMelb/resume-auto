@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -31,6 +31,20 @@ def acceptance_payload(**changes):
     }
     payload.update(changes)
     return payload
+
+
+class CustomAcceptanceTimezone(tzinfo):
+    def __init__(self, offset=None, error=None):
+        self.offset = offset
+        self.error = error
+
+    def utcoffset(self, value):
+        if self.error is not None:
+            raise self.error
+        return self.offset
+
+    def dst(self, value):
+        return timedelta(0)
 
 
 class GapAcceptanceSchemaTests(unittest.TestCase):
@@ -398,6 +412,51 @@ class GapAcceptanceRepositoryTests(unittest.TestCase):
         self.assertSafeEvidenceError(
             captured.exception, "invalid gap acceptance evidence"
         )
+
+    def test_create_timezone_validation_catches_all_ordinary_exceptions_safely(self):
+        utc_value = datetime(
+            2026, 8, 26, 3, 0, tzinfo=CustomAcceptanceTimezone(timedelta(0))
+        )
+        accepted = self.repository.create_gap_acceptance(
+            self.candidate["id"],
+            acceptance_payload(completed_at=utc_value, confirmed_at=utc_value),
+        )
+        self.assertEqual(accepted["evidence"]["completed_at"], "2026-08-26T03:00:00Z")
+
+        invalid_values = [
+            datetime(
+                2026,
+                8,
+                26,
+                3,
+                0,
+                tzinfo=CustomAcceptanceTimezone(timedelta(hours=8)),
+            ),
+            datetime(
+                2026,
+                8,
+                26,
+                3,
+                0,
+                tzinfo=CustomAcceptanceTimezone(
+                    error=RuntimeError("TOP_SECRET timezone detail")
+                ),
+            ),
+        ]
+        for value in invalid_values:
+            with self.subTest(value_type=type(value.tzinfo).__name__):
+                payload = acceptance_payload(
+                    gap_id="gap-abcdef123456",
+                    completed_at=value,
+                    confirmed_at=value,
+                )
+                with self.assertRaises(ValueError) as captured:
+                    self.repository.create_gap_acceptance(
+                        self.candidate["id"], payload
+                    )
+                self.assertSafeEvidenceError(
+                    captured.exception, "invalid gap acceptance evidence"
+                )
 
     def test_additive_schema_migration_preserves_existing_candidate(self):
         migrated_path = Path(self.temp_dir.name) / "legacy.db"

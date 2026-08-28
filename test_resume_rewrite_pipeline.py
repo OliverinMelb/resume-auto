@@ -101,6 +101,20 @@ class AcceptanceLoadFailingRepository(Repository):
         )
 
 
+class AcceptanceLoadAndSettlementFailingRepository(AcceptanceLoadFailingRepository):
+    def transition_rewrite_run(self, run_id, expected_statuses, new_status, **changes):
+        if new_status == "FAILED":
+            raise sqlite3.OperationalError("TOP_SECRET queued settlement path")
+        return super().transition_rewrite_run(
+            run_id, expected_statuses, new_status, **changes
+        )
+
+    def fenced_rewrite_transition(self, run_id, **changes):
+        if changes["new_status"] == "FAILED":
+            raise sqlite3.OperationalError("TOP_SECRET running settlement path")
+        return super().fenced_rewrite_transition(run_id, **changes)
+
+
 class AcceptanceLoadOwnerHandoffRepository(AcceptanceLoadFailingRepository):
     def __init__(self, database_path):
         super().__init__(database_path)
@@ -124,6 +138,7 @@ class AcceptanceLoadOwnerHandoffRepository(AcceptanceLoadFailingRepository):
                 expected_owner_token=changes["expected_owner_token"],
                 expected_lease_expires_at=changes["expected_lease_expires_at"],
             )
+            raise sqlite3.OperationalError("TOP_SECRET handoff settlement path")
         return Repository.fenced_rewrite_transition(self, run_id, **changes)
 
 
@@ -432,6 +447,14 @@ class RewritePipelineTests(unittest.TestCase):
         return ResumeRewritePipeline(self.repository, self.runs_root,
                                      Path("resume_agent/codex_resume_result.schema.json"), Path.cwd(),
                                      runner, renderer)
+
+    def assertSafeDatabaseUnavailableError(self, error):
+        self.assertIs(type(error), ValueError)
+        self.assertEqual(str(error), "rewrite database is unavailable")
+        self.assertNotIn("TOP_SECRET", str(error))
+        self.assertNotIn("TOP_SECRET", repr(error))
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
 
     def test_ready_run_writes_all_official_artifacts(self):
         run = self.make_pipeline(FakeCodexRunner(result_for(self.resume["id"], self.job["id"])), FakeRenderer()).run(self.request())
@@ -1397,8 +1420,67 @@ class RewritePipelineTests(unittest.TestCase):
         self.assertEqual(run["status"], "RUNNING")
         self.assertEqual(run["owner_token"], repository.winner_owner)
         self.assertEqual(run["lease_expires_at"], repository.winner_lease)
+        self.assertNotIn("TOP_SECRET", str(run))
         winner_pdf = Path(run["artifact_dir"]) / "resume.pdf"
         self.assertEqual(winner_pdf.read_bytes(), b"%PDF-winner")
+        self.assertNotIn(
+            "RUN_FAILED",
+            [event["event_code"] for event in self._audit_events(run)],
+        )
+
+    def test_queued_acceptance_load_and_settlement_failure_is_safe_and_nonterminal(self):
+        repository = AcceptanceLoadAndSettlementFailingRepository(
+            self.repository.database_path
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+
+        with self.assertRaises(ValueError) as captured:
+            pipeline.run(self.request())
+
+        self.assertSafeDatabaseUnavailableError(captured.exception)
+        run = self._latest_run()
+        self.assertEqual((run["status"], run["error_code"]), ("QUEUED", None))
+        self.assertEqual(
+            [event["event_code"] for event in self._audit_events(run)],
+            ["RUN_CREATED"],
+        )
+
+    def test_running_acceptance_load_and_settlement_failure_is_safe_and_nonterminal(self):
+        first = self.make_pipeline(
+            FakeCodexRunner(metric_result(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        ).run(self.request())
+        answer = confirmed_answer(
+            question_id=first["blocking_questions"][0]["question_id"],
+            answer="Completed 86 of 100 fixed regression runs; 86/100.",
+            source_note="Local regression record confirmed by the candidate.",
+        )
+        repository = AcceptanceLoadAndSettlementFailingRepository(
+            self.repository.database_path
+        )
+        pipeline = ResumeRewritePipeline(
+            repository,
+            self.runs_root,
+            Path("resume_agent/codex_resume_result.schema.json"),
+            Path.cwd(),
+            FakeCodexRunner(result_for(self.resume["id"], self.job["id"])),
+            FakeRenderer(),
+        )
+
+        with self.assertRaises(ValueError) as captured:
+            pipeline.resume(first["id"], [answer])
+
+        self.assertSafeDatabaseUnavailableError(captured.exception)
+        run = self.repository.get_rewrite_run(first["id"])
+        self.assertEqual((run["status"], run["error_code"]), ("RUNNING", None))
+        self.assertIsNotNone(run["owner_token"])
         self.assertNotIn(
             "RUN_FAILED",
             [event["event_code"] for event in self._audit_events(run)],
